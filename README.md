@@ -248,7 +248,7 @@ Claude Code
 | A/B 回答质量提升 | +68%（3.55 vs 2.12 分） |
 | Session Recall@3 | 94.2% |
 | 知识库规模 | 409 chunks / 8 类型 |
-| 测试覆盖 | 549+ tests |
+| 测试覆盖 | 765+ tests |
 
 ---
 
@@ -323,7 +323,11 @@ mkdir -p ~/.claude/memory-os
 
 ### 验证安装
 
+以下命令均需在项目根目录下运行：
+
 ```bash
+cd /path/to/memory-os
+
 # 验证 loader（SessionStart）
 echo '{"session_id":"test","transcript_path":"/dev/null","cwd":"'$(pwd)'"}' \
   | python3 hooks/loader.py
@@ -337,8 +341,11 @@ echo '{"session_id":"test","prompt":"test query","cwd":"'$(pwd)'"}' \
 # 验证 daemon 已在运行
 ls /tmp/memory-os-retriever.sock && echo "daemon running"
 
-# 运行测试套件
+# 运行测试套件（pytest.ini 已配置 testpaths=tests）
 python3 -m pytest -q --tb=short
+
+# 运行单个测试
+python3 -m pytest tests/test_00_tmpfs.py -v
 ```
 
 ### daemon 管理
@@ -353,6 +360,38 @@ tail -f ~/.claude/memory-os/daemon.log
 pkill -f retriever_daemon.py
 
 # daemon 会在下次 retriever_wrapper.sh 调用时自动重新启动
+```
+
+---
+
+### 持续迭代（可选）
+
+```bash
+# 设置必填环境变量
+export FEISHU_DOC="your-feishu-doc-id"
+
+# 启动通用迭代（后台运行）
+nohup bash iterate.sh >> /tmp/memory-os-iterate.log 2>&1 &
+
+# 启动虚拟内存迭代
+nohup bash iterate-vm.sh >> /tmp/memory-os-vm.log 2>&1 &
+```
+
+**环境变量**：
+- `FEISHU_DOC`：飞书文档 ID（必填），用于记录迭代结果
+- `PROJECT_MD`：项目状态文件（可选，默认 `$HOME/self-improving/projects/memory-os.md`）
+- `WORKSPACE`：工作目录（可选，默认自动从脚本位置推导）
+
+### GitHub 同步（可选）
+
+如需同时推送到 GitHub，先一次性配置身份：
+
+```bash
+git config push-github.name  "your-github-username"
+git config push-github.email "your@gmail.com"
+
+# 之后每次同步
+bash push-github.sh
 ```
 
 ---

@@ -145,9 +145,9 @@ Stop ─────────────────────────
   stop_coalesced.js        → 批量 Stop 事件合并处理
 
 PreCompact / PostCompact ────────────────────────────────────────
-  save-task-state.py       → 压缩前保存任务状态
-  pre-compact.js (ECC)     → ECC 压缩前处理
-  resume-task-state.py     → 压缩后恢复任务状态
+  [计划中] save-task-state.py   → 压缩前保存任务状态
+  [计划中] pre-compact.js (ECC) → ECC 压缩前处理
+  [计划中] resume-task-state.py → 压缩后恢复任务状态
 ```
 
 ---

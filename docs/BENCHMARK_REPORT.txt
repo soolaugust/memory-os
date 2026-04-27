@@ -232,8 +232,8 @@ MEMORY OS SWAP RECOVERY BENCHMARK REPORT
 测试数据清单
 ================================================================================
 
-保存位置: /home/mi/.claude/memory-os/store.db
-Benchmark 结果: /home/mi/ssd/codes/claude-workspace/aios/memory-os/swap_recovery_benchmark.json
+保存位置: ~/.claude/memory-os/store.db
+Benchmark 结果: tests/eval/swap_recovery_benchmark.json
 
 生产环境数据统计:
   - memory_chunks 表: 42 行
@@ -244,5 +244,5 @@ Benchmark 结果: /home/mi/ssd/codes/claude-workspace/aios/memory-os/swap_recove
 
 ================================================================================
 报告生成时间: 2026-04-19T06:33:41+00:00
-Benchmark 脚本: /home/mi/ssd/codes/claude-workspace/aios/memory-os/eval_swap_recovery.py
+Benchmark 脚本: tests/eval/eval_swap_recovery.py
 ================================================================================
