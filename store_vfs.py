@@ -107,6 +107,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             duration_ms REAL DEFAULT 0
         )
     """)
+    # iter259: agent_id — 多 Agent 隔离（session_id 前16字符派生）
+    _safe_add_column(conn, "recall_traces", "agent_id", "TEXT DEFAULT ''")
     # 迭代65：ftrace_json — 阶段级性能追踪数据（JSON）
     _safe_add_column(conn, "recall_traces", "ftrace_json", "TEXT")
 
@@ -643,6 +645,74 @@ def _ensure_fts5(conn: sqlite3.Connection) -> None:
             error        TEXT
         )
     """)
+    # iter259: agent_id 维度
+    _safe_add_column(conn, "hook_txn_log", "agent_id", "TEXT DEFAULT ''")
+
+    # ── iter259：session_intents 表 — 替代单文件 session_intent.json（并发安全）──
+    # 多 Agent 场景下，session_intent.json 是单文件，最后写者覆盖之前写者。
+    # 改为 DB 表，每个 session_id 独立一行，互不干扰。
+    # OS 类比：per-process /proc/PID/status，而不是全局单文件 /proc/intent
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS session_intents (
+            session_id   TEXT PRIMARY KEY,
+            project      TEXT NOT NULL DEFAULT '',
+            agent_id     TEXT NOT NULL DEFAULT '',
+            saved_at     TEXT NOT NULL,
+            intent_json  TEXT NOT NULL DEFAULT '{}',
+            pinned_chunk_ids TEXT NOT NULL DEFAULT '[]'
+        )
+    """)
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_si_project ON session_intents(project)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_si_saved ON session_intents(saved_at DESC)")
+    except Exception:
+        pass
+
+    # ── iter259：shadow_traces 表 — 替代单文件 .shadow_trace.json（并发安全）──
+    # 多 Agent 场景下，.shadow_trace.json 是单文件，并发写入会相互覆盖。
+    # OS 类比：per-process page table，而不是共享全局 page table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS shadow_traces (
+            session_id   TEXT PRIMARY KEY,
+            project      TEXT NOT NULL DEFAULT '',
+            agent_id     TEXT NOT NULL DEFAULT '',
+            updated_at   TEXT NOT NULL,
+            top_k_ids    TEXT NOT NULL DEFAULT '[]'
+        )
+    """)
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sht_project ON shadow_traces(project)")
+    except Exception:
+        pass
+
+    # ── iter259：tool_patterns — 工具调用序列学习（OS 类比：perf_event ring buffer）──
+    # extractor 写入 tool_patterns，retriever 查询，但之前 ensure_schema 未创建该表。
+    # 修复：在此统一创建，防止悬空查询（OperationalError: no such table）。
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS tool_patterns (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            pattern_hash    TEXT UNIQUE,
+            tool_sequence   TEXT NOT NULL,
+            context_keywords TEXT DEFAULT '[]',
+            frequency       INTEGER DEFAULT 1,
+            avg_duration_ms REAL DEFAULT 0,
+            success_rate    REAL DEFAULT 1.0,
+            first_seen      TEXT,
+            last_seen       TEXT,
+            project         TEXT
+        )
+    """)
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tp_project ON tool_patterns(project)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tp_hash ON tool_patterns(pattern_hash)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tp_freq ON tool_patterns(frequency DESC)")
+    except Exception:
+        pass
+
+    # ── iter259：entity_edges 补充 agent_id 复合唯一约束 ──
+    # 多 Agent 场景下同一实体对可被不同 agent 提取，需按 agent 隔离唯一性
+    _safe_add_column(conn, "entity_edges", "agent_id", "TEXT DEFAULT ''")
+
     conn.commit()
 
 def _fts5_escape(query: str) -> str:
@@ -1884,6 +1954,11 @@ def evict_lowest_retention(conn: sqlite3.Connection, project: str,
     candidate_limit = max(count * 5, 50)
     # 迭代44：MGLRU — 优先从最老代淘汰（gen DESC），同代内按 importance/recency 排序
     # 迭代301：加入 stability 和 info_class
+    # iter_multiagent P1：排除最近 10 分钟内写入的 chunk（cross-agent grace period）。
+    # 根因：多 agent 共享同一 project 时，Agent B 的 kswapd 可能淘汰 Agent A 刚写入的
+    # 低 retention 新 chunk（如 conversation_summary，importance=0.65）。
+    # 修复：created_at >= datetime('now', '-10 minutes') 的 chunk 不参与 kswapd 硬淘汰。
+    # OS 类比：Linux cgroup v2 memory.min — 保护新分配的页面不在 grace period 内被回收。
     rows = conn.execute(
         f"""SELECT id, importance, last_accessed, COALESCE(access_count, 0),
                    COALESCE(oom_adj, 0), COALESCE(lru_gen, 0),
@@ -1891,6 +1966,7 @@ def evict_lowest_retention(conn: sqlite3.Connection, project: str,
             FROM memory_chunks
             WHERE project=? AND chunk_type NOT IN ({protect_placeholders})
               AND COALESCE(oom_adj, 0) > -1000
+              AND (created_at IS NULL OR datetime(created_at) < datetime('now', '-10 minutes'))
             ORDER BY COALESCE(lru_gen, 0) DESC, importance ASC, last_accessed ASC
             LIMIT ?""",
         (project, *protect_types, candidate_limit),

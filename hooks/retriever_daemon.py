@@ -1001,6 +1001,7 @@ OS 类比：Linux init/systemd — 常驻进程，不在每次 hook 调用时重
 """
 import sys
 import os
+import glob as _glob  # iter259: per-session page_fault_log glob
 import json
 import socket
 import threading
@@ -1578,16 +1579,18 @@ def _load_all_modules():
                 _terms = result.split(' OR ')
                 if len(_terms) > MAX_FTS5_TERMS:
                     result = ' OR '.join(_terms[:MAX_FTS5_TERMS])
-            if len(_fts5_expr_cache) >= _FTS5_EXPR_CACHE_MAX:
-                # FIFO eviction (简单，daemon 生命周期短)
-                try:
-                    del _fts5_expr_cache[next(iter(_fts5_expr_cache))]
-                except StopIteration:
-                    pass
-            # iter215: store (expr, crc32) pair — pre-compute crc32 at write time (once)
-            # instead of re-computing it on every FTS result cache lookup (every request)
-            _result_crc = zlib.crc32(result.encode()) if result else 0
-            _fts5_expr_cache[query_str] = (result, _result_crc)
+            # iter_multiagent: Lock 保护 len()+del+assign 复合操作，防止并发 FIFO 淘汰时
+            # RuntimeError: dictionary changed size during iteration
+            with _fts5_expr_cache_lock:
+                if len(_fts5_expr_cache) >= _FTS5_EXPR_CACHE_MAX:
+                    try:
+                        del _fts5_expr_cache[next(iter(_fts5_expr_cache))]
+                    except (StopIteration, KeyError):
+                        pass
+                # iter215: store (expr, crc32) pair — pre-compute crc32 at write time (once)
+                # instead of re-computing it on every FTS result cache lookup (every request)
+                _result_crc = zlib.crc32(result.encode()) if result else 0
+                _fts5_expr_cache[query_str] = (result, _result_crc)
             return result
         _store_vfs._fts5_escape = _cached_fts5_escape
         print(f"[retriever_daemon] fts5_expr_cache+term_cap({MAX_FTS5_TERMS}) patched", file=sys.stderr)
@@ -1730,12 +1733,14 @@ def _load_all_modules():
             _expr_pair_post = _fts5_expr_cache.get(query)
             if _expr_pair_post is not None:
                 _cache_key2 = (_expr_pair_post[1], project, top_k, chunk_types)  # [1] = crc32
-                if len(_fts5_result_cache) >= _FTS5_RESULT_CACHE_MAX:
-                    try:
-                        del _fts5_result_cache[next(iter(_fts5_result_cache))]
-                    except StopIteration:
-                        pass
-                _fts5_result_cache[_cache_key2] = (_cur_cv, _results)
+                # iter_multiagent: Lock 保护 FIFO 淘汰复合操作
+                with _fts5_result_cache_lock:
+                    if len(_fts5_result_cache) >= _FTS5_RESULT_CACHE_MAX:
+                        try:
+                            del _fts5_result_cache[next(iter(_fts5_result_cache))]
+                        except (StopIteration, KeyError):
+                            pass
+                    _fts5_result_cache[_cache_key2] = (_cur_cv, _results)
             return _results
         _store_vfs_mod.fts_search = _cached_fts_search
         # update _modules reference so _retriever_main_impl uses the patched version
@@ -1877,6 +1882,12 @@ _VFS_CACHE_MAX = 64  # 最多缓存 64 个不同 query（daemon 60s 内不会超
 #   预期节省：~0.22ms/request（command 频繁重复时）
 _fts5_expr_cache: dict = {}  # query_str → fts5_match_expr
 _FTS5_EXPR_CACHE_MAX = 128  # daemon 60s 内不超过此数量的不同 query
+# iter_multiagent: threading.Lock 保护 FIFO 淘汰的 len()+del+assign 复合操作。
+# OS 类比：spinlock 保护 CPU L1 cache 替换逻辑 — 单次 dict.get/set 在 GIL 下原子，
+#   但 len()→del→assign 三步复合操作不原子：两线程同时判断 len()>=MAX 后都执行 del，
+#   可导致 RuntimeError: dictionary changed size during iteration（iter(dict) 期间被修改）。
+import threading as _threading_cache  # 避免与顶层 threading 导入冲突
+_fts5_expr_cache_lock = _threading_cache.Lock()
 
 # ── iter205: FTS5 result cache ───────────────────────────────────────────────
 # OS 类比：Linux buffer cache (block I/O cache) — 同一 block 编号（fts_expr + project）
@@ -1888,11 +1899,12 @@ _FTS5_EXPR_CACHE_MAX = 128  # daemon 60s 内不超过此数量的不同 query
 #   cache hit: dict lookup(0.1us) + version check(0.3us) ≈ 0.4us（vs fts_search 0.617ms）。
 #   cache miss: 正常 fts_search() → 写回缓存（0.617ms，无额外开销）。
 #   内存：64 entries × 10 results × ~500B = ~320KB（可忽略）。
-#   线程安全：CPython GIL 保证 dict 读写原子，同 _sched_ext_cache/_vfs_result_cache。
+#   线程安全：FIFO 淘汰复合操作用 _fts5_result_cache_lock 保护（同 _fts5_expr_cache_lock）。
 #   注意：fts_search 使用 persistent ro conn（iter173），chunk_version 失效时 ro conn 也会重建。
 #         两个失效机制独立，FTS result cache 以 _read_chunk_version_cached() 作为单一 version 源。
 _fts5_result_cache: dict = {}  # (crc32(fts_expr), project) → (chunk_version, results_list)
 _FTS5_RESULT_CACHE_MAX = 64  # FIFO eviction（与 _vfs_result_cache 同策略）
+_fts5_result_cache_lock = _threading_cache.Lock()
 
 # ── iter180: FTS5 term cap ───────────────────────────────────────────────
 # OS 类比：TCP send window — 限制在途数据量，防止过度消耗网络/CPU 资源。
@@ -2482,7 +2494,8 @@ def _run_retrieval(hook_input: dict):
 
     # ── Stage 0: SKIP ──
     # iter189: has_page_fault_file 计算一次，传给 Stage2（消除 _retriever_main_impl 第二次 exists）
-    has_page_fault_file = os.path.exists(PAGE_FAULT_LOG)
+    # iter259: 改为 glob 检查，支持 per-session 文件 page_fault_log*.json
+    has_page_fault_file = bool(_glob.glob(os.path.join(MEMORY_OS_DIR, "page_fault_log*.json")))
     if not has_page_fault_file:
         if _vdso_is_skip(prompt) and not _vdso_has_tech(prompt):
             return  # SKIP: 无输出，退出
@@ -2584,43 +2597,78 @@ def _read_page_fault_log(limit: int = 5, file_exists: bool = None) -> list:
     # OS 类比：register passing — Stage1 已检查的 inode existence 直接传入，跳过重复 stat
     if file_exists is False:
         return []
-    # iter203: mtime_ns cache — same mtime = already consumed = return []
-    # OS 类比：inode cache + dirty writeback — 命中时 stat(~3us) + list lookup(0us)，
-    #   跳过 file read(0.034ms) + file write(0.441ms P50, ~15ms P90)
+    # iter259: glob all page_fault_log*.json (per-session + legacy)
+    # OS 类比：/proc/*/pagemap glob — 合并所有进程的缺页记录
+    _pfl_files = sorted(_glob.glob(os.path.join(MEMORY_OS_DIR, "page_fault_log*.json")))
+    if not _pfl_files:
+        return []
+    # iter203: mtime_ns cache — use max mtime across all files as cache key
+    # Any new write (to any session file) will change max-mtime → cache miss
     try:
-        mtime_ns = os.stat(PAGE_FAULT_LOG).st_mtime_ns
+        max_mtime_ns = max(os.stat(p).st_mtime_ns for p in _pfl_files)
     except OSError:
         return []
     _pf_entry = _page_fault_cache[0]
-    if _pf_entry is not None and _pf_entry[0] == mtime_ns:
-        return []  # already consumed this file revision — same mtime = same content
-    # cache miss: read and extract unresolved queries
+    if _pf_entry is not None and _pf_entry[0] == max_mtime_ns:
+        return []  # already consumed this set of files — same max_mtime = same content
+    # cache miss: read and merge all per-session files
     try:
-        with open(PAGE_FAULT_LOG, encoding="utf-8") as _f:
-            entries = json.loads(_f.read())
-        if not entries:
-            _page_fault_cache[0] = (mtime_ns, [])
+        merged_index = {}  # q_key → entry (merge by query dedup, max fault_count wins)
+        files_with_entries = {}  # file_path → entries (for writeback)
+        for _pfl_path in _pfl_files:
+            try:
+                with open(_pfl_path, encoding="utf-8") as _f:
+                    file_entries = json.loads(_f.read())
+                if not isinstance(file_entries, list):
+                    continue
+                files_with_entries[_pfl_path] = file_entries
+                for e in file_entries:
+                    if not isinstance(e, dict) or "query" not in e:
+                        continue
+                    q_key = e["query"].lower().strip()
+                    existing = merged_index.get(q_key)
+                    if existing is None:
+                        merged_index[q_key] = dict(e)
+                    else:
+                        # Take max fault_count, take latest ts
+                        existing["fault_count"] = max(
+                            existing.get("fault_count", 1),
+                            e.get("fault_count", 1)
+                        )
+                        if e.get("ts", "") > existing.get("ts", ""):
+                            existing["ts"] = e["ts"]
+                        # If any copy is unresolved, treat as unresolved
+                        if not e.get("resolved", False):
+                            existing["resolved"] = False
+            except Exception:
+                continue
+
+        if not merged_index:
+            _page_fault_cache[0] = (max_mtime_ns, [])
             return []
-        unresolved = [e for e in entries if isinstance(e, dict) and "query" in e
-                      and not e.get("resolved", False)]
+        unresolved = [e for e in merged_index.values() if not e.get("resolved", False)]
         unresolved.sort(key=lambda e: e.get("fault_count", 1), reverse=True)
         queries = [e["query"] for e in unresolved[:limit]]
         # iter203: mark consumed in daemon memory (skip critical-path file write)
-        # file write ("resolved" flag) is deferred to writeback thread
-        _page_fault_cache[0] = (mtime_ns, queries)
+        _page_fault_cache[0] = (max_mtime_ns, queries)
         if queries:
             # Defer resolved-flag write to background (pdflush analogy)
+            # Write back to each individual session file
             consumed_queries = set(q.lower().strip() for q in queries)
-            _entries_copy = entries  # reference, not deep copy (safe: entries is local)
-            def _do_pfl_writeback(_consumed=consumed_queries, _entries=_entries_copy):
-                try:
-                    for e in _entries:
-                        if isinstance(e, dict) and e.get("query", "").lower().strip() in _consumed:
-                            e["resolved"] = True
-                    with open(PAGE_FAULT_LOG, 'w', encoding="utf-8") as _f:
-                        _f.write(json.dumps(_entries, ensure_ascii=False, indent=2))
-                except Exception:
-                    pass
+            _files_snapshot = dict(files_with_entries)
+            def _do_pfl_writeback(_consumed=consumed_queries, _files=_files_snapshot):
+                for _fp, _entries in _files.items():
+                    try:
+                        _changed = False
+                        for e in _entries:
+                            if isinstance(e, dict) and e.get("query", "").lower().strip() in _consumed:
+                                e["resolved"] = True
+                                _changed = True
+                        if _changed:
+                            with open(_fp, 'w', encoding="utf-8") as _f:
+                                _f.write(json.dumps(_entries, ensure_ascii=False, indent=2))
+                    except Exception:
+                        pass
             _writeback_submit(_do_pfl_writeback)
         return queries
     except Exception:
@@ -3949,13 +3997,50 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
 
 
 def _write_shadow_trace(project: str, top_k_ids: list, session_id: str = "") -> None:
+    """
+    iter259：写入 shadow trace — 记录本次 retriever 注入的 chunk IDs。
+    优先写入 shadow_traces DB 表（per-session 行，并发安全），
+    同时保留旧文件写入作为向后兼容 fallback。
+    """
+    from datetime import datetime, timezone
+    now_iso = datetime.now(timezone.utc).isoformat()
+    _agent_id = session_id[:16] if session_id else ""
+
+    # 优先写 DB（INSERT OR REPLACE by session_id PRIMARY KEY，并发安全）
+    # iter259：使用 WAL 模式 + 30s timeout，多 agent 并发写入时减少 SQLITE_BUSY 错误
+    try:
+        import sqlite3 as _sqlite3
+        _db_path = STORE_DB
+        _conn = _sqlite3.connect(_db_path, timeout=30)  # iter259: 30s timeout for multi-agent contention
+        _conn.execute("PRAGMA journal_mode=WAL")  # iter259: WAL 允许并发读写，减少锁冲突
+        _conn.execute("""
+            CREATE TABLE IF NOT EXISTS shadow_traces (
+                session_id   TEXT PRIMARY KEY,
+                project      TEXT NOT NULL DEFAULT '',
+                agent_id     TEXT NOT NULL DEFAULT '',
+                updated_at   TEXT NOT NULL,
+                top_k_ids    TEXT NOT NULL DEFAULT '[]'
+            )
+        """)
+        _conn.execute(
+            """INSERT OR REPLACE INTO shadow_traces
+               (session_id, project, agent_id, updated_at, top_k_ids)
+               VALUES (?, ?, ?, ?, ?)""",
+            (session_id or "unknown", project, _agent_id, now_iso,
+             json.dumps(top_k_ids, ensure_ascii=False))
+        )
+        _conn.commit()
+        _conn.close()
+    except Exception:
+        pass
+
+    # 兼容旧文件（向后兼容，供旧版 extractor 读取）
     try:
         with open(SHADOW_TRACE_FILE, 'w', encoding="utf-8") as _f:
-            from datetime import datetime, timezone
             _f.write(json.dumps({
                 "project": project, "top_k_ids": top_k_ids,
                 "session_id": session_id,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": now_iso,
             }, ensure_ascii=False))
     except Exception:
         pass

@@ -419,7 +419,35 @@ def main():
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "source": "session_start_readahead",
                 }
-                _shadow_file = MEMORY_OS_DIR / ".shadow_trace.json"
+                # iter259: 写入 shadow_traces DB 表（per-session 隔离，替代全局文件）
+                # OS 类比：/proc/PID/maps — 每进程独立，不同进程间不互相覆盖
+                try:
+                    _sh_conn = open_db()
+                    ensure_schema(_sh_conn)
+                    _sh_conn.execute("""
+                        CREATE TABLE IF NOT EXISTS shadow_traces (
+                            session_id   TEXT PRIMARY KEY,
+                            project      TEXT NOT NULL DEFAULT '',
+                            agent_id     TEXT NOT NULL DEFAULT '',
+                            updated_at   TEXT NOT NULL,
+                            top_k_ids    TEXT NOT NULL DEFAULT '[]'
+                        )
+                    """)
+                    _sh_conn.execute(
+                        "INSERT OR REPLACE INTO shadow_traces "
+                        "(session_id, project, agent_id, updated_at, top_k_ids) VALUES (?,?,?,?,?)",
+                        (_session_id, project, _session_id[:16],
+                         datetime.now(timezone.utc).isoformat(),
+                         json.dumps(_ws_ids, ensure_ascii=False))
+                    )
+                    _sh_conn.commit()
+                    _sh_conn.close()
+                except Exception:
+                    pass
+                # 向后兼容：写入 per-session 文件（替代全局 .shadow_trace.json）
+                # 全局文件已废弃（多 agent 并发时最后写者覆盖之前写者）
+                _sid_tag = _session_id[:16] if _session_id else "unknown"
+                _shadow_file = MEMORY_OS_DIR / f".shadow_trace.{_sid_tag}.json"
                 _shadow_file.write_text(
                     json.dumps(_shadow_data, ensure_ascii=False),
                     encoding="utf-8"
@@ -443,33 +471,59 @@ def main():
     # ── 迭代110 P2: CRIU Session Intent Restore ──────────────────────────────
     # OS 类比：CRIU restore_task() — 从 dump 文件恢复进程的执行断点状态
     # 读取上一个 session Stop 时保存的 incomplete intent，注入到新 session
+    # iter259：优先从 session_intents DB 表读取最近一条（兼容旧文件 fallback）
     try:
-        _intent_file = MEMORY_OS_DIR / "session_intent.json"
-        if _intent_file.exists():
-            _intent_data = json.loads(_intent_file.read_text(encoding="utf-8"))
-            _intent = _intent_data.get("intent", {})
-            # 只注入距今 < 24h 的 intent（过期的无意义）
-            _saved_at = _intent_data.get("saved_at", "")
-            _intent_age = float("inf")
-            if _saved_at:
-                try:
-                    import datetime as _dt
-                    _saved_dt = _dt.datetime.fromisoformat(_saved_at)
-                    if _saved_dt.tzinfo is None:
-                        _saved_dt = _saved_dt.replace(tzinfo=_dt.timezone.utc)
-                    _intent_age = (_dt.datetime.now(_dt.timezone.utc) - _saved_dt).total_seconds()
-                except Exception:
-                    pass
-            if _intent and _intent_age < 86400:  # 24h
-                _intent_lines = ["【上次会话断点（CRIU恢复）】"]
-                if _intent.get("next_actions"):
-                    _intent_lines.append("  待执行：" + " / ".join(_intent["next_actions"][:2]))
-                if _intent.get("open_questions"):
-                    _intent_lines.append("  待验证：" + " / ".join(_intent["open_questions"][:2]))
-                if _intent.get("partial_work"):
-                    _intent_lines.append("  进行中：" + " / ".join(_intent["partial_work"][:2]))
-                if len(_intent_lines) > 1:
-                    lines.extend(_intent_lines)
+        import datetime as _dt
+        _intent = {}
+        _saved_at = ""
+        _intent_loaded = False
+
+        # 优先从 DB 读取（查最近一条 intent，同 project，按 saved_at 降序）
+        try:
+            from store import open_db as _open_db2, ensure_schema as _ensure2
+            _ldr_conn = _open_db2()
+            _ensure2(_ldr_conn)
+            _intent_row = _ldr_conn.execute(
+                """SELECT intent_json, saved_at FROM session_intents
+                   WHERE project=? ORDER BY saved_at DESC LIMIT 1""",
+                (project,)
+            ).fetchone()
+            _ldr_conn.close()
+            if _intent_row:
+                _intent = json.loads(_intent_row[0] or "{}")
+                _saved_at = _intent_row[1] or ""
+                _intent_loaded = True
+        except Exception:
+            pass
+
+        # Fallback：旧 session_intent.json 文件
+        if not _intent_loaded:
+            _intent_file = MEMORY_OS_DIR / "session_intent.json"
+            if _intent_file.exists():
+                _intent_data = json.loads(_intent_file.read_text(encoding="utf-8"))
+                _intent = _intent_data.get("intent", {})
+                _saved_at = _intent_data.get("saved_at", "")
+
+        # 只注入距今 < 24h 的 intent（过期的无意义）
+        _intent_age = float("inf")
+        if _saved_at:
+            try:
+                _saved_dt = _dt.datetime.fromisoformat(_saved_at)
+                if _saved_dt.tzinfo is None:
+                    _saved_dt = _saved_dt.replace(tzinfo=_dt.timezone.utc)
+                _intent_age = (_dt.datetime.now(_dt.timezone.utc) - _saved_dt).total_seconds()
+            except Exception:
+                pass
+        if _intent and _intent_age < 86400:  # 24h
+            _intent_lines = ["【上次会话断点（CRIU恢复）】"]
+            if _intent.get("next_actions"):
+                _intent_lines.append("  待执行：" + " / ".join(_intent["next_actions"][:2]))
+            if _intent.get("open_questions"):
+                _intent_lines.append("  待验证：" + " / ".join(_intent["open_questions"][:2]))
+            if _intent.get("partial_work"):
+                _intent_lines.append("  进行中：" + " / ".join(_intent["partial_work"][:2]))
+            if len(_intent_lines) > 1:
+                lines.extend(_intent_lines)
     except Exception:
         pass  # intent 恢复失败不影响主流程
 

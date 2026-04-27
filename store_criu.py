@@ -106,8 +106,9 @@ def checkpoint_dump(conn: sqlite3.Connection, project: str, session_id: str,
         json.dumps(chunk_snapshots, ensure_ascii=False),
     ))
 
-    # FIFO 淘汰：保留最新 N 个 checkpoint（per-project）
-    cleaned = _checkpoint_cleanup(conn, project)
+    # FIFO 淘汰：保留最新 N 个 checkpoint（per-project per-session）
+    # iter259：传入 session_id 激活 per-agent 隔离
+    cleaned = _checkpoint_cleanup(conn, project, session_id=session_id)
 
     return {"checkpoint_id": checkpoint_id, "saved_ids": len(unique_ids), "cleaned": cleaned}
 
@@ -256,21 +257,31 @@ def checkpoint_restore(conn: sqlite3.Connection, project: str) -> Optional[dict]
     }
 
 
-def _checkpoint_cleanup(conn: sqlite3.Connection, project: str) -> int:
+def _checkpoint_cleanup(conn: sqlite3.Connection, project: str,
+                        session_id: str = "") -> int:
     """
-    CRIU checkpoint FIFO 淘汰 — 保留最新 N 个 per-project。
+    CRIU checkpoint FIFO 淘汰 — 保留最新 N 个 per-project per-session。
+    iter259：按 session_id 隔离，防止 Agent-A 的旧 checkpoint 被 Agent-B 淘汰。
     OS 类比：CRIU 的 --leave-running + pre-dump 链清理。
     """
     from config import get as _sysctl
 
     max_checkpoints = _sysctl("criu.max_checkpoints")
 
-    # 获取该项目所有 checkpoint（按时间降序）
-    rows = conn.execute("""
-        SELECT id FROM checkpoints
-        WHERE project = ?
-        ORDER BY created_at DESC
-    """, (project,)).fetchall()
+    # iter259：优先按 session_id 清理（per-agent 隔离）
+    if session_id:
+        rows = conn.execute("""
+            SELECT id FROM checkpoints
+            WHERE project = ? AND session_id = ?
+            ORDER BY created_at DESC
+        """, (project, session_id)).fetchall()
+    else:
+        # fallback：按 project 全量清理（旧行为）
+        rows = conn.execute("""
+            SELECT id FROM checkpoints
+            WHERE project = ?
+            ORDER BY created_at DESC
+        """, (project,)).fetchall()
 
     if len(rows) <= max_checkpoints:
         return 0

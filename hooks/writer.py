@@ -137,14 +137,21 @@ def _detect_context_pressure(hook_input: dict) -> dict:
         elif usage_pct >= _CTX_WARN_THRESHOLD:
             result["pressure"] = "warn"
 
-        # 持久化压力状态
+        # 持久化压力状态（iter259: per-session 文件，避免多 agent 互相覆盖）
+        # OS 类比：/proc/PID/status — 每进程独立文件，不同进程间不干扰
         try:
-            _CTX_PRESSURE_STATE.write_text(json.dumps({
+            _sid = hook_input.get("session_id", "")
+            _sid_tag = _sid[:16] if (_sid and _sid != "unknown") else ""
+            if _sid_tag:
+                _ctx_pressure_file = MEMORY_OS_DIR / f"ctx_pressure_state.{_sid_tag}.json"
+            else:
+                _ctx_pressure_file = _CTX_PRESSURE_STATE  # 向后兼容
+            _ctx_pressure_file.write_text(json.dumps({
                 "pressure": result["pressure"],
                 "usage_pct": round(usage_pct, 3),
                 "transcript_chars": ctx_chars,
                 "updated_at": _now_iso(),
-                "session_id": hook_input.get("session_id", ""),
+                "session_id": _sid,
             }, ensure_ascii=False))
         except Exception:
             pass
@@ -609,11 +616,17 @@ def _detect_and_persist_goal(prompt: str, project: str, session_id: str) -> bool
         existing = conn.execute(
             "SELECT id FROM goals WHERE id = ?", [goal_id]
         ).fetchone()
+        # iter_multiagent P2：添加 last_progress_session 列（幂等）
+        try:
+            conn.execute("ALTER TABLE goals ADD COLUMN last_progress_session TEXT DEFAULT ''")
+        except Exception:
+            pass  # 列已存在时静默跳过
         if not existing:
             conn.execute("""
                 INSERT INTO goals (id, title, description, status, progress,
-                                   created_at, updated_at, project, tags)
-                VALUES (?, ?, ?, 'active', 0.0, ?, ?, ?, ?)
+                                   created_at, updated_at, project, tags,
+                                   last_progress_session)
+                VALUES (?, ?, ?, 'active', 0.0, ?, ?, ?, ?, '')
             """, [goal_id, goal_summary, prompt[:500], now, now, project,
                   json.dumps(["user_goal", project])])
             dmesg_log(conn, DMESG_INFO, "writer",

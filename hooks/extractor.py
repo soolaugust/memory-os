@@ -1514,10 +1514,20 @@ def _write_page_fault_log(candidates: list, session_id: str) -> None:
     - fault_count: 同一缺口出现次数（热缺页识别）
     - resolved: 是否已被 retriever 消费并成功补入
     - 重复缺口自增 fault_count 而非重复添加
+
+    iter259: per-session 文件——每个 agent/session 写独立文件，消除并发 overwrite 竞态。
+    OS 类比：/proc/PID/pagemap — 每进程独立文件，不同进程间互不干扰。
+    命名：page_fault_log.<session_id[:8]>.json（session_id 有效时）
+          page_fault_log.json（session_id 为空/"unknown" 时，向后兼容）
     """
     if not candidates:
         return
-    log_path = MEMORY_OS_DIR / "page_fault_log.json"
+    # iter259: per-session file — 消除多 agent 并发写竞态
+    _sid_tag = session_id[:8] if (session_id and session_id != "unknown") else ""
+    if _sid_tag:
+        log_path = MEMORY_OS_DIR / f"page_fault_log.{_sid_tag}.json"
+    else:
+        log_path = MEMORY_OS_DIR / "page_fault_log.json"
     existing = []
     if log_path.exists():
         try:
@@ -2648,13 +2658,20 @@ def main():
         ensure_schema(_pr_conn)
         promoted = _promote_to_global(_pr_conn, project, session_id)
         # 目标进度：有新决策写入 → progress 微增
+        # iter_multiagent P2：session 级幂等防双计 — 同一 session 只增加一次
         if len(decisions) > 0:
             now_iso = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
+            try:
+                _pr_conn.execute("ALTER TABLE goals ADD COLUMN last_progress_session TEXT DEFAULT ''")
+            except Exception:
+                pass
             _pr_conn.execute(
                 """UPDATE goals SET progress = MIN(1.0, progress + 0.05),
-                   updated_at = ?
-                   WHERE project = ? AND status = 'active'""",
-                [now_iso, project]
+                   updated_at = ?,
+                   last_progress_session = ?
+                   WHERE project = ? AND status = 'active'
+                     AND (last_progress_session IS NULL OR last_progress_session != ?)""",
+                [now_iso, session_id, project, session_id]
             )
         _pr_conn.commit()
         _pr_conn.close()
@@ -2733,76 +2750,125 @@ def main():
     try:
         _intent = _extract_session_intent(text)
         if _intent:
-            # iter259: 记录关联 chunk IDs，用于 soft-pin
-            # 收集检索日志中最近注入的 chunk IDs（shadow_trace）
+            # iter259: 从 DB shadow_traces 表读取（并发安全，替代单文件）
             _intent_chunk_ids: list = []
+            _agent_id = session_id[:16] if session_id else ""
             try:
-                _shadow_file = MEMORY_OS_DIR / ".shadow_trace.json"
-                if _shadow_file.exists():
-                    _st = json.loads(_shadow_file.read_text(encoding="utf-8"))
-                    _stproj = _st.get("project", project)
-                    if _stproj == project:
-                        _intent_chunk_ids = _st.get("top_k_ids", [])
+                _st_conn = open_db()
+                ensure_schema(_st_conn)
+                _st_row = _st_conn.execute(
+                    "SELECT top_k_ids FROM shadow_traces WHERE session_id=? AND project=?",
+                    (session_id, project)
+                ).fetchone()
+                if _st_row:
+                    _intent_chunk_ids = json.loads(_st_row[0] or "[]")
+                _st_conn.close()
+            except Exception:
+                # 兼容旧文件（逐步迁移期）
+                try:
+                    _shadow_file = MEMORY_OS_DIR / ".shadow_trace.json"
+                    if _shadow_file.exists():
+                        _st = json.loads(_shadow_file.read_text(encoding="utf-8"))
+                        if _st.get("project", project) == project:
+                            _intent_chunk_ids = _st.get("top_k_ids", [])
+                except Exception:
+                    pass
+
+            # iter259: 写入 DB session_intents 表（替代单文件 session_intent.json）
+            # OS 类比：per-process /proc/PID/status — 每个 session 独立一行
+            _intent_conn = open_db()
+            ensure_schema(_intent_conn)
+            _intent_conn.execute(
+                """INSERT OR REPLACE INTO session_intents
+                   (session_id, project, agent_id, saved_at, intent_json, pinned_chunk_ids)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    session_id, project, _agent_id,
+                    datetime.now(timezone.utc).isoformat(),
+                    json.dumps(_intent, ensure_ascii=False),
+                    json.dumps(_intent_chunk_ids, ensure_ascii=False),
+                )
+            )
+            _intent_conn.commit()
+
+            # 同时保留旧文件以向后兼容（只写最新 session，不再是唯一数据源）
+            try:
+                _intent_file = MEMORY_OS_DIR / "session_intent.json"
+                _intent_file.write_text(
+                    json.dumps({
+                        "session_id": session_id,
+                        "project": project,
+                        "saved_at": datetime.now(timezone.utc).isoformat(),
+                        "intent": _intent,
+                        "pinned_chunk_ids": _intent_chunk_ids,
+                    }, ensure_ascii=False, indent=2),
+                    encoding="utf-8"
+                )
             except Exception:
                 pass
 
-            _intent_file = MEMORY_OS_DIR / "session_intent.json"
-            _intent_file.write_text(
-                json.dumps({
-                    "session_id": session_id,
-                    "project": project,
-                    "saved_at": datetime.now(timezone.utc).isoformat(),
-                    "intent": _intent,
-                    "pinned_chunk_ids": _intent_chunk_ids,  # iter259: soft-pin 追踪
-                }, ensure_ascii=False, indent=2),
-                encoding="utf-8"
-            )
-
             # iter259: soft-pin 关联 chunk，防止被 kswapd 在 24h 有效期内淘汰
-            # OS 类比：mlock() — 将断点恢复所需页面锁定，确保 CRIU restore 时页面可用
             if _intent_chunk_ids:
                 try:
                     from store_vfs import pin_chunk as _pin_chunk
-                    _pin_conn = open_db()
-                    ensure_schema(_pin_conn)
                     _pinned = 0
                     for _cid in _intent_chunk_ids:
-                        if _pin_chunk(_pin_conn, _cid, project, pin_type="soft"):
+                        if _pin_chunk(_intent_conn, _cid, project, pin_type="soft"):
                             _pinned += 1
                     if _pinned:
-                        _pin_conn.commit()
-                        dmesg_log(_pin_conn, DMESG_DEBUG, "extractor",
+                        _intent_conn.commit()
+                        dmesg_log(_intent_conn, DMESG_DEBUG, "extractor",
                                   f"intent_soft_pin: pinned {_pinned} chunks for 24h (CRIU intent restore)",
                                   session_id=session_id, project=project)
-                        _pin_conn.commit()
-                    _pin_conn.close()
+                        _intent_conn.commit()
                 except Exception:
                     pass  # soft-pin 失败不影响 intent 保存
+            _intent_conn.close()
     except Exception:
         pass  # Intent 保存失败不影响主流程
 
     # ── 迭代311-B：Active Suppression — 注入未用则下调 importance ─────────────
     # OS 类比：vm.swappiness 主动换出冷页面
     # shadow_trace 记录上次 retriever 注入的 chunk IDs，本次回复未用的下调
+    # iter259：优先从 shadow_traces DB 表读取（并发安全，替代单文件）
     try:
-        _shadow_file = MEMORY_OS_DIR / ".shadow_trace.json"
-        if _shadow_file.exists():
-            _shadow = json.loads(_shadow_file.read_text(encoding="utf-8"))
-            _injected_ids = _shadow.get("top_k_ids", [])
-            _shadow_proj = _shadow.get("project", project)
-            if _injected_ids and _shadow_proj == project:
-                from store_vfs import suppress_unused as _suppress_unused
-                _sup_conn = open_db()
-                ensure_schema(_sup_conn)
-                _sup_n = _suppress_unused(
-                    _sup_conn, _injected_ids, assistant_response=text, project=project
-                )
-                if _sup_n:
-                    dmesg_log(_sup_conn, DMESG_DEBUG, "extractor",
-                              f"suppress_unused: {_sup_n} chunks penalized (not referenced in response)",
-                              session_id=session_id, project=project)
-                _sup_conn.commit()
-                _sup_conn.close()
+        _injected_ids = []
+        _sup_loaded = False
+        # 优先从 DB shadow_traces 表读取（per-session 隔离）
+        try:
+            _sup_db = open_db()
+            ensure_schema(_sup_db)
+            _sup_row = _sup_db.execute(
+                "SELECT top_k_ids FROM shadow_traces WHERE session_id=? AND project=?",
+                (session_id, project)
+            ).fetchone()
+            _sup_db.close()
+            if _sup_row:
+                _injected_ids = json.loads(_sup_row[0] or "[]")
+                _sup_loaded = True
+        except Exception:
+            pass
+        # 兼容旧文件（DB 读取失败时 fallback）
+        if not _sup_loaded:
+            _shadow_file = MEMORY_OS_DIR / ".shadow_trace.json"
+            if _shadow_file.exists():
+                _shadow = json.loads(_shadow_file.read_text(encoding="utf-8"))
+                _shadow_proj = _shadow.get("project", project)
+                if _shadow_proj == project:
+                    _injected_ids = _shadow.get("top_k_ids", [])
+        if _injected_ids:
+            from store_vfs import suppress_unused as _suppress_unused
+            _sup_conn = open_db()
+            ensure_schema(_sup_conn)
+            _sup_n = _suppress_unused(
+                _sup_conn, _injected_ids, assistant_response=text, project=project
+            )
+            if _sup_n:
+                dmesg_log(_sup_conn, DMESG_DEBUG, "extractor",
+                          f"suppress_unused: {_sup_n} chunks penalized (not referenced in response)",
+                          session_id=session_id, project=project)
+            _sup_conn.commit()
+            _sup_conn.close()
     except Exception:
         pass  # suppress_unused 失败不影响主流程
 
