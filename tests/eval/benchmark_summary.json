@@ -1,0 +1,90 @@
+{
+  "benchmark_title": "Memory OS Swap Recovery Completeness Benchmark",
+  "execution_date": "2026-04-19",
+  "overall_status": "MEDIUM (significant improvement needed)",
+  "key_findings": {
+    "scenario_a_chunk_roundtrip": {
+      "name": "Single Chunk Roundtrip Integrity",
+      "status": "PASS",
+      "completeness_pct": 100.0,
+      "latency_ms": 175.2,
+      "key_insight": "swap_out -> swap_in path is fully lossless with zlib compression"
+    },
+    "scenario_b_compression_retention": {
+      "name": "Compaction Information Retention (Single Round)",
+      "status": "MEDIUM",
+      "summary_retention_pct": 49.0,
+      "content_retention_pct": 13.9,
+      "chunks_recovered": 10,
+      "chunks_total": 20,
+      "latency_ms": 12.8,
+      "key_issue": "checkpoint_restore() returns only latest checkpoint, max_hit_ids limits recovery"
+    },
+    "scenario_c_multi_compaction_loss": {
+      "name": "Multi-Round Compaction Cumulative Loss",
+      "status": "WARNING",
+      "round_1_retention_pct": 4.74,
+      "round_2_retention_pct": 0.0,
+      "round_3_retention_pct": 0.0,
+      "decay_slope_pct_per_round": -2.37,
+      "latency_ms": 38.7,
+      "key_issue": "consumed=1 flag prevents checkpoint reuse across multiple compaction rounds"
+    }
+  },
+  "root_causes": [
+    {
+      "priority": "CRITICAL",
+      "issue": "Checkpoint mechanism designed for CRIU, not suitable for Swap Recovery",
+      "impact": "Multi-round compaction fails after 1st round; max_hit_ids truncates large worksets",
+      "affected_scenarios": [
+        "B",
+        "C"
+      ]
+    },
+    {
+      "priority": "HIGH",
+      "issue": "Content field not stored in checkpoint table",
+      "impact": "Only summary preserved (49%), content preservation rate at 13.9%",
+      "affected_scenarios": [
+        "B"
+      ]
+    },
+    {
+      "priority": "HIGH",
+      "issue": "One-time consumption pattern (consumed=0/1)",
+      "impact": "2nd+ compaction rounds get zero recovery; need multi-use semantics",
+      "affected_scenarios": [
+        "C"
+      ]
+    }
+  ],
+  "recommendations": {
+    "short_term": [
+      "Fix checkpoint consumption to support multi-round recovery",
+      "Extend swap_state.json with full_hit_ids and content_summary fields",
+      "Improve resume-task-state.py to prioritize swap_state.json over checkpoint_restore"
+    ],
+    "medium_term": [
+      "Separate CRIU and Swap Recovery mechanisms into distinct tables",
+      "Implement Governor-aware adaptive recovery (LOW/NORMAL/HIGH/CRITICAL pressure levels)",
+      "Add capacity-aware recovery budget (max_recovery_chars parameter)"
+    ],
+    "long_term": [
+      "Enable secondary compression (brotli/lz4) for swap data",
+      "Implement mmap + eBPF hybrid memory management for near-native swap performance"
+    ]
+  },
+  "metrics_summary": {
+    "chunk_roundtrip_completeness": "100%",
+    "single_round_summary_retention": "49.0%",
+    "single_round_content_retention": "13.9%",
+    "multi_round_average_decay": "-2.37% per round",
+    "operation_latency_checkpoint": "12.8ms",
+    "operation_latency_roundtrip": "175.2ms"
+  },
+  "files_generated": [
+    "<repo-root>/eval_swap_recovery.py",
+    "<repo-root>/swap_recovery_benchmark.json",
+    "<repo-root>/BENCHMARK_REPORT.txt"
+  ]
+}

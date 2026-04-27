@@ -1,0 +1,40 @@
+{
+  "test_date": "2026-04-19T05:13:46.558044+00:00",
+  "test_sessions": 5,
+  "turns_per_session": 20,
+  "total_chunks_written": 135,
+  "baseline": {
+    "baseline_stats": {
+      "decision": {
+        "count": 100,
+        "importance_sum": 82.0,
+        "importance_avg": 0.82
+      },
+      "excluded_path": {
+        "count": 35,
+        "importance_sum": 24.5,
+        "importance_avg": 0.7
+      }
+    },
+    "total_critical_chunks": 135,
+    "total_importance": 106.5,
+    "information_density": 0.7888888888888889
+  },
+  "swap_out": {
+    "swapped_chunks": 135,
+    "swapped_importance": 106.5,
+    "swap_out_ratio": 1.0
+  },
+  "swap_in": {
+    "timestamp": "2026-04-19T05:13:46.558034+00:00",
+    "recovered_chunks": 135,
+    "recovered_decisions": 100,
+    "recovered_excluded_paths": 35,
+    "restoration_completeness": 1.0
+  },
+  "metrics": {
+    "information_preservation_rate": 1.0,
+    "critical_decision_recovery": 1.0,
+    "excluded_path_recovery": 1.0
+  }
+}

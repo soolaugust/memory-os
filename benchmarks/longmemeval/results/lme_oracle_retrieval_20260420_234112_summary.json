@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-04-20T15:41:12.788107+00:00",
+  "dataset": "oracle",
+  "mode": "retrieval",
+  "questions": 50,
+  "top_k": 10,
+  "elapsed_seconds": 2.1,
+  "retrieval": {
+    "avg_session_recall": 0.99,
+    "hit_rate": 1.0
+  },
+  "by_type": {
+    "temporal-reasoning": {
+      "recall": 0.99,
+      "count": 50
+    }
+  },
+  "errors": 0
+}

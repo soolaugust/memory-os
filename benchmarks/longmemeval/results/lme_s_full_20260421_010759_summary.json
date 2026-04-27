@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-04-20T17:07:59.519689+00:00",
+  "dataset": "s",
+  "mode": "full",
+  "questions": 5,
+  "top_k": 10,
+  "elapsed_seconds": 17.2,
+  "retrieval": {
+    "avg_session_recall": 1.0,
+    "hit_rate": 1.0
+  },
+  "by_type": {
+    "single-session-user": {
+      "recall": 1.0,
+      "count": 5
+    }
+  },
+  "errors": 0
+}

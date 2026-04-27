@@ -1,0 +1,188 @@
+{
+  "generated_at": "2026-04-20T06:43:07.545535+00:00",
+  "project": "abspath:7e3095aef7a6",
+  "chunk_count": 63,
+  "test_count": 20,
+  "tests": [
+    {
+      "query": "LLC 你之前说过 验证自己发现的没",
+      "description": "decision: 你之前说过\"验证自己发现的没人做过的优化\"——你当时具体指的是什么？是 scx_p2dq LLC vtime 公平性那个",
+      "expected_chunk_ids": [
+        "21d5ae5f-dc6f-4be7-9cc2-2d9a12f94eb2"
+      ],
+      "category": "exact_tech",
+      "importance": 0.9
+    },
+    {
+      "query": "Patch 发送工作流",
+      "description": "reasoning_chain: [capabilities] Patch 发送工作流",
+      "expected_chunk_ids": [
+        "import-41cfd3c6822f"
+      ],
+      "category": "exact_chinese",
+      "importance": 0.85
+    },
+    {
+      "query": "Wiki 知识固化协",
+      "description": "reasoning_chain: [capabilities] Wiki 知识固化协议",
+      "expected_chunk_ids": [
+        "import-8725bb29ee85"
+      ],
+      "category": "exact_chinese",
+      "importance": 0.85
+    },
+    {
+      "query": "Signed off 决策 错误使用教",
+      "description": "decision: [decisions] 决策：Signed-off-by 错误使用教训",
+      "expected_chunk_ids": [
+        "import-c1afef86ebf1"
+      ],
+      "category": "exact_chinese",
+      "importance": 0.8
+    },
+    {
+      "query": "Wiki 固化机制决 任务完结主",
+      "description": "decision: [decisions] Wiki 固化机制决策：任务完结主动提示",
+      "expected_chunk_ids": [
+        "import-fe837eb91500"
+      ],
+      "category": "exact_chinese",
+      "importance": 0.8
+    },
+    {
+      "query": "HACK revert server 决策",
+      "description": "decision: [decisions] 决策：HACK revert dl_server fix",
+      "expected_chunk_ids": [
+        "import-aa6d1ed99978"
+      ],
+      "category": "exact_tech",
+      "importance": 0.8
+    },
+    {
+      "query": "Adaptive Complexity Principle",
+      "description": "decision: [decisions] Adaptive Complexity Principle",
+      "expected_chunk_ids": [
+        "import-5cc40cab16c0"
+      ],
+      "category": "semantic",
+      "importance": 0.8
+    },
+    {
+      "query": "Skill Listing Budget 控制",
+      "description": "decision: [decisions] Skill Listing Budget 控制",
+      "expected_chunk_ids": [
+        "import-bfe9dc746307"
+      ],
+      "category": "exact_chinese",
+      "importance": 0.8
+    },
+    {
+      "query": "lock analysis race 触发词 并发",
+      "description": "decision: [规则/Capabilities] **lock-analysis**: 触发词：锁/并发/race/KCSAN/KAS",
+      "expected_chunk_ids": [
+        "import-90215377fe2d"
+      ],
+      "category": "exact_chinese",
+      "importance": 0.75
+    },
+    {
+      "query": "patch workflow patch 触发词 发邮件",
+      "description": "decision: [规则/Capabilities] **patch-workflow**: 触发词：patch/发邮件/send-ema",
+      "expected_chunk_ids": [
+        "import-a54eaa6ff35d"
+      ],
+      "category": "exact_chinese",
+      "importance": 0.75
+    },
+    {
+      "query": "wiki consolidation wiki 触发词 任务完成",
+      "description": "decision: [规则/Capabilities] **wiki-consolidation**: 触发词：任务完成/固化/保存/写 w",
+      "expected_chunk_ids": [
+        "import-d5ffaa720313"
+      ],
+      "category": "exact_chinese",
+      "importance": 0.75
+    },
+    {
+      "query": "capability reuse wiki 触发词 新场景",
+      "description": "decision: [规则/Capabilities] **capability-reuse**: 触发词：新场景/类似以前/是否有现成 →",
+      "expected_chunk_ids": [
+        "import-8d261fb41dc7"
+      ],
+      "category": "exact_chinese",
+      "importance": 0.75
+    },
+    {
+      "query": "reasoning principles wiki 触发词 分析",
+      "description": "decision: [规则/Capabilities] **reasoning-principles**: 触发词：分析/方案/设计/排查/",
+      "expected_chunk_ids": [
+        "import-341bc9a21ec9"
+      ],
+      "category": "exact_chinese",
+      "importance": 0.75
+    },
+    {
+      "query": "VFS Mount Point 子目录 修复",
+      "description": "decision: [memory-os/iter81] VFS Mount Point Resolution — CWD 子目录 proj",
+      "expected_chunk_ids": [
+        "import-e43658b3f3ad"
+      ],
+      "category": "exact_tech",
+      "importance": 0.7
+    },
+    {
+      "query": "Goal Persistence 跨会话目 标追踪",
+      "description": "decision: [memory-os/iter91] Goal Persistence — 跨会话目标追踪（2026-04-19）",
+      "expected_chunk_ids": [
+        "import-2a85423055b7"
+      ],
+      "category": "exact_chinese",
+      "importance": 0.7
+    },
+    {
+      "query": "NUMA",
+      "description": "decision: ✅ 合并 #3537 scx_layered NUMA fallback 修复",
+      "expected_chunk_ids": [
+        "84ae7081-b99a-4873-b3b5-a626fd32be2e"
+      ],
+      "category": "exact_tech",
+      "importance": 0.9
+    },
+    {
+      "query": "✅ 合并 #3515 scx_layered util_compens",
+      "description": "decision: ✅ 合并 #3515 scx_layered util_compensation（softirq 补偿）",
+      "expected_chunk_ids": [
+        "73521089-a2ab-49b3-af94-48ff0559f474"
+      ],
+      "category": "exact_chinese",
+      "importance": 0.9
+    },
+    {
+      "query": "Kernel Patch 格式规范",
+      "description": "decision: [kernel_process] Kernel Patch 格式规范",
+      "expected_chunk_ids": [
+        "import-985b1660a52f"
+      ],
+      "category": "exact_chinese",
+      "importance": 0.8
+    },
+    {
+      "query": "Kernel Patch 邮件标签规",
+      "description": "decision: [kernel_process] Kernel Patch 邮件标签规则",
+      "expected_chunk_ids": [
+        "import-b2225ff4e8ab"
+      ],
+      "category": "exact_chinese",
+      "importance": 0.8
+    },
+    {
+      "query": "Patch 发送前强制 检查",
+      "description": "decision: [kernel_process] Patch 发送前强制检查（14 条）",
+      "expected_chunk_ids": [
+        "import-ca3fd36876fb"
+      ],
+      "category": "exact_chinese",
+      "importance": 0.8
+    }
+  ]
+}

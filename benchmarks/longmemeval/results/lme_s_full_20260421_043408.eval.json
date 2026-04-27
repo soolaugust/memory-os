@@ -1,0 +1,136 @@
+{
+  "timestamp": "2026-04-21T04:34:39Z",
+  "judge_model": "claude-haiku-4-5-20251001",
+  "overall_accuracy": 0.35,
+  "total_correct": 7,
+  "total_evaluated": 20,
+  "by_type": {
+    "temporal-reasoning": {
+      "accuracy": 0.35,
+      "correct": 7,
+      "total": 20
+    }
+  },
+  "results": [
+    {
+      "question_id": "gpt4_59149c77",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation dates:\n\n- The MoMA visit was mentioned on **January 8, 2023**\n- The \"Ancient Civilizations\" exhibit at the Metropolitan Museum of Art was mentioned on **January 15, 2023**\n\n*"
+    },
+    {
+      "question_id": "gpt4_f49edff3",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I can only find one of these three events:\n\n- **Helped friend prepare the nursery**: mentioned on [2023/02/05], described as happening \"today\" → **February 5, 2023**"
+    },
+    {
+      "question_id": "71017276",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, there is no mention of meeting up with an aunt or receiving a crystal chandelier. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "b46e15ed",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I only see **one** charity event mentioned — the \"24-Hour Bike Ride\" on **2023/02/14**. There is no mention of a second charity event on a consecutive day.\n\nI don't "
+    },
+    {
+      "question_id": "gpt4_fa19884c",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is no mention of you discovering a bluegrass band. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "0bc8ad92",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, the museum visit with a chemistry professor friend occurred on **2022/10/22**.\n\nCurrent date: **2023/03/25**\n\nThat's approximately **5 months** ago."
+    },
+    {
+      "question_id": "af082822",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "The conversation history doesn't mention you attending a friends and family sale at Nordstrom. I don't have enough information to answer that question."
+    },
+    {
+      "question_id": "gpt4_4929293a",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "**Michael's engagement party** happened first.\n\n- Michael's engagement party: **2023/05/06**\n- Cousin's wedding: **2023/06/15**"
+    },
+    {
+      "question_id": "gpt4_b5700ca9",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Looking at the conversation history, I can see that on **2023/03/29**, the user mentioned attending an **Easter Sunday service** — not a Maundy Thursday service at an Episcopal Church.\n\nSince the even"
+    },
+    {
+      "question_id": "9a707b81",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there's no mention of you making a friend's birthday cake at a baking class. \n\nWhat is mentioned is that you attended a baking class at a local culinary school **\"ye"
+    },
+    {
+      "question_id": "gpt4_1d4ab0c9",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "From the conversations:\n- Started watering herb garden: **March 22, 2023**\n- First harvest of fresh herbs: **April 15, 2023**\n\n**April 15 − March 22 = 24 days**"
+    },
+    {
+      "question_id": "gpt4_e072b769",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "The user mentioned downloading Ibotta in the conversation dated **2023/04/16 (Sun)**.\n\nCurrent date: **2023/05/06 (Sat)**\n\nDifference: 20 days = **approximately 2-3 weeks ago**."
+    },
+    {
+      "question_id": "0db4c65d",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, there is no mention of:\n- Reading 'The Seven Husbands of Evelyn Hugo'\n- Attending a book reading event at a local library\n- An author of 'The Silent Patient"
+    },
+    {
+      "question_id": "gpt4_1d80365e",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from May 15, 2023, you mentioned you **just started** your solo camping trip to Yosemite that day. However, there is no mention of when you ended the trip, so I don't have en"
+    },
+    {
+      "question_id": "gpt4_7f6b06db",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history:\n\n1. **Yosemite solo camping trip** – mentioned as recent in the April 20 conversation, but no exact date given\n2. **Big Sur and Monterey road trip** – mentioned as \""
+    },
+    {
+      "question_id": "gpt4_6dc9b45b",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "The user mentioned attending SIFF on **2021/06/01**. The current date is **2021/10/02**.\n\nThat's approximately **4 months ago**."
+    },
+    {
+      "question_id": "gpt4_8279ba02",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation dated **2023/03/15**, the user said \"I just got a smoker today.\"\n\nCurrent date: **2023/03/25**\n\n2023/03/25 − 2023/03/15 = **10 days ago**."
+    },
+    {
+      "question_id": "gpt4_18c2b244",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, only one of these three events is actually mentioned:\n\n- **\"I used a Buy One Get One Free coupon on Luvs diapers at Walmart\"** — mentioned in the conversation dated "
+    },
+    {
+      "question_id": "gpt4_a1b77f9c",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I can only find that you started reading \"The Nightingale\" on **2022/01/01** and finished it by **2022/01/15** — that's **2 weeks**.\n\nHowever, there is **no mention*"
+    },
+    {
+      "question_id": "gpt4_1916e0ea",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I can see that you mentioned cancelling your FarmFresh subscription in the **January 5, 2023** conversation, but there is **no mention of online grocery shopping fro"
+    }
+  ]
+}

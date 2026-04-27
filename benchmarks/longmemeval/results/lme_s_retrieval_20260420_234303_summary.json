@@ -1,0 +1,39 @@
+{
+  "timestamp": "2026-04-20T15:43:03.721970+00:00",
+  "dataset": "s",
+  "mode": "retrieval",
+  "questions": 500,
+  "top_k": 10,
+  "elapsed_seconds": 65.0,
+  "retrieval": {
+    "avg_session_recall": 0.927,
+    "hit_rate": 0.968
+  },
+  "by_type": {
+    "knowledge-update": {
+      "recall": 0.949,
+      "count": 78
+    },
+    "multi-session": {
+      "recall": 0.926,
+      "count": 133
+    },
+    "single-session-assistant": {
+      "recall": 1.0,
+      "count": 56
+    },
+    "single-session-preference": {
+      "recall": 0.967,
+      "count": 30
+    },
+    "single-session-user": {
+      "recall": 0.871,
+      "count": 70
+    },
+    "temporal-reasoning": {
+      "recall": 0.903,
+      "count": 133
+    }
+  },
+  "errors": 0
+}

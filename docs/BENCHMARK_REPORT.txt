@@ -1,0 +1,248 @@
+================================================================================
+MEMORY OS SWAP RECOVERY BENCHMARK REPORT
+执行时间: 2026-04-19
+================================================================================
+
+目标: 量化 Memory OS 中 PreCompact (swap_out) + PostCompact (swap_in) 机制实际
+     保留的关键上下文信息
+
+核心发现
+================================================================================
+
+[SCENARIO A] 单 Chunk 往返完整性
+---------
+状态: PASS
+
+数据:
+  - 写入 chunks: 10
+  - 恢复 chunks: 10
+  - 内容完整度: 100% (完全匹配)
+  - Checkpoint 恢复: YES
+  - 耗时: 175.21ms
+
+结论:
+  - swap_out → memory_chunks 删除 → swap_in 恢复的完整性无问题
+  - 压缩/解压逻辑（zlib）无数据损失
+  - 单向往返路径可靠性: 100%
+
+根本原因:
+  1. swap_chunks 表使用 base64(zlib()) 进行无损压缩
+  2. 原始 chunk 数据（所有字段）完整保存和恢复
+  3. 恢复时 last_accessed 正确更新
+
+
+[SCENARIO B] Compaction 信息保留率（单轮）
+---------
+状态: PARTIAL_OK (保留率偏低)
+
+数据:
+  工作集大小: 20 chunks
+  
+  原始数据:
+    - Summary: 980 字符
+    - Content: 5840 字符
+    - 总计: 6820 字符
+  
+  恢复数据 (via checkpoint_restore):
+    - Summary: 480 字符 (49.0% 保留率)
+    - Content: 811 字符 (13.9% 保留率)
+    - 总计: 1291 字符 (18.9% 保留率)
+  
+  恢复 Chunks: 10/20 (50%)
+  耗时: 12.8ms
+
+问题分析:
+  1. 设计缺陷：checkpoint_restore() 仅返回最新一个 checkpoint 的数据
+     - 查询条件: consumed=0, ORDER BY created_at DESC LIMIT 1
+     - 结果: 只能恢复前 N 个 chunks，超过 max_hit_ids 的被丢弃
+     - 影响: 保留率上限被 config.criu.max_hit_ids 限制
+  
+  2. 机制不匹配：checkpoint 表设计用于 CRIU（进程暂停/恢复）
+     - CRIU 用途: 精确还原单个被中断会话的全部状态
+     - Swap 用途: 最大化冷数据快速访问，容许部分信息损失
+     - 当前设计: 一刀切使用 checkpoint，导致语义不符
+  
+  3. Content 字段缺失：checkpoint 表只保存 hit_chunk_ids (引用)
+     - 实际恢复时需从 memory_chunks 查询完整 content
+     - 但 content 字段本身不被 checkpoint 管理
+     - 导致若干 chunks 已 swap_out 则 content 无法恢复
+
+
+[SCENARIO C] 多轮 Compaction 累积损失
+---------
+状态: WARNING (第 2+ 轮衰减过快)
+
+数据:
+  初始工作集: 10320 字符
+  
+  第 1 轮: 489 字符  (4.74% 保留率)
+  第 2 轮: 0 字符    (0.00% 保留率)  -> 衰减 -4.74%
+  第 3 轮: 0 字符    (0.00% 保留率)  -> 衰减 +0.00%
+  
+  平均衰减斜率: -2.37% 每轮
+  耗时 (单轮): 38.7ms
+
+问题分析:
+  1. Checkpoint 一次性消费：consumed 标志为 0/1
+     - checkpoint_dump() 创建新 checkpoint
+     - checkpoint_restore() 标记 consumed=1
+     - 第 2 次 restore() 查询 consumed=0 返回 None
+     - 结果: 第 2、3 轮无任何恢复
+  
+  2. 多轮 compaction 中的恢复失效
+     - 预期: 每轮 compaction 都能从稳定的工作集恢复
+     - 实际: 仅第 1 轮可用，之后永久损失
+     - 原因: 没有"重新 dump"机制支持跨轮重复使用
+
+
+关键指标
+================================================================================
+
+| 指标                  | 值          | 等级        |
+|---------------------|------------|-----------|
+| Chunk 往返完整性        | 100%        | EXCELLENT |
+| 单轮 Summary 保留率     | 49.0%       | MEDIUM    |
+| 单轮 Content 保留率     | 13.9%       | LOW       |
+| 多轮衰减速度            | -2.37% 每轮 | OK (但仅第1轮有效) |
+| 单轮操作延迟            | 12.8ms     | FAST      |
+| Chunk 往返延迟          | 175.2ms    | ACCEPTABLE|
+
+
+系统设计问题诊断
+================================================================================
+
+【问题 1】CRIU 机制在 Swap 场景不适用
+---
+原因：
+  - checkpoint 表设计的语义是"完整进程镜像"
+  - 但 swap recovery 需要的语义是"可复用的工作集快照"
+
+表现：
+  - consumed=1 后永不复用 → 多轮 compaction 失效
+  - max_hit_ids 硬限制 → 超大工作集被截断
+
+应对：
+  - 分离两套机制（或改进单套支持两种语义）
+
+
+【问题 2】Checkpoint 存储结构不完整
+---
+原因：
+  - 只保存 hit_chunk_ids（ID 列表）
+  - 不保存 chunk 的完整 content 字段
+  - 若 chunk 已 swap_out，无法恢复原始 content
+
+表现：
+  - content_retention_pct: 13.9%（远低于 summary_retention_pct: 49%）
+
+应对：
+  - checkpoint 需选择性保存 content（或至少是摘要化 content）
+  - 或改由 swap_state.json 负责 content 保存（目前已部分做）
+
+
+【问题 3】多轮 Compaction 设计缺陷
+---
+原因：
+  - save-task-state.py 每次 dump 新 checkpoint
+  - resume-task-state.py 查询最新未消费 checkpoint
+  - 但 checkpoint_restore 消费一次后标记 consumed=1
+
+表现：
+  - 第 1 次 compaction 后恢复有效 (4.74%)
+  - 第 2 次 compaction 后无恢复 (0%)
+
+应对：
+  - 改进 checkpoint_restore 逻辑，支持多次查询同一 checkpoint
+  - 或在 save-task-state.py 做"智能重用"：
+    若已存在未消费 checkpoint，不创建新的
+
+
+性能评估
+================================================================================
+
+延迟分布:
+  - 场景 A (swap 往返): 175.2ms  → 主要开销在 DB 事务
+  - 场景 B (checkpoint): 12.8ms   → 字符串处理 + 格式化
+  - 场景 C (多轮): 38.7ms/轮     → 循环 checkpoint_dump/restore
+
+瓶颈分析:
+  1. sqlite 事务时间 (~150ms) > 业务逻辑 (~10ms)
+     → 考虑批量操作或异步 I/O
+  
+  2. JSON 序列化在大数据集上可见 (~5ms)
+     → 未来考虑 msgpack 或二进制格式
+  
+  3. 字符计数 (len() 调用) 线性复杂度
+     → 对 >10K chunks 工作集可能出现瓶颈
+
+
+建议改进方案
+================================================================================
+
+【短期 (迭代 88+)】
+---
+1. 修复 Checkpoint 消费机制
+   - consumed 改为消费计数 (0, 1, 2, ...)
+   - 或按 session_id 创建隔离 checkpoint (不跨 session 复用)
+   - 影响: 支持多轮 compaction 恢复
+
+2. 扩展 swap_state.json 字段
+   - 添加 "full_hit_ids" (完整 chunk ID 列表, 不限制)
+   - 添加 "content_summary" (摘要化 content, 保存关键部分)
+   - 添加 "importance_sorted_ids" (按重要度排序)
+
+3. 改进 resume-task-state.py 逻辑
+   - 检查 swap_state.json 是否存在
+   - 优先使用 swap_state (快速路径)
+   - 回退到 checkpoint_restore (精确路径)
+
+
+【中期 (迭代 89-90)】
+---
+4. 分离 CRIU 和 Swap Recovery 机制
+   - 新建 swap_checkpoints 表专用于 swap recovery
+   - CRIU 用途: 精确恢复 (consumed=1, 一次性)
+   - Swap 用途: 优化恢复 (FIFO LRU, 多次查询)
+
+5. Governor 级别的自适应恢复
+   - LOW 压力: 恢复 90%+ 数据 (冗长恢复)
+   - NORMAL: 恢复 60-70% (平衡)
+   - HIGH: 恢复 30-40% (精简, 仅关键数据)
+   - CRITICAL: 恢复 10% (极端压缩)
+
+6. 支持 Capacity-aware Recovery
+   - 参数: max_recovery_chars (配置)
+   - 逻辑: 按 importance 贪心选择, 不超过预算
+   - 效果: 控制恢复数据量, 避免过度膨胀
+
+
+【长期 (迭代 91+)】
+---
+7. 二次压缩策略
+   - 当 swap_out 数据超过阈值时, 启用 brotli/lz4
+   - 对 checkpoint 数据启用块级压缩
+   - 效果: 降低磁盘 I/O
+
+8. 混合内存管理 (mmap + eBPF)
+   - 用 mmap 映射 swap 文件到虚拟地址空间
+   - eBPF page fault handler 直接读取 mmap 页
+   - 效果: bypass checkpoint_restore(), 接近原生 swap 性能
+
+
+测试数据清单
+================================================================================
+
+保存位置: /home/mi/.claude/memory-os/store.db
+Benchmark 结果: /home/mi/ssd/codes/claude-workspace/aios/memory-os/swap_recovery_benchmark.json
+
+生产环境数据统计:
+  - memory_chunks 表: 42 行
+  - recall_traces 表: 97 行
+  - checkpoints 表: 4 行
+  - dmesg 表: 500 行
+
+
+================================================================================
+报告生成时间: 2026-04-19T06:33:41+00:00
+Benchmark 脚本: /home/mi/ssd/codes/claude-workspace/aios/memory-os/eval_swap_recovery.py
+================================================================================

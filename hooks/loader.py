@@ -1,0 +1,714 @@
+#!/usr/bin/env python3
+"""
+memory-os loader — SessionStart hook
+1. 读取 latest.json 获取最新任务状态
+2. 从 store.db 加载项目工作集（高权值 decision/reasoning_chain）
+3. 注入 L2（additionalContext），总长控制 < 800 字
+
+v2 升级（迭代18）：Working Set Restoration
+OS 类比：Denning Working Set Model（1968）
+  进程恢复时预加载其最近频繁访问的页面集，而非从空白页开始。
+  新 session 不仅恢复"上次在干什么"，还恢复"这个项目的关键决策和上下文"。
+"""
+import sys
+import json
+import os
+import sqlite3
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+
+_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(_ROOT))
+from schema import MemoryChunk
+from utils import resolve_project_id
+from scorer import working_set_score as _unified_ws_score
+from store import open_db, ensure_schema, get_chunks as store_get_chunks, dmesg_log, DMESG_INFO, DMESG_WARN, watchdog_check, damon_scan, mglru_aging, checkpoint_restore, autotune, gc_traces, gc_orphan_swap
+from config import get as _sysctl  # 迭代27: sysctl Runtime Tunables
+
+MEMORY_OS_DIR = Path.home() / ".claude" / "memory-os"
+LATEST_JSON = MEMORY_OS_DIR / "latest.json"
+STORE_DB = MEMORY_OS_DIR / "store.db"
+
+# 迭代27：常量迁移至 config.py sysctl 注册表（运行时可调）
+# 原硬编码：MAX_AGE_SECS=86400, MAX_CONTEXT_CHARS=800, WORKING_SET_TOP_K=5
+# 工作集只恢复高价值 chunk 类型（task_state 已通过 latest.json 恢复）
+WORKING_SET_TYPES = ("decision", "reasoning_chain", "conversation_summary", "design_constraint", "procedure")
+# 迭代111: 加入 design_constraint — 当前项目的约束应在 SessionStart 预加载（常驻内核模块类比）
+# iter117: 加入 procedure — wiki 导入的操作协议也需要 SessionStart 预加载（importance≥0.85，具有高稳定性）
+
+
+def _age_secs(iso_str: str) -> float:
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        now = datetime.now(timezone.utc)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (now - dt).total_seconds()
+    except Exception:
+        return float("inf")
+
+
+    # ── 评分函数已迁移至 scorer.py（迭代20 Unified Scorer）──
+
+
+def _load_working_set_from_checkpoint(project: str) -> tuple:
+    """
+    迭代49：CRIU restore — 尝试从 checkpoint 恢复精确工作集。
+    OS 类比：CRIU restore 从镜像文件重建进程的完整内存映射，
+    而非从零开始让进程自己缺页加载。
+
+    返回 (working_set_list, checkpoint_info_or_None)。
+    如果有可用 checkpoint → 用精确 chunk IDs 恢复（比泛化 Top-K 更准）。
+    如果没有 → 返回 ([], None)，调用方 fallback 到泛化 Top-K。
+    """
+    if not STORE_DB.exists():
+        return [], None
+    try:
+        conn = open_db()
+        ensure_schema(conn)
+        ckpt = checkpoint_restore(conn, project)
+        if ckpt and ckpt.get("chunks"):
+            restore_boost = _sysctl("criu.restore_boost")
+            _TYPE_PREFIX = {
+                "decision": "[决策]",
+                "reasoning_chain": "[推理]",
+                "conversation_summary": "[摘要]",
+                "excluded_path": "[排除]",
+            }
+            scored = []
+            for c in ckpt["chunks"]:
+                # 用 working_set_score + restore_boost 评分
+                base_score = _unified_ws_score(c["importance"], c["last_accessed"])
+                score = base_score + restore_boost  # checkpoint 命中加权
+                prefix = _TYPE_PREFIX.get(c["chunk_type"], "")
+                scored.append((score, c["chunk_type"], c["summary"]))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            top_k = _sysctl("loader.working_set_top_k")
+            conn.commit()  # commit consumed 状态
+            conn.close()
+            return scored[:top_k], ckpt
+        conn.close()
+    except Exception:
+        pass
+    return [], None
+
+
+def _load_working_set(project: str) -> list:
+    """
+    从 store.db 加载当前项目的工作集：Top-K 高权值 chunk。
+    v3 迭代21：委托 store.py VFS 统一数据访问层。
+    v4 迭代49：优先从 CRIU checkpoint 恢复精确工作集。
+
+    OS 类比：working set = 最近频繁访问的页面集。
+    进程重新调度时，OS 预加载 working set 避免大量缺页中断。
+    """
+    if not STORE_DB.exists():
+        return []
+    try:
+        conn = open_db()
+        ensure_schema(conn)
+        chunks = store_get_chunks(conn, project, chunk_types=WORKING_SET_TYPES)
+        conn.close()
+    except Exception:
+        return []
+
+    if not chunks:
+        return []
+
+    # 评分：Unified Scorer working_set_score（迭代20 CFS 统一评分）
+    scored = []
+    for c in chunks:
+        score = _unified_ws_score(c["importance"], c["last_accessed"])
+        scored.append((score, c["chunk_type"], c["summary"]))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored[:_sysctl("loader.working_set_top_k")]
+
+
+def _parse_content(content: str) -> tuple:
+    current_tasks, next_tasks, excluded = [], [], []
+    section = None
+    for line in content.splitlines():
+        if line.startswith("当前任务"):
+            section = "current"
+        elif line.startswith("待执行"):
+            section = "next"
+        elif line.startswith("已排除"):
+            section = "excluded"
+        elif line.startswith("- "):
+            item = line[2:].strip()
+            if section == "current":
+                current_tasks.append(item)
+            elif section == "next":
+                next_tasks.append(item)
+            elif section == "excluded":
+                excluded.append(item)
+    return current_tasks, next_tasks, excluded
+
+
+
+def _get_last_session_timestamp() -> str | None:
+    """
+    从 store.db dmesg 表中获取上一次 session_start 记录的 timestamp。
+    返回 ISO 8601 字符串，失败时返回 None。
+    """
+    if not STORE_DB.exists():
+        return None
+    try:
+        conn = sqlite3.connect(str(STORE_DB))
+        # 取倒数第2条（当前 session 写入前，最新那条就是上一次的）
+        rows = conn.execute(
+            "SELECT timestamp FROM dmesg "
+            "WHERE subsystem='loader' AND message LIKE 'session_start%' "
+            "ORDER BY id DESC LIMIT 2"
+        ).fetchall()
+        conn.close()
+        if len(rows) >= 2:
+            return rows[1][0]  # 上一次
+        elif len(rows) == 1:
+            return rows[0][0]  # 只有一条（首次 session）
+    except Exception:
+        pass
+    return None
+
+
+def _detect_changes(last_ts: str | None, project_dir: Path) -> list[str]:
+    """
+    迭代90：实时变化感知 — 检测自上次 session 以来的环境变化。
+    OS 类比：inotify + git fsck — 进程恢复时感知文件系统和版本控制变化，
+    让 AI 无需"热身"即可知道外部世界发生了什么。
+
+    返回变化摘要行列表（空列表 = 无变化，不注入）。
+    总字符数控制在 300 以内。
+    """
+    if not last_ts:
+        return []
+
+    change_lines = []
+    try:
+        last_dt = datetime.fromisoformat(last_ts)
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=timezone.utc)
+        last_ts_epoch = last_dt.timestamp()
+    except Exception:
+        return []
+
+    # ── 1. Git 变化检测 ──
+    try:
+        _git_dir = project_dir
+        _git_check = subprocess.run(
+            ["git", "-C", str(_git_dir), "rev-parse", "--git-dir"],
+            capture_output=True, timeout=3
+        )
+        if _git_check.returncode == 0:
+            # 获取自上次 session 以来的 commit
+            _log_result = subprocess.run(
+                ["git", "-C", str(_git_dir), "log", "--oneline",
+                 f"--since={last_ts}"],
+                capture_output=True, text=True, timeout=3
+            )
+            if _log_result.returncode == 0:
+                _commits = [l.strip() for l in _log_result.stdout.splitlines() if l.strip()]
+                if _commits:
+                    _latest_msg = _commits[0].split(" ", 1)[1] if " " in _commits[0] else _commits[0]
+                    # 截断长 commit 消息
+                    if len(_latest_msg) > 40:
+                        _latest_msg = _latest_msg[:37] + "..."
+                    change_lines.append(
+                        f"- Git: {len(_commits)} commit{'s' if len(_commits) > 1 else ''} "
+                        f"since last session (最新: \"{_latest_msg}\")"
+                    )
+    except Exception:
+        pass
+
+    # ── 2. self-improving/ 文件变更检测 ──
+    try:
+        _si_dir = Path.home() / "self-improving"
+        if _si_dir.exists():
+            _changed_files = []
+            for _f in sorted(_si_dir.rglob("*.md")):
+                try:
+                    if _f.stat().st_mtime > last_ts_epoch:
+                        # 取相对路径
+                        try:
+                            _rel = _f.relative_to(Path.home())
+                        except ValueError:
+                            _rel = _f
+                        _changed_files.append(str(_rel))
+                except Exception:
+                    pass
+            if _changed_files:
+                # 最多展示 3 个文件
+                _shown = _changed_files[:3]
+                _suffix = f" (+{len(_changed_files) - 3} more)" if len(_changed_files) > 3 else ""
+                change_lines.append(
+                    f"- 文件变更: {', '.join(_shown)}{_suffix}"
+                )
+    except Exception:
+        pass
+
+    # ── 3. CLAUDE.md 变更检测 ──
+    try:
+        _claude_md = project_dir / "CLAUDE.md"
+        if not _claude_md.exists():
+            # fallback: ~/.claude/CLAUDE.md
+            _claude_md = Path.home() / ".claude" / "CLAUDE.md"
+        if _claude_md.exists():
+            _claude_mtime = _claude_md.stat().st_mtime
+            if _claude_mtime > last_ts_epoch:
+                change_lines.append("- CLAUDE.md: 已修改")
+            # else: 未变化则不注入（遵循"0变化不注入"原则）
+    except Exception:
+        pass
+
+    if not change_lines:
+        return []
+
+    # 组装 header + 内容，总字符数限制 300
+    result = ["【环境变化感知】"] + change_lines
+    total = sum(len(l) for l in result)
+    if total > 300:
+        # 截断最后一行
+        budget = 300 - sum(len(l) for l in result[:-1]) - 1  # -1 for newline
+        if budget > 10:
+            result[-1] = result[-1][:budget] + "…"
+        else:
+            result = result[:-1]  # 直接去掉最后一行
+
+    return result
+
+
+def _preheat_retriever(conn, project: str) -> None:
+    """
+    SessionStart 预热：import heavy modules + FTS5 warm cache。
+    OS 类比：Linux readahead + module preloading — 进程启动时预取页面和模块，
+    让后续 UserPromptSubmit 调用时 Python bytecode cache 和 SQLite page cache 已热。
+    目标：将后续第一次检索的冷启动延迟从 ~27ms import + ~40ms WAL 降至 <5ms。
+    """
+    import time as _t
+    t0 = _t.time()
+    try:
+        # 1. import heavy modules — 触发 Python bytecode cache 加载
+        from scorer import retrieval_score  # noqa: F401
+        from bm25 import hybrid_tokenize, bm25_scores  # noqa: F401
+        from store import fts_search
+        # 2. 空查询预热 FTS5 索引页 — 触发 SQLite page cache 加载
+        fts_search(conn, "warmup", project, top_k=1)
+    except Exception:
+        pass  # 预热失败不影响主流程
+    elapsed = (_t.time() - t0) * 1000
+    try:
+        dmesg_log(conn, DMESG_INFO, "loader", f"preheat: {elapsed:.1f}ms", project=project)
+    except Exception:
+        pass
+
+
+def main():
+    # 迭代66：从 stdin 获取 session_id（SessionStart hook 也提供 session_id）
+    try:
+        _raw = sys.stdin.read()
+        _hook_input = json.loads(_raw) if _raw.strip() else {}
+    except Exception:
+        _hook_input = {}
+    _session_id = (_hook_input.get("session_id", "")
+                   or os.environ.get("CLAUDE_SESSION_ID", "")
+                   or "unknown")
+
+    project = resolve_project_id()
+    has_latest = False
+
+    lines = ["【上次会话状态 · 自动恢复】"]
+
+    # ── Part 1：latest.json 任务状态恢复（原有逻辑）──
+    if LATEST_JSON.exists():
+        try:
+            chunk = MemoryChunk.from_json(LATEST_JSON.read_text(encoding="utf-8"))
+            if _age_secs(chunk.updated_at) <= _sysctl("loader.max_age_secs"):
+                has_latest = True
+                current_tasks, next_tasks, excluded = _parse_content(chunk.content)
+                if current_tasks:
+                    lines.append(f"任务：{' / '.join(current_tasks)}")
+                if next_tasks:
+                    lines.append(f"下一步：{' / '.join(next_tasks)}")
+                if excluded:
+                    lines.append(f"已排除：{' / '.join(excluded)}")
+                if chunk.summary:
+                    lines.append(f"背景：{chunk.summary}")
+                if chunk.project:
+                    lines.append(f"项目：{chunk.project}")
+        except Exception:
+            pass
+
+    # ── Part 2：Working Set 关键知识恢复 ──
+    # 迭代49：CRIU restore 优先 — 从 checkpoint 恢复精确工作集
+    # OS 类比：CRIU restore > 泛化 working set restoration
+    checkpoint_info = None
+    working_set, checkpoint_info = _load_working_set_from_checkpoint(project)
+    if not working_set:
+        # fallback：泛化 Top-K（迭代18 原有逻辑）
+        working_set = _load_working_set(project)
+
+    if working_set:
+        _TYPE_PREFIX = {
+            "decision": "[决策]",
+            "reasoning_chain": "[推理]",
+            "conversation_summary": "[摘要]",
+            "excluded_path": "[排除]",
+            "design_constraint": "⚠️ [约束]",  # 迭代111
+        }
+        ws_label = "【项目工作集】" if not checkpoint_info else "【项目工作集·CRIU恢复】"
+        lines.append(ws_label)
+        for score, chunk_type, summary in working_set:
+            prefix = _TYPE_PREFIX.get(chunk_type, "")
+            lines.append(f"- {prefix} {summary}".strip())
+
+    # ── 迭代91: 活跃目标注入 — Goal Awareness ──
+    # OS 类比：/etc/rc.d/rc.local — 系统启动时自动加载持久化的任务目标配置
+    if STORE_DB.exists():
+        try:
+            _goal_conn = open_db()
+            ensure_schema(_goal_conn)
+            active_goals = _goal_conn.execute(
+                """SELECT title, progress FROM goals
+                   WHERE project = ? AND status = 'active'
+                   ORDER BY updated_at DESC LIMIT 3""",
+                [project]
+            ).fetchall()
+            _goal_conn.close()
+            if active_goals:
+                lines.append("【长期目标】")
+                for g_title, g_progress in active_goals:
+                    pct = int(g_progress * 100)
+                    lines.append(f"- {g_title[:60]} [{pct}%]")
+        except Exception:
+            pass
+
+    # 如果既没有 latest.json 也没有工作集，不注入
+    if not has_latest and not working_set:
+        sys.exit(0)
+
+    # ── 迭代86：Readahead Warm — SessionStart 预热 shadow_trace ──
+    # OS 类比：Linux readahead() syscall — 进程启动时主动预取预期页面，
+    #   避免首次访问时的缺页中断。
+    # 根因：新 session 直到第一次 FULL 检索前，所有 swap_out 都是 0 hit_ids，
+    #   因为 SKIP/TLB 快速路径不写 recall_traces，shadow_trace 也未初始化。
+    # 修复：SessionStart 时查询当前 project 的 Top-K chunk IDs，
+    #   写入 shadow_trace.json，使新 session 第一次 swap_out 就能恢复工作集。
+    if working_set and STORE_DB.exists():
+        try:
+            _st_conn = open_db()
+            ensure_schema(_st_conn)
+            _top_k = _sysctl("loader.working_set_top_k")
+            _ws_rows = _st_conn.execute(
+                """SELECT id FROM memory_chunks
+                   WHERE project = ?
+                     AND chunk_type IN ({})
+                   ORDER BY importance DESC, access_count DESC
+                   LIMIT ?""".format(",".join("?" * len(WORKING_SET_TYPES))),
+                [project, *WORKING_SET_TYPES, _top_k]
+            ).fetchall()
+            _st_conn.close()
+            _ws_ids = [r[0] for r in _ws_rows]
+            if _ws_ids:
+                import time as _time
+                _shadow_data = {
+                    "project": project,
+                    "top_k_ids": _ws_ids,
+                    "session_id": _session_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "source": "session_start_readahead",
+                }
+                _shadow_file = MEMORY_OS_DIR / ".shadow_trace.json"
+                _shadow_file.write_text(
+                    json.dumps(_shadow_data, ensure_ascii=False),
+                    encoding="utf-8"
+                )
+        except Exception:
+            pass  # shadow_trace 预热失败不影响主流程
+
+    # ── 迭代90：Change Awareness — 自上次 session 以来的环境变化感知 ──
+    # OS 类比：inotify + git log — 进程恢复时主动感知外部世界变化，
+    #   避免 AI 在新 session 中"热身"才能知道环境变了什么。
+    # 实现：读取 dmesg 中上一条 session_start 时间戳，对比 git/文件变更。
+    # 约束：0 变化不注入；总字符 ≤300；subprocess timeout=3s；全程 try/except。
+    try:
+        _last_ts = _get_last_session_timestamp()
+        _change_lines = _detect_changes(_last_ts, Path(os.environ.get("CLAUDE_CWD", Path.home() / "ssd/codes/claude-workspace")))
+        if _change_lines:
+            lines.extend(_change_lines)
+    except Exception:
+        pass  # 变化感知失败不影响主流程
+
+    # ── 迭代110 P2: CRIU Session Intent Restore ──────────────────────────────
+    # OS 类比：CRIU restore_task() — 从 dump 文件恢复进程的执行断点状态
+    # 读取上一个 session Stop 时保存的 incomplete intent，注入到新 session
+    try:
+        _intent_file = MEMORY_OS_DIR / "session_intent.json"
+        if _intent_file.exists():
+            _intent_data = json.loads(_intent_file.read_text(encoding="utf-8"))
+            _intent = _intent_data.get("intent", {})
+            # 只注入距今 < 24h 的 intent（过期的无意义）
+            _saved_at = _intent_data.get("saved_at", "")
+            _intent_age = float("inf")
+            if _saved_at:
+                try:
+                    import datetime as _dt
+                    _saved_dt = _dt.datetime.fromisoformat(_saved_at)
+                    if _saved_dt.tzinfo is None:
+                        _saved_dt = _saved_dt.replace(tzinfo=_dt.timezone.utc)
+                    _intent_age = (_dt.datetime.now(_dt.timezone.utc) - _saved_dt).total_seconds()
+                except Exception:
+                    pass
+            if _intent and _intent_age < 86400:  # 24h
+                _intent_lines = ["【上次会话断点（CRIU恢复）】"]
+                if _intent.get("next_actions"):
+                    _intent_lines.append("  待执行：" + " / ".join(_intent["next_actions"][:2]))
+                if _intent.get("open_questions"):
+                    _intent_lines.append("  待验证：" + " / ".join(_intent["open_questions"][:2]))
+                if _intent.get("partial_work"):
+                    _intent_lines.append("  进行中：" + " / ".join(_intent["partial_work"][:2]))
+                if len(_intent_lines) > 1:
+                    lines.extend(_intent_lines)
+    except Exception:
+        pass  # intent 恢复失败不影响主流程
+
+    context_text = "\n".join(lines)
+    _max_ctx = _sysctl("loader.max_context_chars")
+    if len(context_text) > _max_ctx:
+        context_text = context_text[:_max_ctx] + "…"
+
+    # ── 迭代103：跨Agent知识同步（OS 类比：inotify 事件消费）──
+    # extractor 在其他 session 写入后广播通知，loader 在 SessionStart 消费
+    # 告知用户当前 session 启动前其他 agent 积累了哪些新知识
+    try:
+        from net.agent_notify import consume_pending_notifications
+        _notifs = consume_pending_notifications(_session_id, limit=3)
+        if _notifs:
+            lines.append("【跨Agent知识同步】")
+            for _n in _notifs:
+                _proj = _n.get("project", "?")
+                _stats = _n.get("stats", {})
+                _d = _stats.get("decisions", 0)
+                _c = _stats.get("constraints", 0)
+                _total = _stats.get("chunks", 0)
+                _summary = f"+{_total}个chunk"
+                if _d:
+                    _summary += f"（{_d}决策"
+                    if _c:
+                        _summary += f" {_c}约束"
+                    _summary += "）"
+                lines.append(f"- {_proj}: {_summary}")
+            # 重新组装（已有 context_text 可能不含新内容）
+            context_text = "\n".join(lines)
+    except Exception:
+        pass  # IPC 消费失败不影响 SessionStart
+
+    # ── 迭代89：Incremental Knowledge Import — SessionStart 增量导入 ──
+    # OS 类比：Linux firmware loading — 启动时从 /lib/firmware 加载新固件到内核
+    # 检查 self-improving/ 是否有新增/修改的 .md 文件，有则增量导入到 store.db
+    try:
+        _tools_dir = _ROOT / "tools"
+        if _tools_dir.exists():
+            sys.path.insert(0, str(_tools_dir))
+            from import_knowledge import incremental_import
+            _import_result = incremental_import()
+            if _import_result.get("status") == "imported" and _import_result.get("count", 0) > 0:
+                dmesg_log(open_db(), DMESG_INFO, "loader",
+                          f"incremental_import: {_import_result['count']} new chunks from self-improving/",
+                          session_id=_session_id, project=project)
+    except Exception:
+        pass  # 增量导入失败不影响 SessionStart
+
+    # ── 迭代35：Watchdog Timer — SessionStart 时做 POST (Power-On Self-Test) ──
+    # OS 类比：BIOS POST 在启动时检测硬件健康，Linux watchdog 在启动时注册
+    try:
+        _log_conn = open_db()
+        ensure_schema(_log_conn)
+
+        # ── 迭代B3：Hook Analyzer 启动健康检查 ──
+        # OS 类比：systemd-analyze verify — 启动时检测 unit 配置问题
+        # 检测循环依赖和高风险超时，记录 WARN 级别 dmesg
+        try:
+            from init.hook_analyzer import HookAnalyzer
+            _ha = HookAnalyzer()
+            _ha_report = _ha.analyze()
+            _ha_issues = []
+            if _ha_report.cycle_errors:
+                for _ev, _err in _ha_report.cycle_errors.items():
+                    _ha_issues.append(f"cycle:{_ev}")
+            _ha_high_risks = [r for r in _ha_report.timeout_risks if r.risk_level == "HIGH"]
+            if _ha_high_risks:
+                _ha_issues.append(f"timeout_high:{len(_ha_high_risks)}")
+            if _ha_issues:
+                dmesg_log(_log_conn, DMESG_WARN, "hook_analyzer",
+                          f"health_check: {', '.join(_ha_issues)} total_hooks={_ha_report.total_hooks}",
+                          session_id=_session_id, project=project,
+                          extra={"cycle_errors": list(_ha_report.cycle_errors.keys()),
+                                 "high_timeout_hooks": [r.unit_name for r in _ha_high_risks]})
+        except Exception:
+            pass  # hook_analyzer 失败不影响 SessionStart 主流程
+
+        wd_result = watchdog_check(_log_conn)
+        wd_status = wd_result.get("status", "UNKNOWN")
+        wd_repairs = wd_result.get("repairs", [])
+        wd_dur = wd_result.get("duration_ms", 0)
+
+        # 如果有修复动作或异常，记录 dmesg
+        if wd_status == "REPAIRED":
+            repair_summary = ", ".join(r["action"] for r in wd_repairs)
+            dmesg_log(_log_conn, DMESG_WARN, "watchdog",
+                      f"POST: {wd_status} repairs=[{repair_summary}] {wd_dur:.1f}ms",
+                      session_id=_session_id, project=project,
+                      extra={"repairs": wd_repairs})
+        elif wd_status == "DEGRADED":
+            dmesg_log(_log_conn, DMESG_WARN, "watchdog",
+                      f"POST: {wd_status} — manual intervention may be needed {wd_dur:.1f}ms",
+                      session_id=_session_id, project=project,
+                      extra={"checks": wd_result.get("checks", [])})
+
+        # ── 迭代51：Autotune — 参数自优化 ──
+        # OS 类比：TCP Window Auto-Tuning — 根据运行时统计自动调整参数
+        # SessionStart 时运行，分析 recall_traces 命中率和延迟，微调 per-project sysctl
+        autotune_result = {"tuned": False}
+        try:
+            autotune_result = autotune(_log_conn, project)
+            if autotune_result.get("tuned"):
+                _log_conn.commit()
+                adj_summary = ", ".join(f"{a['key']}:{a['old']}→{a['new']}" for a in autotune_result["adjustments"])
+                dmesg_log(_log_conn, DMESG_INFO, "autotune",
+                          f"tuned: {adj_summary} hit_rate={autotune_result['stats'].get('hit_rate_pct',0)}%",
+                          session_id=_session_id, project=project,
+                          extra={"adjustments": autotune_result["adjustments"]})
+        except Exception:
+            pass
+
+        # ── 迭代44：MGLRU aging — 推进 generation clock ──
+        # OS 类比：MGLRU lru_gen_inc() — SessionStart 时推进所有 chunk 的 gen
+        # 被访问的 chunk 在 retriever 中 promote 回 gen 0，未访问的逐渐变老
+        mglru_result = {"aged": False}
+        try:
+            mglru_result = mglru_aging(_log_conn, project)
+            if mglru_result.get("aged"):
+                _log_conn.commit()
+        except Exception:
+            pass
+
+        # ── 迭代42：DAMON scan — 主动数据访问模式监控 ──
+        # OS 类比：Linux DAMON (2021) 在系统运行时主动采样 access pattern
+        # SessionStart 时做一次全量扫描，识别 dead/cold chunk 并主动回收
+        damon_result = {"heatmap": {}, "actions": {}}
+        try:
+            damon_result = damon_scan(_log_conn, project)
+            damon_actions = damon_result.get("actions", {})
+            if any(v > 0 for v in damon_actions.values()):
+                _log_conn.commit()
+        except Exception:
+            pass
+
+        # ── 迭代63：Trace GC — recall_traces 生命周期管理 ──
+        # OS 类比：logrotate — SessionStart 时清理过期日志
+        gc_result = {"deleted_age": 0, "deleted_rows": 0, "remaining": 0}
+        try:
+            gc_result = gc_traces(_log_conn, project)
+            if gc_result["deleted_age"] > 0 or gc_result["deleted_rows"] > 0:
+                dmesg_log(_log_conn, DMESG_INFO, "gc",
+                          f"trace_gc: age={gc_result['deleted_age']} rows={gc_result['deleted_rows']} remaining={gc_result['remaining']}",
+                          session_id=_session_id, project=project)
+        except Exception:
+            pass
+
+        # ── 迭代146：Swap GC — 孤儿 project 清理 ──
+        # OS 类比：process exit → free anonymous swap pages (do_exit → exit_mmap)
+        # 消亡 project（主表已无 chunk）的 swap 条目永久占位，不会被 swap_in，
+        # 挤压活跃 project 的 swap 使用空间 → SessionStart 清理
+        gc_swap_result = {"orphan_projects": [], "deleted_count": 0, "freed_pct": 0.0}
+        try:
+            gc_swap_result = gc_orphan_swap(_log_conn)
+            if gc_swap_result["deleted_count"] > 0:
+                dmesg_log(_log_conn, DMESG_INFO, "gc",
+                          f"swap_gc: orphans={len(gc_swap_result['orphan_projects'])} deleted={gc_swap_result['deleted_count']} freed={gc_swap_result['freed_pct']}%",
+                          session_id=_session_id, project=project)
+                _log_conn.commit()
+        except Exception:
+            pass
+
+        # 迭代29 dmesg：SessionStart 加载记录
+        damon_summary = ""
+        damon_hm = damon_result.get("heatmap", {})
+        if damon_hm:
+            damon_summary = f" damon=H{damon_hm.get('hot',0)}/W{damon_hm.get('warm',0)}/C{damon_hm.get('cold',0)}/D{damon_hm.get('dead',0)}"
+        mglru_summary = ""
+        if mglru_result.get("aged"):
+            mglru_summary = f" mglru_aged={mglru_result.get('affected_count', 0)}"
+
+        criu_summary = ""
+        if checkpoint_info:
+            criu_summary = f" criu_restore={checkpoint_info['checkpoint_id']} age={checkpoint_info['age_hours']}h ids={len(checkpoint_info['chunks'])}"
+
+        autotune_summary = ""
+        if autotune_result.get("tuned"):
+            autotune_summary = f" autotune={len(autotune_result['adjustments'])}adj"
+        elif autotune_result.get("skipped_reason"):
+            autotune_summary = f" autotune=skip({autotune_result['skipped_reason'][:20]})"
+
+        gc_summary = ""
+        gc_deleted = gc_result.get("deleted_age", 0) + gc_result.get("deleted_rows", 0)
+        if gc_deleted > 0:
+            gc_summary = f" gc_traces={gc_deleted}del/{gc_result.get('remaining', 0)}rem"
+
+        gc_swap_summary = ""
+        if gc_swap_result.get("deleted_count", 0) > 0:
+            gc_swap_summary = f" gc_swap={gc_swap_result['deleted_count']}del({gc_swap_result['freed_pct']}%freed)"
+
+        dmesg_log(_log_conn, DMESG_INFO, "loader",
+                  f"session_start latest={'Y' if has_latest else 'N'} working_set={len(working_set)} ctx_len={len(context_text)} watchdog={wd_status}{autotune_summary}{criu_summary}{damon_summary}{mglru_summary}{gc_summary}{gc_swap_summary}",
+                  session_id=_session_id, project=project)
+        _log_conn.commit()
+        _log_conn.close()
+    except Exception:
+        pass
+
+    # ── 迭代B4：预热 retriever heavy modules + FTS5 index cache ──
+    # 在输出之前执行，利用 SessionStart 的空闲时间预热，
+    # 降低第一次 UserPromptSubmit 的冷启动延迟（目标：消除 ~27ms import + WAL checkpoint）
+    if STORE_DB.exists():
+        try:
+            _ph_conn = open_db()
+            ensure_schema(_ph_conn)
+            _preheat_retriever(_ph_conn, project)
+            _ph_conn.commit()
+            _ph_conn.close()
+        except Exception:
+            pass  # 预热失败不影响主流程
+
+    # ── 迭代100：IPC 消息消费 + 过期清理（OS 类比：init 进程收割僵尸进程）──
+    try:
+        _ipc_conn = open_db()
+        ensure_schema(_ipc_conn)
+        from store_vfs import ipc_recv, ipc_cleanup_expired
+        # 清理过期消息
+        expired = ipc_cleanup_expired(_ipc_conn)
+        # 消费待处理的知识更新通知
+        msgs = ipc_recv(_ipc_conn, _session_id, msg_type="knowledge_update", limit=5)
+        if msgs or expired:
+            dmesg_log(_ipc_conn, DMESG_INFO, "loader",
+                      f"ipc: consumed={len(msgs)} expired={expired}",
+                      session_id=_session_id, project=project)
+        _ipc_conn.commit()
+        _ipc_conn.close()
+    except Exception:
+        pass  # IPC 失败不影响主流程
+
+    output = {
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": context_text,
+        }
+    }
+    print(json.dumps(output, ensure_ascii=False))
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

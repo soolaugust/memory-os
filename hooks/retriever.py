@@ -1,0 +1,2739 @@
+#!/usr/bin/env python3
+"""
+memory-os retriever — UserPromptSubmit hook（与 writer.py 并列）
+职责：按当前 prompt + 任务主题做 BM25 召回，幂等注入 L2
+目标：< 50ms
+
+v19 迭代62+：Anti-Starvation — 反饥饿机制解决召回同质化
+v18 迭代62：Query Truncation + PSI Import-aware Timing — 延迟治理
+v17 迭代61：vDSO Fast Path — Lazy Import + 启动加速
+v16 迭代57：TLB — Translation Lookaside Buffer 检索快速路径
+v15 迭代41：Deadline I/O Scheduler — 检索时间预算保障
+v11 迭代29：dmesg Ring Buffer — 结构化事件日志
+v10 迭代28：Scheduler Nice Levels — Query Priority Classification
+OS 类比：Linux CFS nice 值 (-20 ~ 19)
+  CFS (2007) 给每个进程一个 nice 值，决定其获得的 CPU 时间片权重：
+    nice -20 → weight 88761（最高优先级，获得最多时间片）
+    nice   0 → weight  1024（默认）
+    nice  19 → weight    15（最低优先级，几乎不分配）
+  不同优先级对应不同的调度策略：
+    SCHED_FIFO  → 实时任务，立即执行
+    SCHED_OTHER → 普通任务，CFS 公平调度
+    SCHED_BATCH → 批处理任务，低优先级后台执行
+  类似地，memory-os 的检索请求并非等价：
+    确认类 query（"好"/"继续"）→ SKIP（nice 19，零I/O，直接返回）
+    普通 query → LITE（nice 0，只查 FTS5，跳过 knowledge_router）
+    含缺页信号/多实体/长技术 query → FULL（nice -20，完整检索+router）
+  这避免了对所有请求一视同仁地执行完整检索流程的浪费。
+
+历史：
+  v17 迭代61：vDSO Fast Path — SKIP/TLB 路径前置到 heavy import 之前
+      SKIP: <1ms（零 import，只用 stdlib regex），TLB hit: <3ms（只读文件+stat）
+      原因：import 链路（store+scorer+bm25+config+utils）冷启动 ~27ms，
+      但 SKIP(42%) + TLB hit(~40%) 共占 ~80% 请求，不需要任何 heavy module。
+  v16 迭代57：TLB — prompt_hash + db_mtime 缓存，TLB hit 时零 I/O 退出
+  v15 迭代41：Deadline I/O Scheduler — 时间预算保障，各阶段按优先级分配时间
+  v13 迭代34：Second Chance — freshness_bonus 新知识曝光公平性
+  v12 迭代33：Swap Fault — 主表 miss 时检查 swap 分区并 swap in 恢复
+  v11 迭代29：dmesg Ring Buffer（各关键路径写入结构化事件日志）
+  v9 迭代24：Per-Request Connection Scope（task_struct files_struct）
+  v8 迭代23：FTS5 索引召回（ext3 htree O(log N) 替代 O(N) 全表扫描）
+"""
+import sys
+import json
+import os
+import zlib
+# ── 迭代159：Remove pathlib.Path — 消除 ~7ms import 开销 ──────────────────────
+# OS 类比：Linux kernel vfs_stat() 直接调用 sys_stat()，不经 glibc 抽象层。
+# pathlib.Path 是 os.path 的面向对象封装，os 模块在 Python 启动时已预加载（0ms）。
+# retriever.py 是 vDSO Stage 0+1 快速路径（~80% 请求），pathlib ~7ms 全部浪费。
+# 所有 Path 对象改为 str，所有方法调用改为 os.path.*/open() 等价操作。
+
+# ── 迭代156：Replace hashlib with zlib for TLB prompt_hash ────────────────────
+# OS 类比：Linux CRC32c hardware acceleration (SSE4.2, 2008) — 用内置硬件指令替代
+#   软件实现的 SHA256，吞吐量从 ~1 GB/s 提升到 ~10 GB/s（10×）。
+#   memory-os 等价：hashlib.sha256 模块独立 import 成本 ~2.25ms（含 _hashlib.so 加载），
+#   而 zlib 模块在 Python 启动时已被 sqlite3/json 作为 transitive dependency 拉入，
+#   后续 import zlib 近乎零成本（~0.09ms）。
+#   TLB prompt_hash 不需要密码学强度（只用于缓存查找），CRC32 完全满足需求：
+#     - 8 位 hex 输出（0xffffffff → 4字节，16^8=4B 个桶）
+#     - CRC32 collision rate ≈ 1/2^32 — 与 sha256[:8] 实际可用碰撞率相当
+#     - 0.674µs/call vs sha256 1.173µs/call（hash 计算也快 1.7×）
+#   总节省：~2.11ms（import 成本）+ ~0.5µs/call（计算成本）
+#   hashlib 仍在 _load_modules() 中懒加载（Stage 2 用于 md5 injection hash）
+
+# config 轻量级 import（~3ms，远低于 store+scorer+bm25+utils 的 ~24ms）
+# 多个模块级函数（_drr_select, _classify_query_priority）需要 _sysctl
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+_HOOKS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _HOOKS_DIR not in sys.path:
+    sys.path.insert(0, _HOOKS_DIR)
+from config import get as _sysctl  # ~3ms, 模块级函数依赖
+from config import sched_ext_match as _sched_ext_match  # 迭代47: sched_ext
+
+# ── 迭代61：vDSO Fast Path — Lazy Import ──────────────────────────────────────
+# OS 类比：Linux vDSO (Virtual Dynamic Shared Object, 2004)
+#   gettimeofday() 是最高频系统调用之一（每秒数百万次）。
+#   传统实现需要用户态→内核态切换（syscall 开销 ~100ns）。
+#   vDSO 将内核只读数据页映射到用户态地址空间，
+#   gettimeofday() 直接在用户态读取，无需 syscall（~5ns）。
+#
+#   memory-os 等价问题：
+#     retriever.py import 链路（store+scorer+bm25+config+utils）冷启动 ~27ms，
+#     但 SKIP(42%) + TLB hit(~40%) 共占 ~80% 请求，不需要任何 heavy module。
+#     每次 hook 调用都是独立进程（无缓存），必须付 import 成本。
+#
+#   解决：两级 fast path（类比 vDSO + fast syscall return）
+#     Stage 0：只用 stdlib 判断 SKIP → <1ms 退出（零 heavy import）
+#     Stage 1：TLB 检查只需读文件+stat → <3ms 退出
+#     Stage 2：_load_modules() 延迟加载全部模块 → 完整检索
+#
+# 将 memory-os 根目录加入 path（延迟到 Stage 2）— _ROOT/_HOOKS_DIR 已在上方定义（str）
+
+# ── 路径常量（只用 os.path + os.environ，不触发 heavy import）──
+# 迭代159：改为纯字符串路径，消除 pathlib 依赖
+_mem_env = os.environ.get("MEMORY_OS_DIR")
+MEMORY_OS_DIR = _mem_env if _mem_env else os.path.join(os.path.expanduser("~"), ".claude", "memory-os")
+_db_env = os.environ.get("MEMORY_OS_DB")
+STORE_DB = _db_env if _db_env else os.path.join(MEMORY_OS_DIR, "store.db")
+HASH_FILE = os.path.join(MEMORY_OS_DIR, ".last_injection_hash")
+TLB_FILE = os.path.join(MEMORY_OS_DIR, ".last_tlb.json")       # 迭代57→64: TLB v2 multi-slot
+CHUNK_VERSION_FILE = os.path.join(MEMORY_OS_DIR, ".chunk_version")  # 迭代64: chunk_version
+PAGE_FAULT_LOG = os.path.join(MEMORY_OS_DIR, "page_fault_log.json")
+SHADOW_TRACE_FILE = os.path.join(MEMORY_OS_DIR, ".shadow_trace.json")  # 迭代85: Shadow Trace
+
+# ── Heavy modules — 延迟加载（迭代61 vDSO Fast Path）──
+# 这些模块只在 Stage 2（完整检索）时才需要
+_modules_loaded = False
+
+
+def _load_modules():
+    """延迟加载 heavy modules。只在 SKIP + TLB 都 miss 时才调用。"""
+    global _modules_loaded
+    if _modules_loaded:
+        return
+    _modules_loaded = True
+
+    # 加入 path
+    if str(_ROOT) not in sys.path:
+        sys.path.insert(0, str(_ROOT))
+    if str(_HOOKS_DIR) not in sys.path:
+        sys.path.insert(0, str(_HOOKS_DIR))
+
+    # import heavy modules into global namespace
+    import re as _re  # 迭代160：re 从模块级移至此处 — Stage 0/1 不再付 ~6-8ms re import
+    import sqlite3 as _sqlite3
+    import uuid as _uuid
+    import hashlib as _hashlib  # 迭代156：Stage 2 才需要 md5 injection hash，延迟到此处加载
+    from datetime import datetime as _datetime, timezone as _timezone
+    from utils import resolve_project_id as _resolve_project_id
+    from scorer import retrieval_score as _retrieval_score
+    from scorer import recency_score as _recency_score
+    from scorer import tmv_saturation_discount as _tmv_saturation_discount
+    from store import (open_db as _open_db, ensure_schema as _ensure_schema,
+                       get_chunks as _get_chunks, update_accessed as _update_accessed,
+                       insert_trace as _insert_trace, fts_search as _fts_search,
+                       dmesg_log as _dmesg_log, madvise_read as _madvise_read,
+                       swap_fault as _swap_fault, swap_in as _swap_in,
+                       psi_stats as _psi_stats, mglru_promote as _mglru_promote,
+                       readahead_pairs as _readahead_pairs,
+                       context_pressure_governor as _context_pressure_governor,
+                       chunk_recall_counts as _chunk_recall_counts)
+    from store import DMESG_INFO as _DMESG_INFO, DMESG_WARN as _DMESG_WARN, DMESG_DEBUG as _DMESG_DEBUG
+    from bm25 import hybrid_tokenize as _hybrid_tokenize, bm25_scores as _bm25_scores, normalize as _normalize, bm25_scores_cached as _bm25_scores_cached
+    from store_vfs import read_chunk_version as _read_chunk_version
+    # config 已在模块级 import（_sysctl, _sched_ext_match），无需重复加载
+
+    # 注入全局变量供后续函数使用
+    g = globals()
+    g['re'] = _re  # 迭代160：re 模块注入全局，供 Stage 2 函数使用
+
+    # ── 迭代160：编译延迟的 Stage 2 正则（re 已可用）──
+    g['_SKIP_PATTERNS'] = _re.compile(
+        r'^(?:'
+        r'好[的吧啊嗯哦]?'
+        r'|[嗯恩哦噢]+'
+        r'|ok(?:ay)?'
+        r'|是[的吧]?'
+        r'|对[的吧]?'
+        r'|收到|了解|明白|可以|继续|开始|执行|确认|同意|谢谢'
+        r'|thanks?|ye[sp]|no[pe]?|got\s*it|sure|lgtm'
+        r')$',
+        _re.IGNORECASE
+    )
+    g['_TECH_SIGNAL'] = _re.compile(
+        r'(?:'
+        r'`[^`]+`'
+        r'|[\w./]+\.(?:py|js|ts|md|json|db|sql|yaml|toml|rs|go|java|cpp|h)\b'
+        r'|(?:函数|类|模块|接口|方法|变量|配置|部署|迁移)'
+        r'|\b(?:error|bug|fix|crash)\b'
+        r'|\b(?:def|class|import|function|const)\b'
+        r')'
+    )
+    g['_ACRONYM_SIGNAL'] = _re.compile(r'\b[A-Z][A-Z0-9_]{2,}\b')
+
+    g['sqlite3'] = _sqlite3
+    g['uuid'] = _uuid
+    g['hashlib'] = _hashlib  # 迭代156：md5 injection hash 用（Stage 2 才需要）
+    g['datetime'] = _datetime
+    g['timezone'] = _timezone
+    g['resolve_project_id'] = _resolve_project_id
+    g['_unified_retrieval_score'] = _retrieval_score
+    g['_unified_recency_score'] = _recency_score
+    g['open_db'] = _open_db
+    g['ensure_schema'] = _ensure_schema
+    g['store_get_chunks'] = _get_chunks
+    g['update_accessed'] = _update_accessed
+    g['store_insert_trace'] = _insert_trace
+    g['fts_search'] = _fts_search
+    g['dmesg_log'] = _dmesg_log
+    g['DMESG_INFO'] = _DMESG_INFO
+    g['DMESG_WARN'] = _DMESG_WARN
+    g['DMESG_DEBUG'] = _DMESG_DEBUG
+    g['madvise_read'] = _madvise_read
+    g['swap_fault'] = _swap_fault
+    g['swap_in'] = _swap_in
+    g['psi_stats'] = _psi_stats
+    g['mglru_promote'] = _mglru_promote
+    g['readahead_pairs'] = _readahead_pairs
+    g['context_pressure_governor'] = _context_pressure_governor
+    g['chunk_recall_counts'] = _chunk_recall_counts
+    g['hybrid_tokenize'] = _hybrid_tokenize
+    g['bm25_scores'] = _bm25_scores
+    g['normalize'] = _normalize
+    g['bm25_scores_cached'] = _bm25_scores_cached
+    g['read_chunk_version'] = _read_chunk_version
+    g['_tmv_saturation_discount'] = _tmv_saturation_discount
+    # ── 迭代333：TMV 常量（模块加载时从 sysctl 读取，运行时直接用）──
+    g['_tmv_acc_threshold'] = _sysctl("scorer.tmv_acc_threshold") or 50
+    g['_tmv_session_density_gate'] = _sysctl("scorer.tmv_session_density_gate") or 4
+
+    # ── 迭代152：VFS 惰性初始化 — LITE 路径跳过 vfs import/init ──────────────
+    # OS 类比：Linux dlopen(RTLD_LAZY) — 符号解析推迟到第一次调用时
+    #   RTLD_NOW: dlopen 立即解析所有符号（等价于旧版：_load_modules 里预热 vfs）
+    #   RTLD_LAZY: 只加载 .so，符号在第一次调用时才绑定（等价于 lazy init）
+    #
+    #   旧问题：LITE 路径（占 ~60% 请求）从不使用 kr_route，但仍然付：
+    #     vfs import: 23ms（ThreadPoolExecutor, concurrent.futures 等）
+    #     _get_new_vfs() 预热: ~0.2ms（已初始化）
+    #   总计 LITE 路径每次浪费 23ms 在永远不会用的 vfs import 上。
+    #
+    #   解决：
+    #     _load_modules() 不 import vfs，只设置 _KR_AVAILABLE=True（哨兵）
+    #     实际 vfs import + 初始化推迟到 kr_route 第一次被调用时（lazy closure）
+    #     LITE 路径（run_router=False）永远不调 kr_route → 永远不付 23ms
+    #     FULL 路径第一次调 kr_route 时付 ~23ms（但 FULL 本来就更慢，可接受）
+    #
+    #   注意：ThreadPoolExecutor 初始化的 34ms 现在在 kr_route 第一次调用时才付，
+    #   但 kr_route 有 timeout_ms 参数，VFS 内部有 deadline 保护，不会阻塞主路径。
+    _vfs_loaded = False
+    try:
+        # 只做 import 检测（看 vfs.py 是否存在），不实际 import 或初始化
+        import importlib.util as _ilu
+        if _ilu.find_spec("vfs") is not None:
+            _PREFIX_NEW = {
+                "decision": "[决策]", "excluded_path": "[排除]",
+                "reasoning_chain": "[推理]", "rule": "[规则]",
+                "reference": "[索引]", "knowledge": "[知识]",
+            }
+
+            def _new_vfs_search(query, sources=None, top_k=3, timeout_ms=100):
+                """新 VFS 搜索（惰性初始化版），返回 knowledge_router 兼容格式"""
+                # 惰性 import + 初始化：第一次调用时才触发（RTLD_LAZY 语义）
+                from vfs import get_vfs as _lazy_get_vfs
+                _vfs = _lazy_get_vfs()
+                items = _vfs.search(query, top_k=top_k, deadline_ms=timeout_ms)
+                if sources:
+                    items = [i for i in items if i.source in sources]
+                return [
+                    {
+                        "source": i.source,
+                        "chunk_type": i.type,
+                        "summary": i.summary,
+                        "score": i.score,
+                        "content": (i.content or "")[:300],
+                        "path": i.path,
+                    }
+                    for i in items
+                ]
+
+            def _new_vfs_format(results):
+                """格式化新 VFS 结果（兼容旧格式）"""
+                if not results:
+                    return ""
+                lines = ["【知识路由召回】"]
+                for r in results:
+                    prefix = _PREFIX_NEW.get(r.get("chunk_type", ""), "")
+                    src = r.get("source", "")
+                    src_tag = f"({src})" if src else ""
+                    lines.append(f"- {prefix} {r['summary']} {src_tag}".strip())
+                return "\n".join(lines)
+
+            g['kr_route'] = _new_vfs_search
+            g['kr_format'] = _new_vfs_format
+            g['_KR_AVAILABLE'] = True
+            _vfs_loaded = True
+    except Exception:
+        pass
+
+    if not _vfs_loaded:
+        try:
+            from knowledge_vfs_init import search as _kvfs_search, format_for_context as _kvfs_format, init_knowledge_vfs as _kvfs_init
+            _kvfs_init()
+            g['kr_route'] = _kvfs_search
+            g['kr_format'] = _kvfs_format
+            g['_KR_AVAILABLE'] = True
+        except Exception:
+            try:
+                from knowledge_router import route as _kr_route, format_for_context as _kr_format
+                g['kr_route'] = _kr_route
+                g['kr_format'] = _kr_format
+                g['_KR_AVAILABLE'] = True
+            except Exception:
+                g['_KR_AVAILABLE'] = False
+
+# 迭代27：常量迁移至 config.py sysctl 注册表（运行时可调）
+# 原硬编码：TOP_K=3, TOP_K_FAULT=5, MAX_CONTEXT_CHARS=600, MAX_CONTEXT_CHARS_FAULT=800
+
+
+    # ── BM25 已迁移至 bm25.py（迭代22 Shared Library）──
+
+
+# ── 迭代61：vDSO Fast Path — Stage 0 + Stage 1 ──────────────────────────────
+# 在任何 heavy import 之前判断 SKIP 和 TLB hit，省掉 ~27ms import 开销。
+# Stage 0：SKIP regex match（只用 re，<1ms）
+# Stage 1：TLB file check（只用 json + os.stat，<3ms）
+
+# ── 迭代160：Replace re.compile with pure-string data structures — 消除 ~6-8ms re import ──
+# OS 类比：Linux iptables hash match (O(1) set lookup) vs regex match (O(N) NFA evaluation)
+#   iptables -m set --match-set 替代 iptables --match string --algo bm — 对固定词集用 hash 表。
+#   re 模块在 Python 冷启动时不预加载（~6-8ms），而 frozenset + str.in 操作只用 Python 内置类型。
+#   SKIP path (~42%) + TLB hit (~40%) = ~82% 的请求受益，每次节省 ~6-8ms。
+#
+# 旧方案：_VDSO_SKIP_RE = re.compile(...) + _VDSO_TECH_RE = re.compile(...)
+#   import re 在模块加载时执行（Stage 0 之前），即使 SKIP 后立刻退出也付 ~6-8ms。
+# 新方案：frozenset + str.in + isalpha() 边界检查 — 零 import，纯内置操作。
+#   Stage 2 仍需 re，但 import re 已移至 _load_modules()（只在完整检索时执行）。
+
+_VDSO_SKIP_EXACT = frozenset([
+    # 中文确认词（展开变体）
+    '好', '好的', '好吧', '好啊', '好嗯', '好哦',
+    '是', '是的', '是吧',
+    '对', '对的', '对吧',
+    '收到', '了解', '明白', '可以', '继续', '开始', '执行', '确认', '同意', '谢谢',
+    # 英文确认词（小写）
+    'ok', 'okay',
+    'thanks', 'thank',
+    'yes', 'yep',
+    'no', 'nope',
+    'got it', 'gotit',
+    'sure', 'lgtm',
+])
+# 文件扩展名集合（只需包含 dot）
+_VDSO_TECH_EXTS = frozenset([
+    '.py', '.js', '.ts', '.md', '.json', '.db', '.sql',
+    '.yaml', '.toml', '.rs', '.go', '.java', '.cpp', '.h',
+])
+# 中文技术词（直接包含检测，无边界需求）
+_VDSO_TECH_CJK = frozenset(['函数', '类', '模块', '接口', '方法', '变量', '配置', '部署', '迁移'])
+# 英文技术词（需要词边界检查，避免误匹配 "classic"→"class"）
+_VDSO_TECH_EN = frozenset(['error', 'bug', 'fix', 'crash', 'def', 'class', 'import', 'function', 'const'])
+# [嗯恩哦噢]+ 的有效字符集
+_VDSO_SKIP_FILLER = frozenset('嗯恩哦噢')
+
+
+def _vdso_is_skip(prompt: str) -> bool:
+    """
+    纯字符串 SKIP 检测（替代 _VDSO_SKIP_RE.match）。
+    OS 类比：iptables hash match O(1) vs regex NFA O(N)。
+    """
+    p = prompt.lower()
+    if p in _VDSO_SKIP_EXACT:
+        return True
+    # [嗯恩哦噢]+ — 全部由填充音组成的短句
+    if prompt and all(c in _VDSO_SKIP_FILLER for c in prompt):
+        return True
+    return False
+
+
+def _vdso_has_tech(prompt: str) -> bool:
+    """
+    纯字符串技术信号检测（替代 _VDSO_TECH_RE.search）。
+    OS 类比：Bloom filter O(1) 预筛 + exact match，避免 NFA 遍历。
+    """
+    # 反引号代码（最快路径：单字符检测）
+    if '`' in prompt:
+        return True
+    p_lower = prompt.lower()
+    # 文件扩展名（.py/.js/... 出现即有技术信号）
+    for ext in _VDSO_TECH_EXTS:
+        if ext in p_lower:
+            return True
+    # 中文技术词（直接包含，无边界歧义）
+    for w in _VDSO_TECH_CJK:
+        if w in prompt:
+            return True
+    # 英文技术词（需要词边界：前后不能是字母）
+    for w in _VDSO_TECH_EN:
+        idx = p_lower.find(w)
+        while idx >= 0:
+            before_ok = (idx == 0 or not p_lower[idx - 1].isalpha())
+            after_ok = (idx + len(w) >= len(p_lower) or not p_lower[idx + len(w)].isalpha())
+            if before_ok and after_ok:
+                return True
+            idx = p_lower.find(w, idx + 1)
+    return False
+
+
+def _vdso_fast_exit() -> bool:
+    """
+    迭代61：vDSO Fast Path — 在 heavy import 之前处理 SKIP + TLB hit。
+    返回 True 表示已处理（应 sys.exit(0)），False 表示需要继续完整流程。
+
+    OS 类比：
+      vDSO: 高频路径绕过内核，直接在用户态完成
+      SKIP: 等价于 gettimeofday() 的 vDSO 快速路径
+      TLB hit: 等价于 TLB + fast syscall return（不走完整 page table walk）
+    """
+    # ── 读 stdin ──
+    try:
+        raw = sys.stdin.read()
+        hook_input = json.loads(raw) if raw.strip() else {}
+    except Exception:
+        hook_input = {}
+
+    prompt = (hook_input.get("prompt", "") or "").strip()
+
+    # ── Stage 0：SKIP 快速判断（零 I/O，<1ms）──
+    # 条件：prompt 匹配 SKIP 模式 + 无技术信号 + 无未消费的缺页日志
+    # 缺页时不 SKIP：缺页信号优先级最高（等价于 SCHED_DEADLINE 不可抢占）
+    if not prompt:
+        sys.exit(0)
+    has_page_fault_file = os.path.exists(PAGE_FAULT_LOG)
+    if not has_page_fault_file:
+        if _vdso_is_skip(prompt) and not _vdso_has_tech(prompt):
+            sys.exit(0)
+
+    # ── Stage 1：TLB v2 快速路径（只读文件+stat，<3ms）──────────────────────
+    # 迭代64：Multi-Slot TLB + chunk_version Selective Invalidation
+    # OS 类比：N-Way Set-Associative TLB + NFS Weak Cache Consistency (WKC)
+    #
+    #   v1 问题：TLB 用 db_mtime 判断失效，但 writer（async）每次写入
+    #   prompt_context 都改变 db_mtime → 42% 请求 TLB miss → 完整检索 →
+    #   发现结果不变（skipped_same_hash），平均浪费 16.9ms/请求。
+    #
+    #   v2 解决：
+    #     1. chunk_version 替代 db_mtime（只有 insert/delete/swap 递增，不含元数据更新）
+    #     2. Multi-Slot 缓存（按 prompt_hash 索引，最多 MAX_TLB_ENTRIES 条目）
+    #     3. 两级命中：
+    #        L1：prompt_hash + chunk_version 完全匹配 → 零 I/O 退出
+    #        L2：prompt_hash miss 但 chunk_version 匹配任意 slot 的 injection_hash
+    #            = 当前 HASH_FILE → 结果未变，跳过（不管 prompt 怎么变）
+    if not os.path.exists(STORE_DB):
+        sys.exit(0)
+
+    if not has_page_fault_file:
+        # 迭代156：zlib.crc32 替代 hashlib.sha256（TLB 不需要密码学强度，CRC32 足够）
+        prompt_hash = format(zlib.crc32(prompt.encode()) & 0xffffffff, '08x')
+        try:
+            # 读取 chunk_version（替代 db_mtime）
+            chunk_ver = 0
+            if os.path.exists(CHUNK_VERSION_FILE):
+                try:
+                    with open(CHUNK_VERSION_FILE, encoding="utf-8") as _f:
+                        chunk_ver = int(_f.read().strip())
+                except (ValueError, OSError):
+                    chunk_ver = 0
+
+            if os.path.exists(TLB_FILE):
+                with open(TLB_FILE, encoding="utf-8") as _f:
+                    tlb = json.loads(_f.read())
+                slots = tlb.get("slots", {})
+                tlb_ver = tlb.get("chunk_version", -1)
+
+                # L1: prompt_hash + chunk_version 完全匹配
+                if chunk_ver == tlb_ver and prompt_hash in slots:
+                    try:
+                        with open(HASH_FILE, encoding="utf-8") as _f:
+                            last_hash = _f.read().strip()
+                    except Exception:
+                        last_hash = ""
+                    if slots[prompt_hash].get("injection_hash") == last_hash:
+                        sys.exit(0)  # TLB L1 hit
+
+                # L2: chunk_version 匹配（chunk 未变）+ HASH_FILE 匹配任意 slot
+                # 当 prompt 变了但 DB 内容未变时，Top-K 结果仍然有效
+                if chunk_ver == tlb_ver:
+                    try:
+                        with open(HASH_FILE, encoding="utf-8") as _f:
+                            last_hash = _f.read().strip()
+                    except Exception:
+                        last_hash = ""
+                    if last_hash:
+                        for _s in slots.values():
+                            if _s.get("injection_hash") == last_hash:
+                                sys.exit(0)  # TLB L2 hit
+        except Exception:
+            pass  # TLB 读取失败 → fallthrough 到完整流程
+
+    # ── Stage 0+1 都 miss → 返回 hook_input 供 Stage 2 使用 ──
+    # 将 hook_input 存储在模块级变量，避免 main() 重复读 stdin（stdin 已耗尽）
+    global _vdso_hook_input
+    _vdso_hook_input = hook_input
+    return False
+
+
+# 模块级变量：_vdso_fast_exit 传递 hook_input 给 main()
+_vdso_hook_input = None
+
+
+# ── 迭代28：Scheduler Nice Levels ─────────────────────────────────────────────
+# OS 类比：Linux CFS nice 值 — 不同优先级 query 获得不同检索资源
+# SKIP = nice 19（零 I/O），LITE = nice 0（仅 FTS5），FULL = nice -20（FTS5 + router）
+
+# ── 迭代160：_SKIP_PATTERNS / _TECH_SIGNAL / _ACRONYM_SIGNAL 延迟编译 ────────────
+# 这三个 re.compile 对象只在 Stage 2（_classify_query_priority / _has_real_tech_signal）使用。
+# 迭代160 将 import re 移至 _load_modules()，模块级不再有 re 可用。
+# 解决：用哨兵 None 延迟到 _load_modules() 内编译（re 注入 globals() 后立即编译）。
+# OS 类比：Linux lazy module loading (RTLD_LAZY) — 符号在首次调用时才绑定。
+_SKIP_PATTERNS = None   # 迭代160：延迟编译，由 _load_modules() 设置
+_TECH_SIGNAL = None     # 迭代160：延迟编译，由 _load_modules() 设置
+_ACRONYM_SIGNAL = None  # 迭代160：延迟编译，由 _load_modules() 设置
+
+# 技术信号中需要排除的常见非技术缩写（避免误判）
+_TECH_SIGNAL_EXCLUDE = {"LGTM", "ASAP", "RSVP", "TBD", "FYI", "IMO", "IMHO", "BTW", "WIP", "TIL", "AFAIK"}
+
+
+def _has_real_tech_signal(text: str) -> bool:
+    """
+    检测文本是否包含真正的技术信号（排除常见非技术缩写）。
+    OS 类比：中断控制器区分真正的设备中断和 spurious interrupt。
+
+    两层检测：
+      1. _TECH_SIGNAL：文件路径/代码关键字/中文技术词/错误关键词（无 IGNORECASE）
+      2. _ACRONYM_SIGNAL：全大写缩写（严格大写，排除非技术缩写白名单）
+    """
+    # 层1：通用技术信号
+    if _TECH_SIGNAL.search(text):
+        return True
+    # 层2：大写缩写（严格大写匹配，排除 LGTM/ASAP 等）
+    for m in _ACRONYM_SIGNAL.finditer(text):
+        if m.group(0) not in _TECH_SIGNAL_EXCLUDE:
+            return True
+    return False
+
+
+def _is_generic_knowledge_query(query: str) -> bool:
+    """
+    迭代88：检测通用知识 query — 这类 query 不应注入项目知识。
+    OS 类比：Linux NUMA distance — 远距离内存访问不如本地访问有价值，
+    通用知识 query 与项目知识的"距离"极远，强行注入是噪音。
+
+    特征：
+      1. 问的是通用技术概念（"什么是 GIL"、"解释 TCP"、"如何写 Dockerfile"）
+      2. 不含项目特定标识符（文件名、函数名、迭代号、模块名）
+      3. 问句模式：什么是/如何/解释/怎么...
+
+    返回 True 表示是通用知识 query（应提高注入门槛）。
+    """
+    # 通用问句模式（中英文）
+    # 注意：末尾匹配要考虑中文标点（？！。）
+    _GENERIC_PATTERNS = [
+        r'^(?:什么是|解释|如何|怎么(?:写|用|做|实现)?|介绍)',   # 以这些词开头
+        r'(?:是什么|怎么回事|如何实现|有什么区别|的区别|的原理)[？?！!。.]?\s*$',  # 以这些词结尾
+        r'^(?:how\s+(?:to|do|does|is)|what\s+is|explain|describe|define)\s',
+    ]
+    # 项目特定标识符 — 包含这些说明是项目问题，不是通用知识
+    _PROJECT_MARKERS = [
+        # 模块/文件
+        'memory.os', 'memory os', 'store.py', 'retriever', 'extractor',
+        'loader', 'scorer', 'writer', 'config.py', 'bm25.py',
+        # OS 子系统类比
+        'kswapd', 'mglru', 'damon', 'checkpoint', 'swap_fault',
+        'swap_in', 'swap_out', 'tlb', 'vdso', 'psi',
+        # 项目概念
+        '迭代', 'iteration', 'hook', 'feishu', '飞书',
+        'knowledge_vfs', 'knowledge_router', 'sched_ext',
+        'chunk', 'store.db', 'memory_chunks',
+        # 项目特定缩写
+        'drr', 'dmesg',
+    ]
+
+    query_lower = query.lower().strip()
+    has_generic_pattern = any(re.search(p, query_lower) for p in _GENERIC_PATTERNS)
+    has_project_marker = any(m in query_lower for m in _PROJECT_MARKERS)
+
+    return has_generic_pattern and not has_project_marker
+
+
+def _classify_query_priority(prompt: str, query: str,
+                             has_page_fault: bool, entity_count: int,
+                             project: str = None) -> str:
+    """
+    迭代28+47：查询优先级分类器。
+    OS 类比：sched_setscheduler() — 根据任务特征设置调度策略。
+    迭代47 OS 类比：sched_ext (Linux 6.12, 2024) — 用户态 BPF 自定义策略优先于内核默认策略。
+
+    返回值：
+      "SKIP" — nice 19，无需检索（确认/闲聊类）
+      "LITE" — nice 0，仅 FTS5 检索（普通 query）
+      "FULL" — nice -20，完整检索 + knowledge_router（高价值 query）
+
+    决策逻辑（优先级从高到低）：
+      0. sched_ext 自定义规则（用户态 BPF，最高优先级）
+      1. 有缺页信号 → FULL（demand paging 优先补全）
+      2. 技术实体 >= N 个 → FULL（多维度检索有价值）
+      3. prompt 匹配 SKIP 模式且无技术信号 → SKIP
+      4. query 短于 skip 阈值且无技术信号 → SKIP
+      5. query 短于 lite 阈值 → LITE
+      6. 默认 → FULL
+    """
+    # 规则 0（迭代47）：sched_ext 自定义规则优先于内置逻辑
+    # OS 类比：sched_ext 的 BPF 策略先于 CFS 默认策略评估
+    # 缺页信号仍然不可降级（等价于 SCHED_DEADLINE 不受 BPF 影响）
+    if not has_page_fault:
+        try:
+            ext_match = _sched_ext_match(query, project=project)
+            if ext_match:
+                return ext_match["priority"]
+        except Exception:
+            pass  # sched_ext 失败不影响主流程（fallback to builtin）
+
+    # 规则 1：缺页信号 → FULL（不可降级）
+    if has_page_fault:
+        return "FULL"
+
+    # 规则 2：多技术实体 → FULL
+    if entity_count >= _sysctl("scheduler.min_entity_count_for_full"):
+        return "FULL"
+
+    prompt_stripped = prompt.strip()
+
+    # 规则 2.5（迭代99）：通用知识 query → SKIP（不注入项目知识）
+    # OS 类比：NUMA distance filter — 远距离内存请求不路由到本地 node
+    # 根因：A/B 测试中 "如何写 Dockerfile"/"解释 TCP" 等通用问题
+    #   被注入项目上下文产生噪音，B 组（无记忆）反而得分更高
+    if _is_generic_knowledge_query(query):
+        return "SKIP"
+
+    # 规则 3：确认/闲聊模式匹配 → 检查是否有技术信号
+    if _SKIP_PATTERNS.match(prompt_stripped):
+        if not _has_real_tech_signal(query):
+            return "SKIP"
+
+    # 规则 4：极短 query 且无技术信号 → SKIP
+    if len(prompt_stripped) <= _sysctl("scheduler.skip_max_chars"):
+        if not _has_real_tech_signal(query):
+            return "SKIP"
+
+    # 规则 5：中等长度 query → LITE（跳过 knowledge_router）
+    if len(query) <= _sysctl("scheduler.lite_max_chars"):
+        return "LITE"
+
+    # 规则 6：长 query / 默认 → FULL
+    return "FULL"
+
+
+# ── 迭代310：Spreading Activation — 关联激活扩散 ─────────────────────────────
+# OS 类比：CPU L2 prefetch — FTS5 命中 chunk A 后，沿 entity_edges 预热邻居 chunk
+# 到候选集，使后续相关 chunk 的召回代价降为零。
+# 算法委托 store_vfs.spreading_activate（BFS 图遍历），
+# 此处封装为 retriever 可直接调用的接口，处理未加载模块的情况。
+
+def _spreading_activate(conn, hit_chunk_ids: list, project: str = None,
+                        decay: float = 0.7, max_hops: int = 2,
+                        existing_ids: set = None,
+                        max_activation_bonus: float = 0.4) -> dict:
+    """
+    迭代310：从 FTS5 命中 chunk 沿 entity_edges 扩散激活邻居。
+    委托 store_vfs.spreading_activate，此处为 retriever 的封装入口。
+
+    Returns:
+      {chunk_id: activation_score} — 新增邻居 chunk 的激活分
+    """
+    try:
+        from store_vfs import spreading_activate as _sa
+        return _sa(conn, hit_chunk_ids, project=project, decay=decay,
+                   max_hops=max_hops, existing_ids=existing_ids,
+                   max_activation_bonus=max_activation_bonus)
+    except Exception:
+        return {}
+
+
+# ── 迭代310：构建式召回 — 按 intent 动态调整注入顺序（展示层，不修改 DB）───────
+# OS 类比：CPU 指令重排（out-of-order execution）— 相同指令序列，根据数据依赖
+# 和执行单元负载重新排序，让最"紧迫"的指令优先流水线。
+# 类比：相同 top-K chunk，根据当前意图重排展示顺序，让最相关的先进入 LLM attention。
+#
+# Bartlett (1932) 构建式记忆：每次回忆时，记忆以当前目标为框架被重新建构，
+# 而不是像播放录像一样原样输出。
+#
+# 意图 → 优先 chunk_type 映射（顺序即优先级）：
+_CONSTRUCTIVE_INTENT_ORDER = {
+    "understand":  ["reasoning_chain", "causal_chain", "conversation_summary", "decision"],
+    "fix_bug":     ["excluded_path", "decision", "reasoning_chain", "procedure"],
+    "implement":   ["procedure", "decision", "reasoning_chain", "task_state"],
+    "code_review": ["decision", "design_constraint", "procedure", "reasoning_chain"],
+    "optimize":    ["quantitative_evidence", "decision", "reasoning_chain", "causal_chain"],
+    "explore":     ["conversation_summary", "reasoning_chain", "decision", "task_state"],
+    "continue":    ["task_state", "decision", "reasoning_chain"],
+}
+
+
+def _constructive_reorder(chunks: list, intent: str) -> list:
+    """
+    迭代310：按意图重排 chunk 列表（纯展示层，不修改 DB）。
+
+    Args:
+      chunks: list of chunk dicts（含 chunk_type 字段）
+      intent: 当前意图（来自 _predict_intent）
+
+    Returns:
+      重排后的 chunks（同一引用，顺序变化）
+    """
+    priority_order = _CONSTRUCTIVE_INTENT_ORDER.get(intent, [])
+    if not priority_order:
+        return chunks
+
+    type_priority = {t: i for i, t in enumerate(priority_order)}
+    default_priority = len(priority_order)
+
+    return sorted(
+        chunks,
+        key=lambda c: type_priority.get(c.get("chunk_type", ""), default_priority),
+    )
+
+
+# ── 迭代50：DRR Fair Queuing — 类型多样性选择器 ──────────────────────────────
+# OS 类比：Deficit Round Robin (M. Shreedhar & G. Varghese, 1996)
+#   每个 flow class 有独立队列 + deficit counter，
+#   轮询时 deficit += quantum，发送 deficit 范围内的包，
+#   保证长期公平性（任何一个 flow 不能永久独占带宽）。
+
+def _drr_select(candidates: list, top_k: int) -> list:
+    """
+    DRR Fair Queuing：从已排序候选集中选择 Top-K，保证类型多样性。
+
+    算法：
+      1. 从高到低扫描候选集
+      2. 每个 chunk_type 最多占 max_same_type 个槽位
+      3. 超出配额的 chunk 暂存 overflow 列表
+      4. 如果多样性选择不满 top_k，从 overflow 补齐（回流）
+         回流时每类型额外允许 max_same 个槽位（防止单一类型无限回流）
+
+    复杂度：O(N) 单次扫描，N = len(candidates)
+
+    迭代134 bugfix：回流阶段也跟踪 type_counts，防止 design_constraint 等高分
+    类型通过 overflow 回流无限占满 top_k。
+    OS 类比：Deficit Round Robin — 每个 flow 的 deficit counter 有上限（max_deficit），
+    即使历史积累的 deficit 很大，也不能无限次连续调度。
+
+    迭代337：Normative Pool 联合配额 — decision + design_constraint 语义上都是
+    "规则/结论型知识"，合并计入同一 pool，总量不超过 max_same * 2。
+    OS 类比：Linux cgroup unified memory.limit — 将同类型进程归入同一 cgroup，
+    统一限制资源消耗，而不是每个进程独立限制（各自 max 导致总量失控）。
+    """
+    max_same = _sysctl("retriever.drr_max_same_type")
+    # ── 迭代337：Normative Pool 联合配额 ──
+    # decision 和 design_constraint 合并为 "normative" pool，总量 ≤ max_same * 2
+    # 避免两类型各自允许 max_same 导致联合占满 top_k（实测 76% 注入率）
+    _NORMATIVE_TYPES = frozenset({"decision", "design_constraint"})
+    normative_pool_cap = max_same * 2  # 联合配额
+    normative_count = 0               # 已选 normative 数量
+
+    selected = []
+    type_counts = {}  # chunk_type -> 已选数量（第一轮）
+    overflow = []     # 超出配额的高分 chunk（回流候选）
+
+    for score, chunk in candidates:
+        if len(selected) >= top_k:
+            break
+        ctype = chunk.get("chunk_type", "task_state")
+        count = type_counts.get(ctype, 0)
+        # normative pool 联合检查
+        if ctype in _NORMATIVE_TYPES and normative_count >= normative_pool_cap:
+            overflow.append((score, chunk))
+            continue
+        if count < max_same:
+            selected.append((score, chunk))
+            type_counts[ctype] = count + 1
+            if ctype in _NORMATIVE_TYPES:
+                normative_count += 1
+        else:
+            overflow.append((score, chunk))
+
+    # 回流：如果其他类型不足以填满 top_k，从 overflow 补齐
+    # iter134 fix：回流时每类型额外允许 max_same 个槽位（overflow_quota = max_same × 2 总计）
+    # 防止单一 chunk_type（如 design_constraint）通过回流无限占满 top_k
+    overflow_type_counts = {}  # 回流阶段独立计数
+    for score, chunk in overflow:
+        if len(selected) >= top_k:
+            break
+        ctype = chunk.get("chunk_type", "task_state")
+        # 回流配额：在已选 count 基础上，每个类型最多再额外回流 max_same 个
+        already = type_counts.get(ctype, 0) + overflow_type_counts.get(ctype, 0)
+        # 迭代337：回流时也检查 normative pool 联合上限（防止 overflow 回流绕过限制）
+        if ctype in _NORMATIVE_TYPES:
+            overflow_normative = sum(
+                overflow_type_counts.get(t, 0) for t in _NORMATIVE_TYPES
+            )
+            if normative_count + overflow_normative >= normative_pool_cap * 2:
+                continue
+        if already < max_same * 2:  # 总上限 = 2× max_same（原配额 + 回流配额）
+            selected.append((score, chunk))
+            overflow_type_counts[ctype] = overflow_type_counts.get(ctype, 0) + 1
+
+    return selected
+
+
+def _mmr_rerank(candidates: list, top_k: int,
+                lambda_mmr: float = 0.6,
+                sim_threshold: float = 0.45) -> list:
+    """
+    迭代321：Maximal Marginal Relevance (MMR) 内容去冗余。
+
+    信息论依据：贪心最大化边际互信息
+      I(cᵢ; query | already_selected) ≈ relevance(cᵢ) - max_sim(cᵢ, selected)
+    即：已选集合与候选的内容重叠越高，候选的边际贡献越低。
+
+    算法（Carbonell & Goldstein 1998）：
+      score_mmr(d) = λ × relevance(d) - (1-λ) × max_sim(d, selected)
+      贪心选择 score_mmr 最大的 chunk，直到满 top_k。
+
+    相似度计算：Jaccard（summary token 集合），O(N²) 但 N ≤ 50，实测 < 0.5ms。
+
+    参数：
+      lambda_mmr:      λ ∈ [0,1]，越大越倾向 relevance，越小越倾向 diversity
+                       默认 0.6：略偏 relevance，但不牺牲多样性
+      sim_threshold:   Jaccard 相似度超过此值才被视为"冗余"，避免误杀
+                       默认 0.45：经验值，同义改写约 0.4~0.55
+
+    OS 类比：Linux multiqueue block I/O scheduler (blk-mq, 2013) —
+      多队列调度在同一 request 队列里做 merge：把物理地址相邻的请求合并，
+      避免对同一磁盘区域重复 I/O；MMR 类比避免对同一语义区域重复注入。
+
+    Returns:
+      重排后的 [(score, chunk)] 列表，长度 ≤ top_k
+    """
+    import re as _re
+
+    if not candidates or top_k <= 0:
+        return []
+
+    if len(candidates) <= top_k:
+        return candidates
+
+    def _tok(text: str) -> frozenset:
+        tokens = set()
+        for m in _re.finditer(r'[a-zA-Z0-9_\u4e00-\u9fff]{2,}', (text or '')):
+            tokens.add(m.group().lower())
+        # CJK bigram
+        cn = _re.sub(r'[^\u4e00-\u9fff]', '', text or '')
+        for i in range(len(cn) - 1):
+            tokens.add(cn[i:i + 2])
+        return frozenset(tokens)
+
+    def _jaccard(a: frozenset, b: frozenset) -> float:
+        if not a or not b:
+            return 0.0
+        inter = len(a & b)
+        union = len(a | b)
+        return inter / union if union > 0 else 0.0
+
+    # 预计算每个 candidate 的 token 集合
+    tok_cache = []
+    for score, chunk in candidates:
+        text = (chunk.get("summary") or "") + " " + (chunk.get("content") or "")[:200]
+        tok_cache.append(_tok(text))
+
+    # 归一化 relevance score 到 [0.1, 1.0]（floor=0.1 防止最低分被归零）
+    # 若 norm → 0，λ×0 - (1-λ)×0 = 0，多样低分候选无法胜过高相似度候选
+    # floor 保证最低分候选仍有正 relevance contribution，让 diversity 能发挥
+    scores = [s for s, _ in candidates]
+    s_min, s_max = min(scores), max(scores)
+    s_range = s_max - s_min if s_max > s_min else 1.0
+    _floor = 0.1
+    norm_scores = [_floor + (1.0 - _floor) * (s - s_min) / s_range for s in scores]
+
+    selected_idx = []
+    selected_toks = []
+    remaining = list(range(len(candidates)))
+
+    while len(selected_idx) < top_k and remaining:
+        best_idx = None
+        best_mmr = -1.0
+
+        for idx in remaining:
+            rel = norm_scores[idx]
+            # 与已选集合的最大相似度
+            if not selected_toks:
+                max_sim = 0.0
+            else:
+                max_sim = max(_jaccard(tok_cache[idx], st) for st in selected_toks)
+
+            # 只在超过 sim_threshold 时才惩罚（避免误杀弱相关 chunk）
+            sim_penalty = max_sim if max_sim >= sim_threshold else 0.0
+            mmr = lambda_mmr * rel - (1 - lambda_mmr) * sim_penalty
+
+            if mmr > best_mmr:
+                best_mmr = mmr
+                best_idx = idx
+
+        if best_idx is None:
+            break
+
+        selected_idx.append(best_idx)
+        selected_toks.append(tok_cache[best_idx])
+        remaining.remove(best_idx)
+
+    return [candidates[i] for i in selected_idx]
+
+
+# ── helpers ────────────────────────────────────────────────────────────────────
+
+def _read_page_fault_log(limit: int = 5) -> list:
+    """
+    读取缺页日志，返回优先级最高的 N 条 query 字符串。
+    缺页日志由 extractor.py Stop hook 写入，记录上轮推理中的知识缺口。
+    v3 闭环：消费后标记 resolved=True 而非清空，保留热缺页计数信息。
+    按 fault_count 降序消费（热缺页优先补入）。
+    """
+    if not os.path.exists(PAGE_FAULT_LOG):
+        return []
+    try:
+        with open(PAGE_FAULT_LOG, encoding="utf-8") as _f:
+            entries = json.loads(_f.read())
+        if not entries:
+            return []
+        # 过滤未解决的条目，按 fault_count 降序（热缺页优先）
+        unresolved = [e for e in entries
+                      if isinstance(e, dict) and "query" in e
+                      and not e.get("resolved", False)]
+        unresolved.sort(key=lambda e: e.get("fault_count", 1), reverse=True)
+        queries = [e["query"] for e in unresolved[:limit]]
+        # 标记已消费的为 resolved（而非清空，保留统计信息）
+        consumed_queries = set(q.lower().strip() for q in queries)
+        for e in entries:
+            if isinstance(e, dict) and e.get("query", "").lower().strip() in consumed_queries:
+                e["resolved"] = True
+        with open(PAGE_FAULT_LOG, 'w', encoding="utf-8") as _f:
+            _f.write(json.dumps(entries, ensure_ascii=False, indent=2))
+        return queries
+    except Exception:
+        return []
+
+
+def _extract_key_entities(text: str) -> list:
+    """
+    从 prompt 中提取高信号实体用于 query expansion。
+    提取规则：反引号包裹的标识符、大写缩写词、文件路径样式。
+    """
+    import re as _re_eke  # 迭代160：re 延迟加载，此函数可在 _load_modules 前调用
+    entities = []
+    # 反引号包裹的代码标识符
+    for m in _re_eke.finditer(r'`([^`]{2,40})`', text):
+        entities.append(m.group(1))
+    # 全大写缩写词（>= 2字符，如 BM25, LRU, API）
+    for m in _re_eke.finditer(r'\b([A-Z][A-Z0-9_]{1,10})\b', text):
+        entities.append(m.group(1))
+    # 文件路径样式（含 / 或 .py/.js/.md）
+    for m in _re_eke.finditer(r'[\w./]+\.(?:py|js|md|json|db)\b', text):
+        entities.append(m.group(0))
+    return list(dict.fromkeys(entities))[:5]  # 去重，最多5个
+
+
+def _build_causal_query(prompt: str) -> str:
+    """
+    迭代330：causal secondary query — 为 causal_chain 专属补充搜索构造查询。
+    返回一个独立的 causal-focused query，在主 FTS5 搜索后作为第二轮补充搜索。
+
+    OS 类比：Linux readahead ≥ 2 pass — 第一轮 VFS readahead 基于 offset，
+    第二轮 ext4 readahead 基于 extent map — 两轮覆盖不同维度，
+    结果合并进 page cache，不覆盖第一轮结果。
+
+    策略（不追加到主 query，避免影响 FTS5 主排序）：
+      含显式因果词 → 用 prompt + 核心因果语义词构造专属 causal query
+      含技术实体   → 用 技术词 + "原因 导致 因为" 构造 causal query
+      否则         → 返回空（不做第二轮搜索）
+    """
+    if not prompt:
+        return ""
+
+    import re as _re_cq  # 迭代330：局部 import，此函数可在 _load_modules 前调用
+    _CAUSAL_QUERY_WORDS = _re_cq.compile(
+        r'(?:为什么|原因|怎么|如何|导致|引起|根因|根本原因|'
+        r'why|because|reason|how|cause|result|due to)',
+        _re_cq.IGNORECASE
+    )
+    if _CAUSAL_QUERY_WORDS.search(prompt):
+        # 已含因果词：原 prompt 就是好的 causal query，追加因果扩展词增强覆盖
+        return f"{prompt[:100]} 原因 导致 因为 根因"
+
+    # 含技术实体但无因果词：构造 "技术词 + 因果语义词" 的 causal query
+    has_tech = bool(_re_cq.search(r'[A-Z]{2,}|[a-z]+_[a-z]+|\w+\.\w+|`[^`]+`|\d+ms', prompt))
+    if has_tech:
+        return f"{prompt[:80]} 原因 导致 因为"
+
+    return ""
+
+
+def _build_query(hook_input: dict) -> str:
+    """
+    v18 迭代62：Query Truncation — 限制 query 长度防止 FTS5 性能退化。
+    OS 类比：Linux I/O scheduler request merging — 过大的 I/O request 会被拆分，
+    因为 DMA 传输有硬件限制（max_sectors_kb），超过会退化为多次传输。
+    同理，FTS5 对超长 query 的 token 匹配复杂度 O(T×D)（T=tokens, D=docs），
+    1600字 query → ~800 tokens → 9 docs 匹配也要 200ms+。
+    截断到 300 字（~150 tokens）可将 FTS5 时间从 200ms+ 降到 <10ms。
+    """
+    prompt = hook_input.get("prompt", "") or ""
+    task_list = hook_input.get("task_list") or hook_input.get("tasks") or []
+    if isinstance(task_list, str):
+        try:
+            task_list = json.loads(task_list)
+        except Exception:
+            task_list = []
+    in_progress = []
+    for t in task_list:
+        if isinstance(t, dict) and t.get("status") == "in_progress":
+            subj = t.get("subject") or t.get("title") or ""
+            if subj:
+                in_progress.append(subj)
+    tasks_joined = " ".join(in_progress)
+
+    # Query expansion：提取关键实体追加到查询，提升召回覆盖度
+    entities = _extract_key_entities(prompt)
+    entities_str = " ".join(entities)
+
+    raw_query = f"{prompt} {tasks_joined} {entities_str}".strip()
+
+    # 迭代62：Query Truncation — 截断超长 query
+    max_query_chars = _sysctl("retriever.max_query_chars")
+    if len(raw_query) > max_query_chars:
+        raw_query = raw_query[:max_query_chars]
+
+    return raw_query
+
+
+    # ── _open_db / _get_chunks 已迁移至 store.py（迭代21 VFS 统一数据访问层）──
+
+
+def _read_hash() -> str:
+    try:
+        with open(HASH_FILE, encoding="utf-8") as _f:
+            return _f.read().strip()
+    except Exception:
+        return ""
+
+
+def _write_hash(h: str) -> None:
+    try:
+        os.makedirs(MEMORY_OS_DIR, exist_ok=True)
+        with open(HASH_FILE, 'w', encoding="utf-8") as _f:
+            _f.write(h)
+    except Exception:
+        pass
+
+
+# ── 迭代57：TLB — Translation Lookaside Buffer 检索快速路径 ──────────────────
+# OS 类比：CPU TLB (1965, IBM System/360 Model 67)
+#   虚拟地址→物理地址的映射缓存在 TLB（通常 64-1024 entries）。
+#   TLB hit → 跳过 4 级页表 walk（~7ns vs ~100ns），命中率通常 >95%。
+#   TLB miss → 完整 page table walk → 结果写回 TLB。
+#   TLB 失效条件：页表更新（mmap/munmap/fork）时 flush。
+#
+#   memory-os 等价问题：
+#     retriever 的 injection_hash 检查在 FTS5 + 评分 + madvise + readahead 之后，
+#     发现结果和上次一样（skipped_same_hash），但已经花了 25ms。
+#     这等价于"每次地址翻译都做完整 page table walk 再检查 TLB"。
+#
+#   解决：
+#     TLB 缓存 {prompt_hash → injection_hash, db_mtime}。
+#     TLB hit（相同 prompt_hash + db 未变）→ 直接比较 injection_hash，<1ms。
+#     TLB miss → 完整检索流程 → 结果写回 TLB。
+#     TLB 失效：db_mtime 变化（有新写入）→ 自动 flush。
+
+def _tlb_read() -> dict:
+    """
+    读取 TLB v2 多 slot 缓存。返回 {} 如果不存在或损坏。
+    迭代64：格式升级为 {chunk_version: int, slots: {prompt_hash: {injection_hash: str}}}
+    """
+    try:
+        if os.path.exists(TLB_FILE):
+            with open(TLB_FILE, encoding="utf-8") as _f:
+                data = json.loads(_f.read())
+            # 兼容 v1 格式：如果有 prompt_hash 字段说明是旧格式
+            if "prompt_hash" in data and "slots" not in data:
+                # 迁移 v1 → v2
+                return {
+                    "chunk_version": -1,  # 强制 miss，让下次正常检索后回填
+                    "slots": {data["prompt_hash"]: {"injection_hash": data.get("injection_hash", "")}},
+                }
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _tlb_write(prompt_hash: str, injection_hash: str, db_mtime: float) -> None:
+    """
+    写入 TLB v2 缓存。
+    迭代64：multi-slot + chunk_version 替代 db_mtime。
+    保留 db_mtime 参数签名以保持向后兼容（不改调用方），但实际使用 chunk_version。
+    """
+    try:
+        os.makedirs(MEMORY_OS_DIR, exist_ok=True)
+
+        # 读取当前 chunk_version
+        chunk_ver = 0
+        if os.path.exists(CHUNK_VERSION_FILE):
+            try:
+                with open(CHUNK_VERSION_FILE, encoding="utf-8") as _f:
+                    chunk_ver = int(_f.read().strip())
+            except (ValueError, OSError):
+                chunk_ver = 0
+
+        # 读取现有 TLB 并更新 slot
+        existing = _tlb_read()
+        slots = existing.get("slots", {})
+
+        # 写入/更新当前 prompt_hash 的 slot
+        slots[prompt_hash] = {"injection_hash": injection_hash}
+
+        # LRU 淘汰：超过 MAX 时删除最早的条目
+        # 简单策略：保留最后 N 个 key（dict 在 Python 3.7+ 保持插入顺序）
+        max_entries = _sysctl("retriever.tlb_max_entries")
+        if len(slots) > max_entries:
+            keys = list(slots.keys())
+            for k in keys[:len(keys) - max_entries]:
+                del slots[k]
+
+        with open(TLB_FILE, 'w', encoding="utf-8") as _f:
+            _f.write(json.dumps({
+                "chunk_version": chunk_ver,
+                "slots": slots,
+            }))
+    except Exception:
+        pass
+
+
+def _get_db_mtime() -> float:
+    """获取 store.db 的 mtime（迭代64 保留用于 fallback 兼容）。"""
+    try:
+        return os.stat(STORE_DB).st_mtime
+    except Exception:
+        return 0.0
+
+
+def _read_chunk_version() -> int:
+    """读取 chunk_version（迭代64: 替代 db_mtime 的 TLB 失效判据）。"""
+    try:
+        if os.path.exists(CHUNK_VERSION_FILE):
+            with open(CHUNK_VERSION_FILE, encoding="utf-8") as _f:
+                return int(_f.read().strip())
+    except (ValueError, OSError):
+        pass
+    return 0
+
+
+# ── trace ─────────────────────────────────────────────────────────────────────
+
+def _write_trace(session_id: str, project: str, prompt_hash: str,
+                 candidates_count: int, top_k_data: list,
+                 injected: int, reason: str, duration_ms: float = 0.0,
+                 conn=None) -> None:
+    """
+    写 recall_traces 记录。
+    v8 迭代21：委托 store.py（VFS 统一数据访问层）。
+    """
+    should_close = conn is None
+    try:
+        if conn is None:
+            conn = open_db()
+            ensure_schema(conn)
+        store_insert_trace(conn, {
+            "id": str(uuid.uuid4()),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "session_id": session_id,
+            "project": project,
+            "prompt_hash": prompt_hash,
+            "candidates_count": candidates_count,
+            "top_k_json": top_k_data,
+            "injected": injected,
+            "reason": reason,
+            "duration_ms": duration_ms,
+        })
+        if should_close:
+            conn.commit()
+            conn.close()
+    except Exception:
+        if should_close and conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+# ── 迭代85：Shadow Trace — perf_event 采样式工作集追踪 ─────────────────────
+# OS 类比：Linux perf_event (2009, Ingo Molnár) — 即使进程不做系统调用，
+#   PMU 采样仍能记录其活动状态。SKIP/TLB 快速路径不写 recall_traces，
+#   但 save-task-state.py 需要 hit_ids 构建 swap_out 工作集。
+#   shadow trace 在 write-back 阶段写入轻量级 JSON 文件（~0.1ms），
+#   记录最后一次成功检索的 top_k IDs。swap_out 时 recall_traces 为空则 fallback。
+
+def _write_shadow_trace(project: str, top_k_ids: list, session_id: str = "") -> None:
+    """写入 shadow trace 文件，供 swap_out fallback 使用。"""
+    try:
+        with open(SHADOW_TRACE_FILE, 'w', encoding="utf-8") as _f:
+            _f.write(json.dumps({
+                "project": project,
+                "top_k_ids": top_k_ids,
+                "session_id": session_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }, ensure_ascii=False))
+    except Exception:
+        pass  # shadow trace 写入失败不影响正常流程
+
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
+def _open_db_readonly():
+    """
+    迭代84：只读模式打开 DB，避免与 writer/extractor 锁竞争。
+    OS 类比：open(O_RDONLY) — 只读 fd 不竞争 flock LOCK_EX。
+
+    WAL 模式下 reader 不阻塞 writer、writer 不阻塞 reader，
+    但 DDL（ensure_schema 的 CREATE TABLE IF NOT EXISTS）和
+    dmesg_log（INSERT INTO dmesg）需要写锁，会被并发 writer 阻塞。
+    immutable=1 完全避免写锁请求：连接只读，FTS5 查询正常工作。
+    """
+    import sqlite3 as _sq
+    db_str = str(STORE_DB)
+    try:
+        uri = f"file:{db_str}?immutable=1"
+        return _sq.connect(uri, uri=True)
+    except Exception:
+        conn = _sq.connect(db_str, timeout=2)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA query_only=ON")
+        return conn
+
+
+class _DeferredLogs:
+    """
+    迭代84：dmesg 延迟写入缓冲区。
+    OS 类比：Linux printk ring buffer (log_buf) — 内核打印先进 ring buffer，
+    由 klogd/console 异步消费。
+
+    检索阶段收集 dmesg 消息到内存缓冲区（零 I/O），
+    输出后用写连接批量 flush（不影响用户感知延迟）。
+    """
+    __slots__ = ('_buf',)
+
+    def __init__(self):
+        self._buf = []
+
+    def log(self, level, subsystem, message, session_id=None, project=None, extra=None):
+        self._buf.append((level, subsystem, message, session_id, project, extra))
+
+    def flush(self, conn):
+        """Flush all buffered logs to DB via write connection."""
+        for level, subsystem, message, session_id, project, extra in self._buf:
+            try:
+                dmesg_log(conn, level, subsystem, message,
+                          session_id=session_id, project=project, extra=extra)
+            except Exception:
+                pass
+        self._buf.clear()
+
+    def __len__(self):
+        return len(self._buf)
+
+
+def main():
+    import time as _time
+    _t_wall_start = _time.time()  # 迭代62：wall clock 记录（含 import）
+
+    # ── 迭代61：vDSO Fast Path 已在 __main__ 块处理 Stage 0 + Stage 1 ──
+    # 如果到达这里，说明 SKIP + TLB 都 miss，需要完整检索
+    # _vdso_hook_input 由 _vdso_fast_exit() 传入（stdin 已耗尽不能重读）
+    _load_modules()
+
+    # 迭代62：PSI Import-aware Timing — _t_start 在 import 之后重置
+    # OS 类比：Linux perf_event exclude_kernel — 只统计用户态执行时间
+    # Python import 是进程冷启动的固定开销（~25ms），不应计入检索延迟。
+    # 之前 _t_start 在 import 前，导致 duration_ms 包含 import 开销：
+    #   import(25ms) + FTS5(3ms) + scoring(0.3ms) = 记录 28.3ms，
+    #   但 PSI baseline 是 17ms → 标记为 stall → PSI FULL 恶性循环。
+    # 修复后 _t_start 在 import 后，只反映真实检索时间。
+    _t_start = _time.time()
+
+    hook_input = _vdso_hook_input or {}
+
+    project = resolve_project_id()
+    # 迭代66：从 hook stdin 获取 session_id（/proc/self/status PID Identity）
+    # 之前从环境变量取，但 CLAUDE_SESSION_ID 未被设置 → 全部 "unknown"
+    # hook stdin JSON 包含 session_id 字段，这是权威来源
+    session_id = (hook_input.get("session_id", "")
+                  or os.environ.get("CLAUDE_SESSION_ID", "")
+                  or "unknown")
+
+    prompt = hook_input.get("prompt", "") or ""
+    query = _build_query(hook_input)
+
+    # 缺页日志：上轮推理标记的知识缺口，追加到查询
+    page_fault_queries = _read_page_fault_log()
+    if page_fault_queries:
+        fault_text = " ".join(page_fault_queries)
+        query = f"{query} {fault_text}".strip()
+
+    if not query:
+        sys.exit(0)
+
+    if not os.path.exists(STORE_DB):
+        sys.exit(0)
+
+    # ── 迭代28：Scheduler Nice Levels — 查询优先级分类 ──
+    # OS 类比：sched_setscheduler() 在进程创建时根据特征设置调度策略
+    has_page_fault = bool(page_fault_queries)
+    entities = _extract_key_entities(prompt)
+    priority = _classify_query_priority(prompt, query, has_page_fault, len(entities), project=project)
+
+    if priority == "SKIP":
+        # nice 19：零 I/O，直接退出
+        # 注：迭代61 vDSO 已在 heavy import 前拦截大部分 SKIP，这里是 defense in depth
+        sys.exit(0)
+
+    # ── 迭代57→64：TLB v2 — Multi-Slot + chunk_version ──
+    # 迭代64 升级：vDSO Stage 1 已检查 chunk_version（无缺页时），这里做 defense-in-depth
+    # 有缺页时不走 vDSO TLB → 这里是唯一的 TLB 检查点
+    # 迭代156：zlib.crc32 — 与 vDSO Stage 1 保持一致（相同 prompt → 相同 hash）
+    prompt_hash = format(zlib.crc32(prompt.encode()) & 0xffffffff, '08x')
+    if not has_page_fault:
+        chunk_ver = _read_chunk_version()
+        tlb = _tlb_read()
+        tlb_ver = tlb.get("chunk_version", -1)
+        slots = tlb.get("slots", {})
+        last_hash = _read_hash()
+
+        if chunk_ver == tlb_ver:
+            # chunk_version 匹配 → DB 内容未变
+            # L1: prompt_hash 在 slot 中且 injection_hash 一致
+            if prompt_hash in slots and slots[prompt_hash].get("injection_hash") == last_hash:
+                sys.exit(0)
+            # L2: 任意 slot 的 injection_hash 与当前一致（结果未变）
+            if last_hash:
+                for _s in slots.values():
+                    if _s.get("injection_hash") == last_hash:
+                        sys.exit(0)
+
+    # 自适应 Top-K：有缺页信号时扩大召回范围（demand paging）
+    # 迭代27：从 sysctl 注册表读取（运行时可调）
+    effective_top_k = _sysctl("retriever.top_k_fault") if has_page_fault else _sysctl("retriever.top_k")
+    effective_max_chars = _sysctl("retriever.max_context_chars_fault") if has_page_fault else _sysctl("retriever.max_context_chars")
+
+    # ── 迭代36：PSI 反馈回路 — 压力驱动的动态降级 ──
+    # OS 类比：Linux PSI triggers — cgroup 在压力超阈值时触发 OOM/throttle
+    # 当检索系统处于高压力（FULL）时，scheduler 自动从 FULL 降级到 LITE
+    # 这是从开环调度（迭代28）到闭环调度的升级：
+    #   开环：根据 query 特征静态分类（无反馈）
+    #   闭环：根据 query 特征 + 系统压力动态调整（有反馈）
+    psi_downgraded = False
+    # 注：PSI 检查需要 conn，延迟到连接打开后执行（见下方 PSI feedback 块）
+
+    # 是否执行 knowledge_router（LITE 模式跳过）
+    run_router = (priority == "FULL") and _KR_AVAILABLE
+
+    # ── 迭代41：Deadline I/O Scheduler — 时间预算设定 ──
+    # OS 类比：Linux Deadline I/O Scheduler (2002, Jens Axboe)
+    #   每个 I/O 请求有 read_expire/write_expire deadline：
+    #     read: 500ms, write: 5000ms — 读优先级高于写
+    #   调度器在 deadline 前按效率排序（类似 elevator），
+    #   接近 deadline 时强制 dispatch（避免 starvation）。
+    #   mq-deadline (2019) 将单队列扩展为多队列（per-hw-queue），
+    #   每个队列独立调度，消除全局锁竞争。
+    #
+    #   memory-os 等价问题：
+    #     检索链路 FTS5 → scorer → madvise → swap_fault → router
+    #     各阶段耗时不确定（取决于数据量和查询复杂度）。
+    #     没有时间预算时，任何一个阶段慢都会拖累整体。
+    #     hook timeout=10s 是硬限制但太宽松，实际要求 < 50ms。
+    #
+    #   解决：
+    #     deadline_ms (30ms) — soft deadline，超过时跳过低优先级阶段
+    #     deadline_hard_ms (80ms) — hard deadline，超过时立即返回已有结果
+    #     阶段优先级（高→低）：FTS5 > scorer > madvise > swap_fault > router
+    #     低优先级阶段在 soft deadline 后被跳过（graceful degradation）
+    deadline_ms = _sysctl("retriever.deadline_ms")
+    deadline_hard_ms = _sysctl("retriever.deadline_hard_ms")
+    deadline_skipped = []  # 记录被 deadline 跳过的阶段
+
+    def _elapsed_ms():
+        return (_time.time() - _t_start) * 1000
+
+    def _check_deadline(stage_name: str, is_hard: bool = False) -> bool:
+        """检查是否超过 deadline。返回 True = 超时应跳过。"""
+        elapsed = _elapsed_ms()
+        if is_hard and elapsed >= deadline_hard_ms:
+            deadline_skipped.append(f"{stage_name}(HARD)")
+            return True
+        if not is_hard and elapsed >= deadline_ms:
+            deadline_skipped.append(stage_name)
+            return True
+        return False
+
+    # ── 迭代84：Read-Only Fast Path — 检索阶段只读连接 ──────────────────
+    # OS 类比：Linux O_RDONLY + write-back — read 路径用只读 fd（零锁竞争），
+    #   dirty data 由 pdflush 异步写回。
+    #
+    #   根因：retriever (sync) 与 writer (async) 都是 UserPromptSubmit hook，
+    #   几乎同时触发。writer 持有写锁执行 INSERT + commit (含 WAL checkpoint ~40-100ms)，
+    #   retriever 的 ensure_schema() DDL 和 dmesg_log() INSERT 需要写锁 → 被阻塞 100-400ms
+    #   → post_scoring hard_deadline 超时 (29/93 次，P95=435ms)。
+    #
+    #   解决：
+    #   Phase 1 (read-only)：immutable=1 连接 + _DeferredLogs 缓冲区
+    #     - FTS5 搜索、评分、排序 — 纯读操作，零锁竞争
+    #     - dmesg 消息收集到内存缓冲区（<1μs），不写 DB
+    #     - ensure_schema 完全跳过（只读连接无需 DDL）
+    #   Phase 2 (write-back)：输出结果后打开写连接
+    #     - 批量 flush dmesg + update_accessed + mglru_promote + insert_trace + commit
+    #     - 不影响用户感知延迟（输出已发送）
+    #
+    # ── 迭代24 升级：Per-Request 拆为 read-conn + write-conn ──
+    _deferred = _DeferredLogs()
+    conn = _open_db_readonly()
+    # 修复：_t_start 在 open_db 后重置，排除连接获取等待时间（WAL checkpoint 锁竞争）。
+    # 根因：writer WAL checkpoint 触发 EXCLUSIVE 锁时，reader 的 connect() 需等待
+    # 获得共享锁，这段等待时间不是检索本身的开销，不应计入 deadline。
+    # cands=1 dur=522ms 的 hard_deadline 超时正是由此引起的。
+    _t_start = _time.time()
+    try:
+        # 跳过 ensure_schema — 只读连接无需 DDL，schema 由 writer/extractor 维护
+        candidates_count = 0  # trace 用：候选集大小
+
+        # ── 迭代36：PSI feedback — 压力检测 + 动态降级 ──
+        # 迭代41：PSI 检查受 deadline 约束（低优先级阶段）
+        if priority == "FULL" and not _check_deadline("psi"):
+            try:
+                psi = psi_stats(conn, project)
+                psi_overall = psi.get("overall", "NONE")
+                if psi_overall == "FULL":
+                    priority = "LITE"
+                    run_router = False
+                    psi_downgraded = True
+                    _deferred.log(DMESG_WARN, "retriever",
+                              f"PSI downgrade: FULL→LITE overall={psi_overall} "
+                              f"ret={psi['retrieval']['level']} cap={psi['capacity']['level']} "
+                              f"qual={psi['quality']['level']}",
+                              session_id=session_id, project=project,
+                              extra={"psi": psi})
+            except Exception:
+                pass  # PSI 失败不影响主流程
+
+        # ── 迭代55：Context Pressure Governor — 动态注入窗口缩放 ──
+        # OS 类比：TCP BBR pacing_rate = BtlBw × gain
+        # effective_max_chars *= governor.scale
+        gov_info = {"level": "NORMAL", "scale": 1.0}
+        try:
+            gov_info = context_pressure_governor(conn, project, session_id=session_id)
+            gov_scale = gov_info.get("scale", 1.0)
+            if gov_scale != 1.0:
+                effective_max_chars = int(effective_max_chars * gov_scale)
+                # 下限保护：至少 150 字（确保最关键信息能注入）
+                effective_max_chars = max(effective_max_chars, 150)
+        except Exception:
+            pass  # governor 失败不影响主流程
+
+        # 迭代29 dmesg：记录检索请求入口（迭代84：延迟写入）
+        gov_tag = f" gov={gov_info['level']}({gov_info['scale']:.1f})" if gov_info.get("level") != "NORMAL" else ""
+        _deferred.log(DMESG_DEBUG, "retriever",
+                  f"priority={priority} query_len={len(query)} entities={len(entities)} page_faults={len(page_fault_queries)}"
+                  + (f" psi_downgraded=Y" if psi_downgraded else "")
+                  + gov_tag,
+                  session_id=session_id, project=project)
+
+        # ── 迭代62：Anti-Starvation — 加载 chunk 召回计数 ──
+        # OS 类比：/proc/PID/sched nr_switches — 统计进程调度次数
+        _recall_counts = {}
+        try:
+            _recall_counts = chunk_recall_counts(conn, project, window=30)
+        except Exception:
+            pass  # 统计失败不影响主流程
+        # 迭代312：Session-scoped recall counts
+        _session_recall_counts = {}
+        try:
+            from store_criu import chunk_session_recall_counts
+            _session_recall_counts = chunk_session_recall_counts(conn, project, session_id, window=100)
+        except Exception:
+            pass  # session 计数失败不影响主流程
+        # 迭代333：Session Injection Counts — 本 session 每个 chunk 被注入的次数
+        # OS 类比：per-page dirty_writeback_count — 统计同一页在当前写回周期的重复写入次数
+        # 持久化到 .last_session_injections.json（跨请求维护 session 内计数）
+        _SESSION_INJ_FILE = os.path.join(MEMORY_OS_DIR, ".last_session_injections.json")
+        _session_injection_counts = {}
+        try:
+            if os.path.exists(_SESSION_INJ_FILE):
+                with open(_SESSION_INJ_FILE, encoding="utf-8") as _sif:
+                    _sij_data = json.loads(_sif.read())
+                    # 只保留同一 session 的注入记录（session 切换时重置）
+                    if _sij_data.get("session_id") == session_id:
+                        _session_injection_counts = _sij_data.get("counts", {})
+        except Exception:
+            pass
+
+        # ── iter89: Tool Pattern Keywords — 工具模式关键词集 ──
+        # 迭代101：从全局聚合改为意图感知过滤。
+        # OS 类比：branch predictor history table — 只保留与当前 PC 相关的跳转历史，
+        # 而非全局所有分支的混合预测（避免 aliasing 污染）。
+        #
+        # 旧版：取 freq>=5 的 top-10 模式全部关键词合集 → 任何 session 都注入相同词集
+        # 新版：提取 prompt 的 n-gram 词集，与 context_keywords 有交集的模式才纳入
+        #       → keyword_boost 精准命中当前任务相关 chunk
+        _pattern_keywords: set = set()
+        _matched_patterns: list = []  # 记录命中的模式（用于 Hint 注入）
+        try:
+            if priority in ("FULL", "LITE"):
+                import json as _pj
+                import re as _re
+                # 提取 prompt 词集（英文词 + 中文双字）
+                _prompt_words: set = set()
+                for m in _re.finditer(r'[a-zA-Z][a-zA-Z0-9_]{2,}', query):
+                    _prompt_words.add(m.group().lower())
+                _cn = _re.sub(r'[^\u4e00-\u9fff]', '', query)
+                for i in range(len(_cn) - 1):
+                    _prompt_words.add(_cn[i:i+2])
+
+                _tp_rows = conn.execute(
+                    """SELECT tool_sequence, context_keywords, SUM(frequency) as frequency
+                       FROM tool_patterns
+                       WHERE frequency >= 1
+                       GROUP BY tool_sequence
+                       HAVING SUM(frequency) >= 3
+                       ORDER BY frequency DESC LIMIT 30"""
+                ).fetchall()
+                for _tp_seq_json, _tp_kws_json, _tp_freq in _tp_rows:
+                    if not _tp_kws_json:
+                        continue
+                    kws = _pj.loads(_tp_kws_json) if isinstance(_tp_kws_json, str) else _tp_kws_json
+                    kw_set = {k.lower() for k in (kws or []) if isinstance(k, str) and len(k) >= 3}
+                    # 意图感知：prompt 词集与 context_keywords 有交集才纳入
+                    overlap = _prompt_words & kw_set
+                    if overlap:
+                        for kw in kw_set:
+                            _pattern_keywords.add(kw)
+                        seq = _pj.loads(_tp_seq_json) if isinstance(_tp_seq_json, str) else _tp_seq_json
+                        _matched_patterns.append({
+                            "seq": seq, "freq": _tp_freq,
+                            "overlap": list(overlap)[:3]
+                        })
+        except Exception:
+            pass  # tool pattern 加载失败不影响主流程
+
+        # ── 迭代82：Memory Zones — 计算可检索 chunk_types（排除 ZONE_RESERVED 类型）──
+        # OS 类比：Linux ZONE_DMA/ZONE_NORMAL/ZONE_HIGHMEM — 不同区域的内存用途隔离
+        # 迭代98：加入 design_constraint — 系统级约束知识，强制优先级高
+        # iter105：加入 quantitative_evidence / causal_chain 两个新精化类型
+        # iter117：加入 procedure — wiki 导入的可复用操作协议，之前系统性不可见（_ALL_RETRIEVE_TYPES 遗漏）
+        #   根因：import_knowledge.py 写入 chunk_type='procedure'，但检索侧从未过滤此类型
+        #   后果：26/39 procedure chunks（67%）零访问率，等同于知识黑洞
+        #   OS 类比：将 /lib/modules/procedure.ko 添加到 initrd，否则模块永远不会被 insmod
+        _ALL_RETRIEVE_TYPES = ("decision", "reasoning_chain", "conversation_summary",
+                               "excluded_path", "task_state", "prompt_context", "design_constraint",
+                               "quantitative_evidence", "causal_chain", "procedure")
+        _exclude_str = _sysctl("retriever.exclude_types")
+        _exclude_set = set(t.strip() for t in _exclude_str.split(",") if t.strip()) if _exclude_str else set()
+        _retrieve_types = tuple(t for t in _ALL_RETRIEVE_TYPES if t not in _exclude_set) or None
+
+        # ── FTS5 索引召回（迭代23 ext3 htree）──
+        try:
+            fts_results = fts_search(conn, query, project, top_k=effective_top_k * 3,
+                                     chunk_types=_retrieve_types)
+            use_fts = bool(fts_results)
+        except Exception as _fts_err:
+            fts_results = []
+            use_fts = False
+            # 迭代29 dmesg：FTS5 失败降级（迭代84：延迟写入）
+            _deferred.log(DMESG_WARN, "retriever",
+                      f"FTS5 fallback: {type(_fts_err).__name__}",
+                      session_id=session_id, project=project)
+
+        # ── 迭代126：FTS5 + BM25 混合召回（OS 类比：L1/L2 多级缓存）──────────────
+        # OS 类比：CPU 多级缓存一致性协议（MESI）
+        #   L1 cache（FTS5）：命中率高、精确词汇匹配、O(log N)
+        #   L2 cache（BM25）：覆盖面广、捕获 FTS5 漏掉的长尾 chunk
+        #
+        # 旧设计问题：
+        #   FTS5 有结果 → 仅用 FTS5（可能漏掉 BM25 能找到但 FTS5 tokenize 无法匹配的 chunk）
+        #   FTS5 无结果 → 全表 BM25（失去 FTS5 精确排序优势）
+        #   两者完全互斥，无法互补。
+        #
+        # 新设计：
+        #   1. FTS5 先跑（保持精确匹配优势）
+        #   2. 如果 FTS5 返回 < effective_top_k，从全表 BM25 补充差额（长尾救援）
+        #   3. BM25 补充时跳过已在 FTS5 结果中的 chunk（去重）
+        #   4. BM25 补充 chunk 的 relevance 降权（× hybrid_bm25_discount），避免劣质长尾挤掉 FTS5 精确结果
+        #   5. 合并后统一用 _unified_retrieval_score 排序
+        #
+        # 触发条件：use_fts=True 且 FTS5 结果 < effective_top_k
+        # 不触发条件：use_fts=False（FTS5 异常）→ 纯 BM25 fallback（原有逻辑）
+
+        _hybrid_bm25_count = 0  # 记录 BM25 补充数（供 dmesg 日志）
+        _bm25_global_discount = 1.0  # iter131: BM25 fallback 时全局项目折扣，默认 1.0（不折扣）
+
+        def _score_chunk(chunk, relevance):
+            # 迭代322: Query-Conditioned Importance — 动态 α
+            # OS 类比：CPUFreq P-state — 高负载（高 relevance）降低 importance 依赖；
+            #   低负载（弱命中）升高 importance 依赖（靠先验筛选）
+            # α = 0.55 - 0.25 × relevance：relevance=1.0 → α=0.30，relevance=0.0 → α=0.55
+            # 效果：FTS5 强命中时 recency 权重上升（刚被用到的 chunk 更优先）
+            #       BM25 弱命中时 importance 权重上升（靠领域知识先验筛选噪音）
+            _dyn_alpha = _sysctl("retriever.qci_base_alpha") - _sysctl("retriever.qci_relevance_slope") * relevance
+            score = _unified_retrieval_score(
+                relevance=relevance,
+                importance=float(chunk["importance"]),
+                last_accessed=chunk["last_accessed"],
+                access_count=chunk.get("access_count", 0) or 0,
+                created_at=chunk.get("created_at", ""),
+                chunk_id=chunk.get("id", ""),
+                query_seed=query,
+                recall_count=_recall_counts.get(chunk.get("id", ""), 0),
+                session_recall_count=_session_recall_counts.get(chunk.get("id", ""), 0),
+                lru_gen=chunk.get("lru_gen"),
+                chunk_project=chunk.get("project", ""),
+                current_project=project,
+                query_alpha=_dyn_alpha,
+            )
+            # 迭代300：info_class 路由权重调整
+            # ephemeral chunk 降权 0.3，避免临时状态挤掉 world/operational 知识
+            # operational chunk 在跨项目召回时降权 0.1（偏好/规则有项目局部性）
+            _ic = chunk.get("info_class", "world")
+            if _ic == "ephemeral":
+                score *= 0.70
+            elif _ic == "operational" and chunk.get("project", "") != project:
+                score *= 0.90
+            if _pattern_keywords:
+                _summary_lower = (chunk.get("summary", "") or "").lower()
+                _matched = sum(1 for kw in _pattern_keywords if kw in _summary_lower)
+                if _matched > 0:
+                    score += min(0.10, _matched * 0.03)
+            # ── 迭代333：TMV Multiplicative Saturation Discount ──────────────
+            # 信息论基础：高 access_count chunk 已被 agent "内化"，边际信息趋零。
+            # OS 类比：NUMA remote node penalty — acc 越高越像"远端内存"，成本高于收益。
+            # 乘法折扣（vs saturation_penalty 的加法）才能真正降权高 relevance 的饱和 chunk。
+            # design_constraint/semantic 类型保护：floor=0.55 确保不被完全排除。
+            _acc = chunk.get("access_count", 0) or 0
+            if _acc >= _tmv_acc_threshold:
+                _tmv_mult = _tmv_saturation_discount(_acc)
+                score *= _tmv_mult
+            # ── Session Density Gate（TMV 子机制）──────────────────────────
+            # OS 类比：Linux write-back coalescing — 同一页重复 dirty 合并为一次 I/O
+            # session 内同一 chunk 被注入 >= N 次 → 额外乘以 0.7（更强惩罚）
+            _sess_inj = _session_injection_counts.get(chunk.get("id", ""), 0)
+            if _sess_inj >= _tmv_session_density_gate:
+                score *= 0.70
+            return score
+
+        if use_fts:
+            candidates_count = len(fts_results)
+            max_rank = max(c["fts_rank"] for c in fts_results) if fts_results else 1.0
+            if max_rank <= 0:
+                max_rank = 1.0
+
+            final = []
+            fts_ids = set()
+            for chunk in fts_results:
+                relevance = chunk["fts_rank"] / max_rank
+                score = _score_chunk(chunk, relevance)
+                final.append((score, chunk))
+                fts_ids.add(chunk.get("id", ""))
+
+            # ── 迭代310：Spreading Activation — 关联激活扩散补充 ──────────────
+            # OS 类比：CPU L2 prefetch — FTS5 命中 chunk A 后，沿 entity_edges
+            # 预热邻居 chunk 到候选集，形成认知网络式召回而非孤立 top-K
+            if not _check_deadline("spreading_activate"):
+                try:
+                    _sa_result = _spreading_activate(
+                        conn, list(fts_ids), project=project,
+                        decay=0.7, max_hops=2,
+                        existing_ids=fts_ids,
+                        max_activation_bonus=0.4,
+                    )
+                    if _sa_result:
+                        # 批量加载激活邻居 chunk
+                        _sa_ids = list(_sa_result.keys())
+                        _sa_ph = ",".join("?" * len(_sa_ids))
+                        _sa_rows = conn.execute(
+                            f"SELECT id, summary, content, chunk_type, importance, "
+                            f"last_accessed, access_count, created_at, project, "
+                            f"info_class, lru_gen "
+                            f"FROM memory_chunks WHERE id IN ({_sa_ph})",
+                            _sa_ids,
+                        ).fetchall()
+                        _sa_col = ("id","summary","content","chunk_type","importance",
+                                   "last_accessed","access_count","created_at","project",
+                                   "info_class","lru_gen")
+                        for row in _sa_rows:
+                            c = dict(zip(_sa_col, row))
+                            activation_bonus = _sa_result.get(c["id"], 0.0)
+                            # spreading activation 用较低基础 relevance，主要靠 activation_bonus
+                            base_score = _score_chunk(c, relevance=0.2)
+                            final.append((base_score + activation_bonus, c))
+                            fts_ids.add(c["id"])
+                        candidates_count += len(_sa_rows)
+                except Exception:
+                    pass  # spreading activation 失败不阻塞主流程
+
+            # ── 迭代330：Causal Secondary Search — causal_chain 专属二次检索 ──
+            # OS 类比：Linux readahead ≥ 2 pass — 第一轮 VFS readahead 基于 offset，
+            # 第二轮 ext4 readahead 基于 extent map，两轮覆盖不同维度。
+            # 问题：主 query 扩展因果词会完全挤出 decision/design_constraint（实测 causal=8, decision=0）。
+            # 解决：主 query 保持不变，在 spreading activation 后追加专属 causal 二次 FTS5 搜索，
+            # 结果以低 base relevance（0.25）合入 final，不影响主结果排序。
+            # 触发条件：FULL 优先级 + 未超 soft deadline + 有 causal secondary query
+            if priority == "FULL" and not _check_deadline("causal_secondary"):
+                try:
+                    _causal_q = _build_causal_query(prompt)
+                    if _causal_q:
+                        _causal_results = fts_search(
+                            conn, _causal_q, project,
+                            top_k=3,
+                            chunk_types=("causal_chain", "reasoning_chain"),
+                        )
+                        _causal_added = 0
+                        for _cc in _causal_results:
+                            if _cc.get("id", "") not in fts_ids:
+                                # 低基础 relevance — 补充而非挤占主结果
+                                _cc_score = _score_chunk(_cc, relevance=0.25)
+                                final.append((_cc_score, _cc))
+                                fts_ids.add(_cc.get("id", ""))
+                                _causal_added += 1
+                        if _causal_added:
+                            candidates_count += _causal_added
+                except Exception:
+                    pass  # causal secondary search 失败不阻塞主流程
+
+            # ── iter126: BM25 补充（仅当 FTS5 召回不足 effective_top_k 时）──
+            # OS 类比：L1 cache miss 后查 L2（而非只在 L1 完全失效时才看 L2）
+            try:
+                _hybrid_threshold = _sysctl("retriever.hybrid_fts_min_count")
+            except Exception:
+                _hybrid_threshold = effective_top_k
+
+            if len(fts_results) < _hybrid_threshold:
+                # FTS5 召回不足，BM25 补充长尾
+                # 迭代141：hybrid BM25 补充也受 soft deadline 保护（已超 deadline 时跳过）
+                # OS 类比：Linux schedule_timeout() — 超时后不再等待，直接用已有结果
+                # 已有 FTS5 结果时 BM25 补充是"锦上添花"，超时时直接用 FTS5 结果即可
+                _need_extra = _hybrid_threshold - len(fts_results)
+                try:
+                    if _check_deadline("pre_hybrid_bm25"):
+                        raise Exception("deadline_skip_hybrid_bm25")
+                    _all_chunks = store_get_chunks(conn, project, chunk_types=_retrieve_types)
+                    _extra_chunks = [c for c in _all_chunks if c.get("id", "") not in fts_ids]
+                    if _extra_chunks:
+                        _extra_texts = [f"{c['summary']} {c['content']}" for c in _extra_chunks]
+                        _extra_raw = bm25_scores_cached(query, _extra_texts, chunk_version=read_chunk_version())
+                        _extra_norm = normalize(_extra_raw)
+                        # BM25 补充 chunk 降权：避免劣质长尾挤掉 FTS5 精确结果
+                        # discount = 0.6 → BM25 补充 chunk 的 relevance 最高只有 FTS5 的 60%
+                        _discount = 0.6
+                        for i, chunk in enumerate(_extra_chunks):
+                            relevance = _extra_norm[i] * _discount
+                            score = _score_chunk(chunk, relevance)
+                            final.append((score, chunk))
+                        _hybrid_bm25_count = min(_need_extra, len(_extra_chunks))
+                        candidates_count += _hybrid_bm25_count
+                except Exception:
+                    pass  # BM25 补充失败不影响已有 FTS5 结果
+
+            # ── 迭代305：Curiosity-Driven 知识空白检测（FULL 模式专属）──────────
+            # OS 类比：vmstat 检测到 free pages < WMARK_LOW 时触发 wakeup_kswapd()：
+            #   FTS top-1 score < 0.25（知识低水位）= 知道有相关内容但不够用
+            #   → 将 query 写入 curiosity_queue，deep-sleep 阶段异步补充知识
+            #
+            # 触发条件（三者同时满足）：
+            #   1. FULL 模式（已在 `if use_fts:` 块内，priority==FULL 时才有 fts_results）
+            #   2. FTS 召回数 >= 1（有相关内容，否则是"完全空白"而非"弱命中"）
+            #   3. top-1 score < 0.25 且 query 长度 > 8 字符（过滤噪音和短确认词）
+            #
+            # 性能约束：enqueue_curiosity 必须非阻塞（try/except 包裹，失败静默）
+            # 注意：此处 fts_results 是原始 FTS 召回，max_rank 已在上方计算
+            if priority == "FULL" and fts_results:
+                try:
+                    _fts_top_score = fts_results[0]["fts_rank"] if fts_results else 0.0
+                    _CURIOSITY_WMARK_LOW = 0.25   # 知识低水位阈值（类比 WMARK_LOW）
+                    _CURIOSITY_MIN_QLEN  = 8      # 最小 query 长度（过滤短确认词）
+                    if (_fts_top_score < _CURIOSITY_WMARK_LOW
+                            and len(query) > _CURIOSITY_MIN_QLEN):
+                        from store_vfs import enqueue_curiosity as _enqueue_curiosity
+                        _eq_n = _enqueue_curiosity(conn, query, project,
+                                                    top_score=_fts_top_score)
+                        if _eq_n:
+                            _deferred.log(DMESG_DEBUG, "curiosity",
+                                          f"weak_hit enqueued: score={_fts_top_score:.3f} "
+                                          f"qlen={len(query)} query={query[:40]}",
+                                          session_id=session_id, project=project)
+                except Exception:
+                    pass  # 性能关键路径：enqueue 失败静默（不阻塞检索主流程）
+
+        else:
+            # ── 迭代135：LITE + FTS5 miss → Early Exit（BM25 noise suppression）──
+            # OS 类比：Linux io_uring fixed-file IORING_REGISTER_FILES — 对低优先级任务
+            #   不分配 kernel resource（直接返回 EAGAIN），防止低相关性请求耗尽资源。
+            #
+            # 问题：LITE 优先级（short query/低信号）的 FTS5 为空时，BM25 全表扫描会返回
+            #   大量"词汇偶然重叠"的高 importance chunk（如 global 的 design_constraint）。
+            #   实测 /intraday-scan（14chars, LITE）→ FTS5 无结果 → BM25 返回70个无关 chunk
+            #   → 注入8条 git/kernel 约束 → 对 trading 项目造成严重噪音。
+            #
+            # 修复：LITE 路径 FTS5 miss → 直接 sys.exit(0)（不走 BM25 fallback）
+            #   FULL 路径保留 BM25 fallback（FULL 表明用户需要全面检索，值得付出代价）
+            #   LITE 路径 FTS5 miss 等价于"此 query 在 DB 中无相关知识"，
+            #   BM25 全扫只会放大 importance 排序的噪音，不会找到真正相关内容。
+            if priority == "LITE":
+                # LITE + FTS5 miss: 无相关知识，直接退出（不注入噪音）
+                conn.close()
+                if len(_deferred) > 0:
+                    try:
+                        wconn = open_db()
+                        ensure_schema(wconn)
+                        _deferred.flush(wconn)
+                        wconn.commit()
+                        wconn.close()
+                    except Exception:
+                        pass
+                sys.exit(0)
+
+            # ── 迭代141：BM25 Fallback Hard Deadline Pre-check ──────────────────
+            # OS 类比：Linux kernel 长路径中的 need_resched() 检查点（schedule()）
+            #   内核中长时间运行的路径（如 ext4 文件系统、内存压缩）会在每个"安全点"
+            #   调用 cond_resched() / need_resched()，如果有更高优先级任务等待则主动 yield。
+            #   memory-os 等价问题：
+            #     BM25 全表扫描（store_get_chunks + bm25_scores）是 O(N) 全扫，
+            #     95 chunks 时约 450-630ms。hard_deadline 在 post_scoring 才检查，
+            #     等 BM25 完成后再检测到超时（等于"没有检查"——结果已计算完了）。
+            #     实测 hard_deadline 轨迹：434ms, 490ms, 522ms, 627ms（全部超 deadline_hard_ms=200ms）。
+            #   修复：在 BM25 全表扫描**之前**加一个抢占检查点：
+            #     如果此时已超 hard_deadline，直接 sys.exit(0)（跳过整个 BM25 扫描）。
+            #     效果等价于 cond_resched()——检测到"截止时间已到"时放弃昂贵操作。
+            #   注意：pre_bm25 检查的 is_hard=True 直接退出（无结果），而不像 post_scoring
+            #     那样返回已有结果——因为此路径 FTS5 已失败（use_fts=False），没有 FTS5 结果可返回。
+            if _check_deadline("pre_bm25_fallback", is_hard=True):
+                # hard deadline 到期 + FTS5 无结果：直接退出，不注入（优于等待 BM25 完成后再退出）
+                conn.close()
+                if len(_deferred) > 0:
+                    try:
+                        wconn = open_db()
+                        ensure_schema(wconn)
+                        _deferred.flush(wconn)
+                        wconn.commit()
+                        wconn.close()
+                    except Exception:
+                        pass
+                sys.exit(0)
+
+            # Fallback：全表扫描 + Python BM25（FTS5 异常时，仅 FULL 优先级）
+            # ── 迭代131：BM25 Fallback Global Discount — 跨项目噪音抑制 ──
+            # OS 类比：Linux NUMA Aware Scheduling — 强制 cross-node 分配时施加 migration cost
+            #   BM25 全表扫描无法区分语义相关性和词汇偶然重叠。
+            #   global 项目高 importance chunk（如 kernel patch design_constraint, imp=0.95）
+            #   通过偶发词汇（如"记忆"出现在 kernel 规则描述中）获得虚高 BM25 relevance，
+            #   与 NUMA penalty(global)=0.05 叠加后仍能排名第一（score=1.299 > any relevant chunk）。
+            #   FTS5 路径无此问题（精确 bigram 匹配，偶发词汇重叠不会命中 FTS5 全词匹配）。
+            #   解决：BM25 fallback 专用 global discount，relevance × bm25_global_discount (0.4)，
+            #   相当于 NUMA distance = 0.6 × base_score，大幅压制跨项目内容的得分上限。
+            _bm25_global_discount = _sysctl("retriever.bm25_global_discount")
+            chunks = store_get_chunks(conn, project, chunk_types=_retrieve_types)
+            if not chunks:
+                sys.exit(0)
+            candidates_count = len(chunks)
+
+            search_texts = [f"{c['summary']} {c['content']}" for c in chunks]
+            _cv = read_chunk_version()
+            raw_scores = bm25_scores_cached(query, search_texts, chunk_version=_cv)
+            relevance_scores = normalize(raw_scores)
+
+            final = []
+            for i, chunk in enumerate(chunks):
+                relevance = relevance_scores[i]
+                # iter131: global 项目 chunk 在 BM25 fallback 路径中施加强化折扣
+                # 仅当当前 project 不是 global 时生效（global project 查询不折扣自身内容）
+                if (project != "global"
+                        and chunk.get("project", "") == "global"
+                        and _bm25_global_discount < 1.0):
+                    relevance = relevance * _bm25_global_discount
+                score = _score_chunk(chunk, relevance)
+                final.append((score, chunk))
+
+        # ── 迭代41：Hard Deadline 检查 — 评分完成后如果已超 hard deadline，提前返回 ──
+        # OS 类比：deadline scheduler 的 deadline_expired()——请求到期后立即 dispatch
+        # 不再执行 madvise/swap_fault/router，直接返回 FTS5+scorer 的结果
+        if _check_deadline("post_scoring", is_hard=True):
+            # hard deadline 到期：跳过所有后续增强阶段
+            # 迭代50：hard deadline 路径也使用 DRR 选择
+            final.sort(key=lambda x: x[0], reverse=True)
+            # 迭代86：最低相关性门槛 — A/B评测发现无关query注入噪音
+            # 迭代88：自适应门槛 — 通用知识 query 用更高阈值防止误注入
+            if _is_generic_knowledge_query(query):
+                _min_thresh = _sysctl("retriever.generic_query_min_threshold")
+            else:
+                _min_thresh = _sysctl("retriever.min_score_threshold")
+            positive = [(s, c) for s, c in final if s >= _min_thresh]
+            if _sysctl("retriever.drr_enabled") and len(positive) > effective_top_k:
+                top_k = _drr_select(positive, effective_top_k)
+            else:
+                top_k = positive[:effective_top_k]
+            # 迭代321：MMR 内容去冗余（hard deadline 路径也应用）
+            if _sysctl("retriever.mmr_enabled") and len(top_k) > 1:
+                top_k = _mmr_rerank(top_k, effective_top_k,
+                                    lambda_mmr=_sysctl("retriever.mmr_lambda"))
+            if top_k:
+                # 快速路径：直接组装输出
+                top_k_ids = sorted([c["id"] for _, c in top_k])
+                current_hash = hashlib.md5("|".join(top_k_ids).encode()).hexdigest()[:8]
+                top_k_data = [{"id": c["id"], "summary": c["summary"], "score": round(s, 4), "chunk_type": c.get("chunk_type", "")} for s, c in top_k]
+                if current_hash != _read_hash():
+                    _TYPE_PREFIX = {"decision": "[决策]", "excluded_path": "[排除]",
+                                    "reasoning_chain": "[推理]", "conversation_summary": "[摘要]",
+                                    "task_state": "", "design_constraint": "⚠️ [约束]"}
+                    header = "【相关历史记录（BM25 召回）】"
+                    inject_lines = [header]
+
+                    # 迭代98：分离约束知识和普通知识，约束优先展示
+                    # 迭代306：hard_deadline 路径也附加 raw_snippet（importance >= 0.75）
+                    _hd_high_ids = [c["id"] for _, c in top_k if (c.get("importance") or 0) >= 0.75]
+                    _hd_raw: dict = {}
+                    if _hd_high_ids:
+                        try:
+                            _hd_ph = ",".join("?" * len(_hd_high_ids))
+                            _hd_rows = conn.execute(
+                                f"SELECT id, raw_snippet FROM memory_chunks WHERE id IN ({_hd_ph})",
+                                _hd_high_ids,
+                            ).fetchall()
+                            _hd_raw = {r[0]: r[1] for r in _hd_rows if r[1]}
+                        except Exception:
+                            pass
+                    constraint_items = []
+                    normal_items = []
+                    hard_deadline_forced = False
+                    for s, c in top_k:
+                        prefix = _TYPE_PREFIX.get(c.get("chunk_type", ""), "")
+                        line = f"- {prefix} {c['summary']}".strip()
+                        rs = _hd_raw.get(c["id"], "")
+                        if rs:
+                            line = f"{line}（原文：{rs[:150]}）"
+                        if c.get("chunk_type") == "design_constraint":
+                            # 在 hard_deadline 路径中，约束都是被强制注入的（因为评分可能不高）
+                            constraint_items.append(line)
+                            hard_deadline_forced = True
+                        else:
+                            normal_items.append(line)
+
+                    # 约束先显示，后跟普通知识
+                    if constraint_items:
+                        inject_lines.append("")
+                        inject_lines.append("【已知约束（系统级设计限制）】")
+                        inject_lines.extend(constraint_items)
+                        if hard_deadline_forced:
+                            inject_lines.append("")
+                            inject_lines.append("ℹ️ 注：上述约束经系统强制注入，代表已知设计决策。")
+                            inject_lines.append("在时间压力下召回，可能未包含完整上下文。")
+                        inject_lines.append("")
+                        inject_lines.append("【相关知识】")
+                        inject_lines.extend(normal_items)
+                    else:
+                        inject_lines.extend(normal_items)
+
+                    context_text = "\n".join(inject_lines)
+                    if len(context_text) > effective_max_chars:
+                        context_text = context_text[:effective_max_chars] + "…"
+                    _write_hash(current_hash)
+                    _tlb_write(prompt_hash, current_hash, _get_db_mtime())  # 迭代57: TLB
+                    duration_ms = _elapsed_ms()
+                    accessed_ids = [c["id"] for _, c in top_k]
+                    # 迭代323: SM-2 recall_quality — 从 top_k 分数推断
+                    # avg_score > 0.6 → FTS5 强命中 → quality=5
+                    # avg_score 0.3-0.6 → 中等命中 → quality=4
+                    # avg_score < 0.3 → 弱命中（BM25 fallback）→ quality=3
+                    _hd_avg_score = (sum(s for s, _ in top_k) / len(top_k)) if top_k else 0.0
+                    _hd_recall_quality = 5 if _hd_avg_score > 0.6 else (4 if _hd_avg_score > 0.3 else 3)
+                    reason = f"{'first_call' if not current_hash else 'hash_changed'}|{priority.lower()}|hard_deadline"
+                    _deferred.log(DMESG_WARN, "retriever",
+                              f"hard_deadline: {duration_ms:.1f}ms skipped={'+'.join(deadline_skipped)}",
+                              session_id=session_id, project=project)
+                    # ── 迭代69+84：输出前置 + 只读连接关闭 ──
+                    print(json.dumps({"hookSpecificOutput": {
+                        "hookEventName": "UserPromptSubmit",
+                        "additionalContext": context_text}}, ensure_ascii=False))
+                    sys.stdout.flush()
+                    conn.close()  # 关闭只读连接
+                    # ── 迭代84：Write-Back Phase — 写连接批量写入 ──
+                    try:
+                        wconn = open_db()
+                        ensure_schema(wconn)
+                        update_accessed(wconn, accessed_ids, recall_quality=_hd_recall_quality)
+                        mglru_promote(wconn, accessed_ids)
+                        _write_trace(session_id, project, prompt_hash, candidates_count,
+                                     top_k_data, 1, reason, duration_ms, conn=wconn)
+                        _deferred.flush(wconn)
+                        wconn.commit()
+                        wconn.close()
+                    except Exception:
+                        pass  # write-back 失败不影响已输出的结果
+                    # 迭代85：Shadow Trace
+                    _write_shadow_trace(project, accessed_ids, session_id)
+                    sys.exit(0)
+
+        # ── 迭代32：madvise boost — 预热 hint 匹配加分 ──
+        # 迭代41：madvise 受 soft deadline 约束（中优先级）
+        hints = []
+        if not _check_deadline("madvise"):
+            hints = madvise_read(project)
+        if hints:
+            boost = _sysctl("madvise.boost_factor")
+            hint_set = set(h.lower() for h in hints)
+            boosted_count = 0
+            for i, (score, chunk) in enumerate(final):
+                text_lower = f"{chunk['summary']} {chunk.get('content', '')}".lower()
+                # 匹配 hint 数量越多 boost 越大（但单个 chunk 最多 boost 一次 factor）
+                matches = sum(1 for h in hint_set if h in text_lower)
+                if matches > 0:
+                    # 按匹配比例加分：match_ratio * boost_factor
+                    match_ratio = min(1.0, matches / max(1, len(hint_set) * 0.3))
+                    final[i] = (score + boost * match_ratio, chunk)
+                    boosted_count += 1
+            if boosted_count > 0:
+                _deferred.log(DMESG_DEBUG, "retriever",
+                          f"madvise: {boosted_count} chunks boosted by {len(hints)} hints",
+                          session_id=session_id, project=project)
+
+        # ── 迭代48：Readahead — Co-Access Prefetch ──
+        # OS 类比：Linux readahead (generic_file_readahead, 2002→2004)
+        #   顺序访问文件时，内核提前读入后续 block 到 page cache，不等请求。
+        #   memory-os 等价：检索到 chunk A 时，如果 chunk B 历史上与 A 频繁共现，
+        #   自动 prefetch B 进入候选集（给予 bonus 加分）。
+        # 迭代41：readahead 受 soft deadline 约束（中优先级，madvise 之后）
+        readahead_prefetched = 0
+        if not _check_deadline("readahead"):
+            try:
+                # 取当前候选集中的 Top 临时排序 chunk ids
+                _temp_sorted = sorted(final, key=lambda x: x[0], reverse=True)
+                _temp_top_ids = [c["id"] for sc, c in _temp_sorted[:effective_top_k] if sc > 0]
+                if _temp_top_ids:
+                    ra_pairs = readahead_pairs(conn, project, hit_ids=_temp_top_ids)
+                    if ra_pairs:
+                        existing_ids = {c["id"] for _, c in final}
+                        prefetch_bonus = _sysctl("readahead.prefetch_bonus")
+                        max_prefetch = _sysctl("readahead.max_prefetch")
+                        prefetch_candidates = []  # (partner_id, cooccurrence)
+                        for _hit_id, partners in ra_pairs.items():
+                            for pid, cnt in partners:
+                                if pid not in existing_ids:
+                                    prefetch_candidates.append((pid, cnt))
+                        # 按共现次数降序，取 max_prefetch 条
+                        prefetch_candidates.sort(key=lambda x: x[1], reverse=True)
+                        prefetch_ids = [pid for pid, _ in prefetch_candidates[:max_prefetch]]
+                        if prefetch_ids:
+                            # 从 DB 加载 prefetch chunk
+                            placeholders = ",".join("?" * len(prefetch_ids))
+                            ra_chunks = conn.execute(
+                                f"SELECT id, summary, content, chunk_type, importance, last_accessed, access_count, created_at "
+                                f"FROM memory_chunks WHERE id IN ({placeholders}) AND project=?",
+                                prefetch_ids + [project]
+                            ).fetchall()
+                            for row in ra_chunks:
+                                chunk_dict = {
+                                    "id": row[0], "summary": row[1], "content": row[2],
+                                    "chunk_type": row[3], "importance": row[4],
+                                    "last_accessed": row[5], "access_count": row[6] or 0,
+                                    "created_at": row[7] or "",
+                                }
+                                # 计算基础分 + prefetch_bonus
+                                base_score = _unified_retrieval_score(
+                                    relevance=0.3,  # 非直接匹配，给予基础 relevance
+                                    importance=float(chunk_dict["importance"]),
+                                    last_accessed=chunk_dict["last_accessed"],
+                                    access_count=chunk_dict["access_count"],
+                                    created_at=chunk_dict["created_at"],
+                                    chunk_id=chunk_dict["id"],
+                                    query_seed=query,
+                                    recall_count=_recall_counts.get(chunk_dict["id"], 0),  # 迭代62
+                                    chunk_project=chunk_dict.get("project", ""),  # 迭代111
+                                    current_project=project,
+                                )
+                                final.append((base_score + prefetch_bonus, chunk_dict))
+                                existing_ids.add(chunk_dict["id"])
+                                readahead_prefetched += 1
+                            if readahead_prefetched > 0:
+                                _deferred.log(DMESG_DEBUG, "retriever",
+                                          f"readahead: prefetched={readahead_prefetched} pairs_found={len(ra_pairs)}",
+                                          session_id=session_id, project=project)
+            except Exception:
+                pass  # readahead 失败不影响主流程
+
+        # ── 迭代92：Intent Prefetch — 意图预测性预加载 ──
+        # OS 类比：readahead(2) 基于访问模式预测后续页面
+        # 根据用户意图类型（continue/fix_bug/implement/...）预取对应标签的 chunk
+        try:
+            intent_chunks = _intent_prefetch(conn, project, prompt, top_k=3)
+            intent_prefetched = 0
+            if intent_chunks:
+                existing_ids = {c["id"] for _, c in final}
+                for ic in intent_chunks:
+                    if ic["id"] not in existing_ids:
+                        # 用 intent_boost 给意图匹配加分
+                        score = _unified_retrieval_score(
+                            relevance=0.3, importance=ic["importance"],
+                            last_accessed=ic["last_accessed"],
+                            access_count=ic["access_count"],
+                            chunk_id=ic["id"], query_seed=prompt,
+                            chunk_project=ic.get("project", ""),  # 迭代111
+                            current_project=project,
+                        ) + ic["intent_boost"]
+                        final.append((score, {"id": ic["id"], "summary": ic["summary"],
+                                              "chunk_type": ic["chunk_type"],
+                                              "importance": ic["importance"],
+                                              "last_accessed": ic["last_accessed"],
+                                              "access_count": ic["access_count"],
+                                              "embedding": "[]", "tags": "[]"}))
+                        existing_ids.add(ic["id"])
+                        intent_prefetched += 1
+                if intent_prefetched > 0:
+                    _deferred.log(DMESG_DEBUG, "retriever",
+                                  f"intent_prefetch: {intent_prefetched} chunks intent={intent_chunks[0]['intent_prefetch']}",
+                                  session_id=session_id, project=project)
+        except Exception:
+            pass  # intent prefetch 失败不影响主流程
+
+        # ── 迭代98：强制注入 design_constraint — 符号匹配 ──
+        # OS 类比：Linux mlock(2) — 标记的内存不可淘汰，总是驻留在 RAM
+        # 检查 final 中是否有 design_constraint；若有，强制保留在 top_k 中
+        # 并在注入文本中附加 ⚠️ 约束警告
+        all_constraints = [c for s, c in final if c.get("chunk_type") == "design_constraint"]
+        forced_constraints = []  # 记录强制注入的约束（不在自然 top_k 内的）
+
+        # ── 迭代50：DRR Fair Queuing — 类型多样性保障 ──
+        # OS 类比：Linux CFQ/DRR (Deficit Round Robin, 1996)
+        #   CFQ 保证每个进程获得公平的 I/O 带宽份额。
+        #   DRR 给每个 flow/class 独立队列，轮询时各队列获得 quantum 配额。
+        #   效果：任何单一进程无法独占全部 I/O 带宽。
+        #
+        #   memory-os 等价问题：
+        #     数据显示 93%+ 的 chunk 是 decision 类型。
+        #     纯 score 排序导致 Top-K 全是 decision，
+        #     reasoning_chain/conversation_summary 永远无法被召回（排挤效应）。
+        #
+        #   解决：DRR 公平调度
+        #     1. 按 chunk_type 分流（类比 DRR 的 per-flow queue）
+        #     2. 每个类型有 max_same_type 上限（类比 quantum 配额）
+        #     3. 超出配额的 chunk 让位给其他类型的高分 chunk
+        #     4. 如果其他类型不足以填满，配额回流给主类型
+        final.sort(key=lambda x: x[0], reverse=True)
+        # 迭代86：最低相关性门槛 — A/B评测发现无关query注入噪音
+        # 迭代88：自适应门槛 — 通用知识 query 用更高阈值防止误注入
+        if _is_generic_knowledge_query(query):
+            _min_thresh = _sysctl("retriever.generic_query_min_threshold")
+        else:
+            _min_thresh = _sysctl("retriever.min_score_threshold")
+        positive = [(s, c) for s, c in final if s >= _min_thresh]
+
+        # ── 迭代334：IWCSI — Importance-Weighted Cold-Start Injection ───────
+        # 信息论依据（Shannon 1948）：高 importance + 零召回 chunk 的期望信息增益最高：
+        #   I(chunk|context) ≈ H(chunk) × P(not_known) = importance × 1.0（从未被注入过）
+        #   但语义鸿沟（encoding-retrieval mismatch, Tulving 1983）导致 P(retrieved|query) ≈ 0
+        #   → 系统性信息损失：高价值知识被永久遮蔽在 top-K 之外
+        # OS 类比：Linux DAMON damos_action=PAGE_PROMOTE (2022, SeongJae Park) —
+        #   DAMON 检测到 cold region（长期无访问）→ 强制发起一次 access
+        #   打破 cold-start 死锁（cold 不访问 → access_count=0 → LRU 永驻冷端）
+        #   memory-os 等价：zero-recall → acc=0 → starvation_boost 无法补偿语义鸿沟
+        #   → IWCSI 强制曝光1个最高 imp 的零召回 chunk（打破死锁）
+        # 触发条件：FULL 模式 + positive 不足 effective_top_k + 未超 soft deadline
+        _cold_start_injected = 0
+        if (priority == "FULL"
+                and _sysctl("retriever.cold_start_enabled")
+                and len(positive) < effective_top_k
+                and not _check_deadline("cold_start")):
+            try:
+                _cs_imp_threshold = _sysctl("retriever.cold_start_imp_threshold")
+                _cs_max = _sysctl("retriever.cold_start_max_inject")
+                _positive_ids = {c["id"] for _, c in positive}
+                # 从 final 候选中筛选：高 imp、零访问、不在 positive 中
+                _cold_candidates = [
+                    (imp_val, c) for s, c in final
+                    if c.get("id", "") not in _positive_ids
+                    and (c.get("access_count", 0) or 0) == 0
+                    and float(c.get("importance", 0) or 0) >= _cs_imp_threshold
+                    for imp_val in [float(c.get("importance", 0) or 0)]
+                ]
+                if _cold_candidates:
+                    # 按 importance 降序，取 top _cs_max 个
+                    _cold_candidates.sort(key=lambda x: x[0], reverse=True)
+                    for _cold_imp, _cold_chunk in _cold_candidates[:_cs_max]:
+                        # 注入分数 = importance（让其能进入 positive，但不垫底也不顶替高分）
+                        positive.append((_cold_imp, _cold_chunk))
+                        _positive_ids.add(_cold_chunk["id"])
+                        _cold_start_injected += 1
+                    if _cold_start_injected > 0:
+                        _deferred.log(DMESG_DEBUG, "retriever",
+                                      f"cold_start: injected={_cold_start_injected} "
+                                      f"imp>={_cs_imp_threshold:.2f}",
+                                      session_id=session_id, project=project)
+            except Exception:
+                pass  # cold_start 失败不阻塞主流程
+
+        if _sysctl("retriever.drr_enabled") and len(positive) > effective_top_k:
+            top_k = _drr_select(positive, effective_top_k)
+        else:
+            top_k = positive[:effective_top_k]
+        # 迭代321：MMR 内容去冗余（在 DRR 多样性保障之后，对内容语义去重）
+        # OS 类比：L2 cache dedup — 不同 cache line 指向相同物理页时合并
+        if _sysctl("retriever.mmr_enabled") and len(top_k) > 1:
+            top_k = _mmr_rerank(top_k, effective_top_k,
+                                lambda_mmr=_sysctl("retriever.mmr_lambda"))
+
+        # 迭代98+128+130：强制注入约束 — 将约束追加到 top_k
+        # 迭代128 改进：添加 max_forced_constraints 上限 + BM25 相关性排序
+        # 迭代130 改进：DRR 感知 — 计算自然 top_k 中已有的约束数量，动态调整 forced 配额
+        # 迭代337 改进：Jaccard 内容重叠过滤 — 约束 summary 与 top_k 已选内容高度重叠时跳过
+        # OS 类比：Linux RLIMIT_MEMLOCK + cgroup per-type 资源配额联合约束
+        #   RLIMIT_MEMLOCK(iter128) 限制强制注入总量
+        #   DRR-aware(iter130) 计算已用配额，防止自然+强制叠加后超限
+        #   iter337: Page dedup (KSM) — 内容相似度 > threshold 的约束视为冗余，不重复注入
+        # 问题：DRR 限制 natural top_k 中每类型最多 max_same_type=2，
+        #       但 forced_constraints 在 DRR 之后 insert(0)，不受 DRR 约束。
+        #       实测 04:42 日志: drr={'design_constraint':4,'decision':1} → 约束占 80%
+        top_k_ids = {c["id"] for _, c in top_k}
+        _max_forced = _sysctl("retriever.max_forced_constraints")
+        _drr_max_same = _sysctl("retriever.drr_max_same_type")
+        # 计算自然 top_k 中已有的 design_constraint 数量
+        _natural_constraint_count = sum(1 for _, c in top_k if c.get("chunk_type") == "design_constraint")
+        # 动态调整：允许强制注入的最多 = max_forced，但自然+强制总量不超过 DRR 配额 × 1.5
+        # 乘以 1.5 是因为约束是优先级信息，允许比普通类型多一点配额，但不无限
+        _constraint_total_cap = max(_drr_max_same, int(_drr_max_same * 1.5))
+        _remaining_forced_slots = max(0, _constraint_total_cap - _natural_constraint_count)
+        _effective_max_forced = min(_max_forced, _remaining_forced_slots)
+
+        # 对不在自然 top_k 中的约束按 BM25 简单相关性排序（用 summary 与 query 的词重叠）
+        _extra_constraints = [c for c in all_constraints if c["id"] not in top_k_ids]
+        if _extra_constraints and _effective_max_forced > 0:
+            # 快速 BM25-like 相关性：query 词与 summary 词的 Jaccard 相似度
+            _query_words = set(re.sub(r'[^\w\u4e00-\u9fff]', ' ', query.lower()).split())
+            def _constraint_relevance(c):
+                s_words = set(re.sub(r'[^\w\u4e00-\u9fff]', ' ', (c.get("summary") or "").lower()).split())
+                if not _query_words or not s_words:
+                    return 0.0
+                return len(_query_words & s_words) / len(_query_words | s_words)
+            _extra_constraints.sort(key=_constraint_relevance, reverse=True)
+
+            # ── 迭代337：Jaccard 内容重叠过滤 ──
+            # 若约束 summary 与 top_k 中任一 chunk 的 Jaccard 相似度 ≥ 0.5，
+            # 表示内容已被覆盖，再注入是纯冗余 → 跳过。
+            # OS 类比：Linux KSM (Kernel Samepage Merging, 2009) —
+            #   扫描物理页内容，哈希相同的页合并为 COW 共享页，节省内存。
+            #   AIOS 版本：summary token 集合 Jaccard 相似度 > threshold → 内容冗余，不重复注入。
+            _top_k_token_sets = []
+            for _, _tc in top_k:
+                _tc_words = set(re.sub(r'[^\w\u4e00-\u9fff]', ' ',
+                                       (_tc.get("summary") or "").lower()).split())
+                if _tc_words:
+                    _top_k_token_sets.append(_tc_words)
+
+            def _is_content_redundant(c: dict) -> bool:
+                """Jaccard > 0.5 与已选任一 chunk 内容高度重叠 → 冗余。"""
+                c_words = set(re.sub(r'[^\w\u4e00-\u9fff]', ' ',
+                                     (c.get("summary") or "").lower()).split())
+                if not c_words:
+                    return False
+                for existing_words in _top_k_token_sets:
+                    union = existing_words | c_words
+                    if union:
+                        jaccard = len(existing_words & c_words) / len(union)
+                        if jaccard >= 0.50:
+                            return True
+                return False
+
+            # 只强制注入最多 _effective_max_forced 个（按相关性排序，受 DRR 感知 + Jaccard 过滤）
+            for c in _extra_constraints[:_effective_max_forced]:
+                if _is_content_redundant(c):
+                    continue  # iter337: 内容冗余跳过
+                forced_constraints.append(c["summary"])
+                top_k.insert(0, (0.99, c))
+                top_k_ids.add(c["id"])
+                # 更新 token 集合供后续约束去重检查
+                _c_words = set(re.sub(r'[^\w\u4e00-\u9fff]', ' ',
+                                      (c.get("summary") or "").lower()).split())
+                if _c_words:
+                    _top_k_token_sets.append(_c_words)
+
+        if not top_k:
+            # ── 迭代33：Swap Fault — 检查 swap 分区是否有匹配的被换出 chunk ──
+            # 迭代41：swap_fault 受 soft deadline 约束（低优先级）
+            # 迭代84：swap_fault 需要写连接（swap_in 修改主表），临时切换
+            if priority == "FULL" and not _check_deadline("swap_fault"):
+                try:
+                    swap_matches = swap_fault(conn, query, project)
+                    if swap_matches:
+                        swap_ids = [m["id"] for m in swap_matches]
+                        # 需要写连接执行 swap_in
+                        conn.close()  # 关闭只读连接
+                        conn = open_db()  # 切换到写连接
+                        ensure_schema(conn)
+                        swap_result = swap_in(conn, swap_ids)
+                        if swap_result["restored_count"] > 0:
+                            _deferred.log(DMESG_INFO, "retriever",
+                                      f"swap_fault: restored={swap_result['restored_count']} from swap",
+                                      session_id=session_id, project=project)
+                            _deferred.flush(conn)
+                            conn.commit()
+                            # swap_in 后切回只读连接重新检索
+                            conn.close()
+                            conn = _open_db_readonly()
+                            # 重新检索（swap in 后主表有新数据）
+                            fts_results = fts_search(conn, query, project, top_k=effective_top_k * 3,
+                                                     chunk_types=_retrieve_types)
+                            if fts_results:
+                                max_rank = max(c["fts_rank"] for c in fts_results) if fts_results else 1.0
+                                if max_rank <= 0:
+                                    max_rank = 1.0
+                                final = []
+                                _swap_fts_ids = set()
+                                for chunk in fts_results:
+                                    relevance = chunk["fts_rank"] / max_rank
+                                    score = _score_chunk(chunk, relevance)
+                                    final.append((score, chunk))
+                                    _swap_fts_ids.add(chunk.get("id", ""))
+                                # iter126: swap_in 后也走 hybrid 补充
+                                if len(fts_results) < effective_top_k:
+                                    try:
+                                        _sw_all = store_get_chunks(conn, project, chunk_types=_retrieve_types)
+                                        _sw_extra = [c for c in _sw_all if c.get("id", "") not in _swap_fts_ids]
+                                        if _sw_extra:
+                                            _sw_raw = bm25_scores_cached(query, [f"{c['summary']} {c['content']}" for c in _sw_extra], chunk_version=read_chunk_version())
+                                            _sw_norm = normalize(_sw_raw)
+                                            for i, chunk in enumerate(_sw_extra):
+                                                score = _score_chunk(chunk, _sw_norm[i] * 0.6)
+                                                final.append((score, chunk))
+                                    except Exception:
+                                        pass
+                                final.sort(key=lambda x: x[0], reverse=True)
+                                top_k = [(s, c) for s, c in final[:effective_top_k] if s > 0]
+                        else:
+                            # swap_in 无结果，切回只读连接
+                            conn.close()
+                            conn = _open_db_readonly()
+                except Exception:
+                    pass
+
+            if not top_k:
+                # 迭代84：关闭只读连接，flush deferred logs
+                conn.close()
+                if len(_deferred) > 0:
+                    try:
+                        wconn = open_db()
+                        ensure_schema(wconn)
+                        _deferred.flush(wconn)
+                        wconn.commit()
+                        wconn.close()
+                    except Exception:
+                        pass
+                sys.exit(0)
+
+        # ── 迭代316：Working Memory Budget — Cowan 2001 ──
+        # OS 类比：mm/readahead.c 预读窗口管理，不是越大越好
+        # 分层：active(L1)→直接注入，background(L2)→间接支撑，dormant(L3)→不注入
+        try:
+            from wmb import apply_wmb_budget as _wmb_budget, tier_chunks as _wmb_tier
+            _wmb_pairs = [(s, c) for s, c in top_k]  # 格式：(score, chunk)
+            _wmb_tier_result = _wmb_tier(_wmb_pairs, top_k=effective_top_k)
+            _wmb_injected = _wmb_tier_result["active"] + _wmb_tier_result["background"]
+            if _wmb_injected:
+                _wmb_dormant_count = len(_wmb_tier_result["dormant"])
+                # 重建 top_k 格式：[(score, chunk)]，保持原有分数
+                _score_map = {c["id"]: s for s, c in top_k}
+                top_k = [(_score_map.get(c["id"], 0.5), c) for c in _wmb_injected]
+                _deferred.log(DMESG_DEBUG, "retriever",
+                              f"wmb_budget: active={len(_wmb_tier_result['active'])} "
+                              f"background={len(_wmb_tier_result['background'])} "
+                              f"dormant_suppressed={_wmb_dormant_count}",
+                              session_id=session_id, project=project)
+        except Exception:
+            pass  # WMB 失败不影响主流程，降级使用原始 top_k
+
+        top_k_ids = sorted([c["id"] for _, c in top_k])
+        current_hash = hashlib.md5("|".join(top_k_ids).encode()).hexdigest()[:8]
+
+        # prompt_hash 已在 TLB 检查时计算（迭代57）
+
+        top_k_data = [
+            {"id": c["id"], "summary": c["summary"], "score": round(s, 4), "chunk_type": c.get("chunk_type", "")}
+            for s, c in top_k
+        ]
+
+        if current_hash == _read_hash():
+            _tlb_write(prompt_hash, current_hash, _get_db_mtime())  # 迭代57: TLB 回填
+            # 迭代61：PSI Noise Floor — skipped_same_hash 记录 duration_ms=0
+            # 迭代84：切换到写连接记录 trace + flush deferred logs
+            conn.close()
+            try:
+                wconn = open_db()
+                ensure_schema(wconn)
+                _write_trace(session_id, project, prompt_hash,
+                             candidates_count, top_k_data, 0, "skipped_same_hash",
+                             0, conn=wconn)
+                _deferred.flush(wconn)
+                wconn.commit()
+                wconn.close()
+            except Exception:
+                pass
+            # 迭代85：Shadow Trace（same_hash 路径也知道工作集）
+            _write_shadow_trace(project, [c["id"] for _, c in top_k], session_id)
+            sys.exit(0)
+
+        # 构造注入文本（按 chunk_type 加前缀标签）
+        _TYPE_PREFIX = {
+            "decision": "[决策]",
+            "excluded_path": "[排除]",
+            "reasoning_chain": "[推理]",
+            "conversation_summary": "[摘要]",
+            "task_state": "",
+            "design_constraint": "⚠️ [约束]",
+            "quantitative_evidence": "📊 [量化]",
+            "causal_chain": "🔗 [因果]",
+        }
+
+        # 迭代100：置信度标识（OS 类比：ECC status bit per cache line）
+        def _conf_tag(c):
+            vs = c.get("verification_status", "pending")
+            cs = c.get("confidence_score", 0.7) or 0.7
+            if vs == "disputed":
+                return "❓"
+            if vs == "verified" or cs >= 0.9:
+                return "✅"
+            if cs < 0.5:
+                return "⚠️"
+            return ""
+
+        # 迭代98：分离约束知识和普通知识，约束优先展示
+        # 迭代306：批量取 raw_snippet（只对 importance >= 0.75 的 chunk 附加原文）
+        _high_imp_ids = [c["id"] for _, c in top_k if (c.get("importance") or 0) >= 0.75]
+        _raw_snippets: dict = {}
+        if _high_imp_ids:
+            try:
+                _rs_ph = ",".join("?" * len(_high_imp_ids))
+                _rs_rows = conn.execute(
+                    f"SELECT id, raw_snippet FROM memory_chunks WHERE id IN ({_rs_ph})",
+                    _high_imp_ids,
+                ).fetchall()
+                _raw_snippets = {r[0]: r[1] for r in _rs_rows if r[1]}
+            except Exception:
+                pass
+
+        constraint_items = []
+        normal_items = []
+        for _, c in top_k:
+            prefix = _TYPE_PREFIX.get(c.get("chunk_type", ""), "")
+            conf = _conf_tag(c)
+            line = f"{conf}{prefix} {c['summary']}".strip()
+            # 迭代306：importance >= 0.75 且有 raw_snippet → 附加原文（≤150字）
+            rs = _raw_snippets.get(c["id"], "")
+            if rs:
+                rs_short = rs[:150]
+                line = f"{line}（原文：{rs_short}）"
+            if c.get("chunk_type") == "design_constraint":
+                constraint_items.append(line)
+            else:
+                normal_items.append(line)
+
+        header = "【相关历史记录（BM25 召回）】"
+        if page_fault_queries:
+            header += f"  ← 含上轮缺页补入"
+        inject_lines = [header]
+
+        # 约束先显示，后跟普通知识
+        if constraint_items:
+            inject_lines.append("")
+            inject_lines.append("【已知约束（系统级设计限制）】")
+            inject_lines.extend(constraint_items)
+
+            # 迭代98：如果约束被强制注入（不在自然 top_k 中），加入置信度免责
+            if forced_constraints:
+                inject_lines.append("")
+                inject_lines.append("ℹ️ 注：上述约束经系统强制注入（非检索相关性排序），")
+                inject_lines.append("代表已知设计决策，但在本次会话的局部上下文中可能未出现信号词。")
+                inject_lines.append("若约束与当前任务无关，可选择性忽略。")
+
+            inject_lines.append("")
+            inject_lines.append("【相关知识】")
+            inject_lines.extend(normal_items)
+        else:
+            inject_lines.extend(normal_items)
+        # KnowledgeVFS：追加跨系统召回
+        # 迭代41：router 受 soft deadline 约束（最低优先级阶段）
+        # 迭代B1：knowledge_router → knowledge_vfs_init.search() 迁移
+        # 迭代B4：VFS LITE Fast Path — LITE 模式也查 VFS，用短 timeout（10ms）
+        #   防止 LITE 路径错过 self-improving/wiki 和 MEMORY.md 知识。
+        #   FULL: timeout=100ms（默认），LITE: timeout=10ms（快速失败不阻塞）。
+        if _KR_AVAILABLE and not _check_deadline("router"):
+            try:
+                _vfs_timeout = 100 if priority == "FULL" else 10  # LITE: 10ms fast-fail
+                kr_results = kr_route(query, sources=["memory-md", "self-improving"],
+                                      timeout_ms=_vfs_timeout)
+                if kr_results:
+                    kr_section = kr_format(kr_results)
+                    inject_lines.append(kr_section)
+            except Exception:
+                pass  # VFS 超时或无结果不阻塞主路径
+
+        # ── 迭代101: Tool Pattern Hint — 意图感知工具模式建议 ──
+        # OS 类比：CPU branch predictor hint (likely/unlikely) — 基于历史跳转记录预测执行路径
+        #
+        # 两层匹配策略：
+        # L1 意图感知匹配：_matched_patterns 中选 unique_tools 最多的模式
+        # L2 意图→工具类型映射：对特定意图（implement/fix_bug），查找含 TaskCreate/Read 的模式
+        # 都无结果时：只在多样性工具模式存在时给出提示（不注入单调 Bash*N）
+        try:
+            if priority == "FULL":
+                import json as _pj
+                _hint_seq = None
+                _hint_freq = 0
+                _hint_reason = ""
+
+                # L1: 意图感知命中模式 → 选 unique_tools 最多的
+                if _matched_patterns:
+                    best = max(
+                        _matched_patterns,
+                        key=lambda p: (len(set(p["seq"])), p["freq"])
+                    )
+                    if len(set(best["seq"])) >= 2:
+                        _hint_seq = best["seq"]
+                        _hint_freq = best["freq"]
+                        _hint_reason = f"因 {','.join(best['overlap'][:2])} 匹配" if best.get("overlap") else ""
+
+                # L2: 意图映射 — 对 implement/fix_bug/explore 额外查 TaskCreate/Read 模式
+                if not _hint_seq:
+                    intent_name, _ = _predict_intent(prompt)
+                    if intent_name in ("implement", "fix_bug", "explore"):
+                        _tp2 = conn.execute(
+                            """SELECT tool_sequence, SUM(frequency) as frequency
+                               FROM tool_patterns
+                               GROUP BY tool_sequence
+                               HAVING SUM(frequency) >= 3
+                               ORDER BY frequency DESC LIMIT 50"""
+                        ).fetchall()
+                        for _s2_j, _f2 in _tp2:
+                            s2 = _pj.loads(_s2_j) if isinstance(_s2_j, str) else _s2_j
+                            # 优先含任务/读取工具的多样性序列
+                            if len(set(s2)) >= 2 and any(t in s2 for t in ("TaskCreate", "Read", "Edit", "Write")):
+                                _hint_seq = s2
+                                _hint_freq = _f2
+                                _hint_reason = f"意图={intent_name}"
+                                break
+
+                if _hint_seq:
+                    hint = f"[工具模式] {' → '.join(_hint_seq)} (freq={_hint_freq}"
+                    if _hint_reason:
+                        hint += f"，{_hint_reason}"
+                    hint += ")"
+                    inject_lines.append(hint)
+        except Exception:
+            pass  # tool pattern hint 失败不阻塞
+
+        context_text = "\n".join(inject_lines)
+        if len(context_text) > effective_max_chars:
+            context_text = context_text[:effective_max_chars] + "…"
+
+        reason_base = "first_call" if not _read_hash() else "hash_changed"
+        reason = f"{reason_base}|{priority.lower()}"  # 迭代28：trace 中记录调度优先级
+        if psi_downgraded:
+            reason += "|psi_downgrade"  # 迭代36：PSI 反馈降级标记
+        if deadline_skipped:
+            reason += f"|deadline_skip:{'+'.join(deadline_skipped)}"  # 迭代41
+        _write_hash(current_hash)
+        _tlb_write(prompt_hash, current_hash, _get_db_mtime())  # 迭代57: TLB
+
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": context_text,
+            }
+        }
+
+        # ── 迭代69：Write-After-Response — 输出前置，写入后置 ──────────────
+        # OS 类比：Linux write-back caching (2001, Andrew Morton)
+        #   read() 从 page cache 直接返回（O_DIRECT bypass），不等 writeback。
+        #   dirty pages 由 pdflush/writeback 线程异步刷盘。
+        #   用户感知延迟 = read latency（~μs），不含 write latency（~ms）。
+        #
+        #   memory-os 等价问题：
+        #     retriever 的读路径（FTS5+scorer）只需 ~7ms，
+        #     但写路径（recall_traces INSERT + update_accessed + commit + close）~140ms：
+        #       commit: ~40ms（WAL + synchronous=NORMAL）
+        #       close: ~100ms（WAL auto-checkpoint）
+        #     原来 print(output) 在 commit+close 之后 → 用户感知 ~200ms。
+        #
+        #   解决：
+        #     print(output) + sys.stdout.flush() 移到 commit 之前。
+        #     用户立即收到结果（~60ms），写入异步完成（进程退出前）。
+        #     数据完整性不受影响：写入仍在同一进程内完成，只是顺序调整。
+        # ── 迭代69+84：输出前置 + 只读连接关闭 ──
+        print(json.dumps(output, ensure_ascii=False))
+        sys.stdout.flush()  # 确保输出立即到达 Claude Code
+        conn.close()  # 关闭只读连接
+
+        # ── 迭代84：Write-Back Phase — 写连接批量写入 ──
+        duration_ms = (_time.time() - _t_start) * 1000
+        accessed_ids = [c["id"] for _, c in top_k]
+
+        # ── 迭代333：Session Injection Counts Write-Back ──────────────────────
+        # OS 类比：Linux dirty page writeback — pdflush 把内存中的 dirty_writeback_count
+        #   写回磁盘，下次进程启动时从磁盘恢复，实现跨请求的会话内统计。
+        # 每次注入后更新计数，持久化到 _SESSION_INJ_FILE，供下次 _score_chunk 读取。
+        try:
+            for _inj_c in accessed_ids:
+                _session_injection_counts[_inj_c] = _session_injection_counts.get(_inj_c, 0) + 1
+            with open(_SESSION_INJ_FILE, 'w', encoding="utf-8") as _sif_w:
+                _sif_w.write(json.dumps({"session_id": session_id,
+                                         "counts": _session_injection_counts},
+                                        ensure_ascii=False))
+        except Exception:
+            pass  # 计数写入失败不影响已输出的结果
+        # 迭代323: SM-2 recall_quality — 从 top_k 平均分推断
+        _avg_score = (sum(s for s, _ in top_k) / len(top_k)) if top_k else 0.0
+        _recall_quality_main = 5 if _avg_score > 0.6 else (4 if _avg_score > 0.3 else 3)
+        # FTS5 命中的 query 整体 quality 更高；BM25 fallback 降一级
+        if not use_fts:
+            _recall_quality_main = max(2, _recall_quality_main - 1)
+        # 迭代29 dmesg：记录注入结果
+        # 迭代41：deadline 信息加入日志
+        deadline_info = f" deadline_skip={'+'.join(deadline_skipped)}" if deadline_skipped else ""
+        # 迭代50：DRR 类型分布统计
+        drr_types = {}
+        for _, c in top_k:
+            ct = c.get("chunk_type", "task_state")
+            drr_types[ct] = drr_types.get(ct, 0) + 1
+        drr_info = f" drr={drr_types}" if len(drr_types) > 1 else ""
+        try:
+            wconn = open_db()
+            ensure_schema(wconn)
+            update_accessed(wconn, accessed_ids, recall_quality=_recall_quality_main)
+            mglru_promote(wconn, accessed_ids)  # 迭代45：MGLRU promote
+
+            # ── 迭代311-A：Reconsolidation — 召回触发 importance 强化 ────────
+            # OS 类比：ARC T2 晋升 — 被反复命中的页面从 T1 晋升，淘汰优先级降低
+            try:
+                from store_vfs import reconsolidate as _reconsolidate
+                _rc_n = _reconsolidate(wconn, accessed_ids, query=query, project=project)
+                if _rc_n:
+                    _deferred.log(DMESG_DEBUG, "retriever",
+                                  f"reconsolidate: {_rc_n} chunks importance boosted",
+                                  session_id=session_id, project=project)
+            except Exception:
+                pass  # reconsolidate 失败不影响主流程
+
+            _write_trace(session_id, project, prompt_hash,
+                         candidates_count, top_k_data, 1, reason,
+                         duration_ms, conn=wconn)
+            _deferred.flush(wconn)
+            _fts_tag = 'Y' if use_fts else f'N(glb_disc={_bm25_global_discount})'
+            dmesg_log(wconn, DMESG_INFO, "retriever",
+                      f"injected={len(top_k)} candidates={candidates_count} fts={_fts_tag}{'+bm25=' + str(_hybrid_bm25_count) if _hybrid_bm25_count > 0 else ''} {duration_ms:.1f}ms{deadline_info}{drr_info}",
+                      session_id=session_id, project=project,
+                      extra={"top_k_ids": accessed_ids, "priority": priority,
+                              "deadline_skipped": deadline_skipped,
+                              "drr_type_distribution": drr_types})
+            wconn.commit()
+            wconn.close()
+        except Exception:
+            pass  # write-back 失败不影响已输出的结果
+        # 迭代85：Shadow Trace — 记录最后一次成功检索的 top_k IDs
+        _write_shadow_trace(project, accessed_ids, session_id)
+        sys.exit(0)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    # ── 迭代61：vDSO Fast Path ──
+    # Stage 0 (SKIP) + Stage 1 (TLB) 在 heavy import 之前执行
+    # 如果 fast exit 成功，进程在 _vdso_fast_exit() 内 sys.exit(0)
+    # 如果 fast exit 失败，_vdso_hook_input 已设置，继续到 main()
+    _vdso_fast_exit()
+    main()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 迭代92: Intent Prediction — 基于用户意图的预测性知识预加载
+# OS 类比：Linux readahead(2) — 基于顺序访问模式预测后续页面，提前 DMA 读入 page cache
+#         在实际 page fault 发生前就完成 I/O，消除首次访问延迟
+#
+# 意图识别：从用户 prompt 推断本轮意图类型，映射到对应的知识标签
+# 预加载：匹配到高置信度意图时，在 FTS5 检索前先 pin 住对应标签的 chunk
+# ══════════════════════════════════════════════════════════════════════════════
+
+_INTENT_MAP = {
+    "continue":     (r"^(继续|continue|接着|下一步|接下来|go on)", ["decision", "reasoning_chain"]),
+    "fix_bug":      (r"(bug|fix|修复|错误|报错|exception|error|crash|fail)", ["excluded_path", "decision"]),
+    # iter117: code_review 和 implement 加入 procedure（操作协议/SOP 在这两个意图下最相关）
+    "code_review":  (r"(review|审查|代码|code|check|看一下)", ["decision", "procedure"]),
+    "understand":   (r"(为什么|^why[^a-z]|^what |什么是|如何|how to|how does|解释|explain|分析|原理)", ["reasoning_chain", "conversation_summary"]),
+    "implement":    (r"(实现|implement|开发|build|写|create|新增|add)", ["decision", "procedure"]),
+    "optimize":     (r"(优化|optim|性能|performance|faster|slower|慢)", ["decision", "reasoning_chain"]),
+    "explore":      (r"(探索|^explore|研究|^investigate|发现|find|搜索)", ["conversation_summary", "decision"]),
+}
+
+
+def _predict_intent(prompt: str) -> tuple[str, list[str]]:
+    """
+    从 prompt 预测意图类型，返回 (intent_name, preferred_chunk_types)。
+    未匹配时返回 ("unknown", [])。
+    """
+    import re
+    prompt_lower = prompt.lower()
+    for intent, (pattern, preferred_types) in _INTENT_MAP.items():
+        if re.search(pattern, prompt_lower):
+            return intent, preferred_types
+    return "unknown", []
+
+
+def _intent_prefetch(conn, project: str, prompt: str, top_k: int = 3) -> list:
+    """
+    意图预测性预加载：根据意图类型预取对应标签的 chunk。
+    返回预取的 chunk dicts 列表（格式与 _unified_retrieval_score 兼容）。
+    """
+    intent, preferred_types = _predict_intent(prompt)
+    if intent == "unknown" or not preferred_types:
+        return []
+
+    try:
+        type_placeholders = ",".join("?" * len(preferred_types))
+        _ip_projects = [project] if project == "global" else [project, "global"]
+        _ip_proj_ph = ",".join("?" * len(_ip_projects))
+        rows = conn.execute(
+            f"""SELECT id, summary, chunk_type, importance, last_accessed, access_count
+                FROM memory_chunks
+                WHERE project IN ({_ip_proj_ph})
+                  AND chunk_type IN ({type_placeholders})
+                ORDER BY importance DESC, access_count DESC
+                LIMIT ?""",
+            [*_ip_projects, *preferred_types, top_k * 2]
+        ).fetchall()
+        if not rows:
+            return []
+        # 简单的 intent_boost: 0.05
+        return [
+            {
+                "id": r[0], "summary": r[1], "chunk_type": r[2],
+                "importance": r[3], "last_accessed": r[4],
+                "access_count": r[5] or 0, "intent_prefetch": intent,
+                "intent_boost": 0.05
+            }
+            for r in rows[:top_k]
+        ]
+    except Exception:
+        return []

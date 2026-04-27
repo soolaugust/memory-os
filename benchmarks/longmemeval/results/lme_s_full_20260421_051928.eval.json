@@ -1,0 +1,3041 @@
+{
+  "timestamp": "2026-04-21T05:32:07Z",
+  "judge_model": "claude-haiku-4-5-20251001",
+  "overall_accuracy": 0.386,
+  "total_correct": 193,
+  "total_evaluated": 500,
+  "by_type": {
+    "knowledge-update": {
+      "accuracy": 0.359,
+      "correct": 28,
+      "total": 78
+    },
+    "multi-session": {
+      "accuracy": 0.2632,
+      "correct": 35,
+      "total": 133
+    },
+    "single-session-assistant": {
+      "accuracy": 0.5357,
+      "correct": 30,
+      "total": 56
+    },
+    "single-session-preference": {
+      "accuracy": 0.3667,
+      "correct": 11,
+      "total": 30
+    },
+    "single-session-user": {
+      "accuracy": 0.5714,
+      "correct": 40,
+      "total": 70
+    },
+    "temporal-reasoning": {
+      "accuracy": 0.3684,
+      "correct": 49,
+      "total": 133
+    }
+  },
+  "results": [
+    {
+      "question_id": "e47becba",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you graduated with a degree in **Business Administration**."
+    },
+    {
+      "question_id": "118b2229",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from 2023/05/22, you mentioned your daily commute takes **45 minutes each way**."
+    },
+    {
+      "question_id": "51a45a95",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from 2023/05/29, you redeemed the $5 coupon on coffee creamer from your **email inbox**."
+    },
+    {
+      "question_id": "58bf7951",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you attended a production of **The Glass Menagerie** at the local community theater."
+    },
+    {
+      "question_id": "1e043500",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, the playlist you created on Spotify is called **\"Summer Vibes\"**."
+    },
+    {
+      "question_id": "c5e8278d",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information — your last name (before or after any change) was never mentioned in our conversations."
+    },
+    {
+      "question_id": "6ade9755",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "The conversation history doesn't contain any information about yoga classes. I don't have enough information to answer that question."
+    },
+    {
+      "question_id": "6f9b354f",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information — there's no mention of repainting bedroom walls in any of the conversations."
+    },
+    {
+      "question_id": "58ef2f1c",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, there is no mention of you volunteering at a local animal shelter's fundraising dinner. I don't have enough information to answer that question."
+    },
+    {
+      "question_id": "f8c5f88b",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you bought your new tennis racket from a **sports store downtown**."
+    },
+    {
+      "question_id": "5d3d2817",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you mentioned being a **marketing specialist at a small startup**, where you managed a team of interns. You have since moved into a new role as a **senior marketing "
+    },
+    {
+      "question_id": "7527f7e2",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on our conversation, you spent **$800** on a designer handbag."
+    },
+    {
+      "question_id": "c960da58",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from May 20, you mentioned having **20 playlists** on Spotify."
+    },
+    {
+      "question_id": "3b6f954b",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you attended your study abroad program at the **University of Melbourne**."
+    },
+    {
+      "question_id": "726462e0",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from May 23, 2023, you mentioned getting a **10% discount** on your first purchase from the new clothing brand."
+    },
+    {
+      "question_id": "94f70d80",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no mention of assembling an IKEA bookshelf in any of the conversation history provided."
+    },
+    {
+      "question_id": "66f24dbb",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you bought your sister **a yellow dress and a pair of matching earrings** for her birthday."
+    },
+    {
+      "question_id": "ad7109d1",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from May 24, 2023, you upgraded to a **500 Mbps** internet plan about three weeks prior to that conversation."
+    },
+    {
+      "question_id": "af8d2e46",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information — there is no mention of a trip to Costa Rica or packing shirts in any of the conversation history provided."
+    },
+    {
+      "question_id": "dccbc061",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from **2023/05/24**, you mentioned that you **used to be a staunch atheist**, but had since shifted and were exploring other possibilities, including reading a lot about Budd"
+    },
+    {
+      "question_id": "c8c3f81d",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is no mention of a favorite running shoe brand. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "8ebdbe50",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, there is no mention of you completing any certification last month. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "6b168ec8",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you own **3 bikes**: a road bike, a mountain bike, and a commuter bike."
+    },
+    {
+      "question_id": "75499fd8",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on our conversation, your dog is a **Golden Retriever** named **Max**."
+    },
+    {
+      "question_id": "21436231",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from May 21st, you mentioned catching **12 largemouth bass** on your last trip to Lake Michigan."
+    },
+    {
+      "question_id": "95bcc1c8",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from **2023/05/22**, you mentioned that you went to an open mic night and saw **10 amateur comedians** perform."
+    },
+    {
+      "question_id": "0862e8bf",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, your cat's name is **Luna**, as mentioned in the conversation on 2023/05/24."
+    },
+    {
+      "question_id": "853b0a1d",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "The conversations don't mention anything about your grandma giving you a silver necklace or your age at that time. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "a06e4cfe",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, your preferred gin-to-vermouth ratio for a classic gin martini is **3:1**, with a dash of citrus bitters."
+    },
+    {
+      "question_id": "37d43f65",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you upgraded your laptop's RAM to **16GB**."
+    },
+    {
+      "question_id": "b86304ba",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, there is **no mention of purchasing a painting of a sunset**. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "d52b4f67",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from 2023/05/28, you mentioned attending your cousin's wedding at the **Grand Ballroom**."
+    },
+    {
+      "question_id": "25e5aa4f",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. You never mentioned where you completed your Bachelor's degree in Computer Science in any of our conversations."
+    },
+    {
+      "question_id": "caf9ead2",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from [2023/05/21], the user mentioned that it took **5 hours** to move everything into the new apartment with the help of friends."
+    },
+    {
+      "question_id": "8550ddae",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from May 22, you mentioned trying a **lavender gin fizz** recipe last weekend (which would have been around May 20-21). You noted it didn't turn out as expected because you d"
+    },
+    {
+      "question_id": "60d45044",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, there is no mention of your favorite type of rice. I don't have enough information to answer that question."
+    },
+    {
+      "question_id": "3f1e9474",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you discussed the concept of destiny with **Sarah** (your friend), who mentioned that \"everything happens for a reason.\" You then brought up this conversation with t"
+    },
+    {
+      "question_id": "86b68151",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you bought your new bookshelf from **IKEA**."
+    },
+    {
+      "question_id": "577d4d32",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no mention of when you stop checking work emails and messages in any of the conversations."
+    },
+    {
+      "question_id": "ec81a493",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information to answer that question. No specific artist or album sales figures were mentioned in any of the conversations."
+    },
+    {
+      "question_id": "15745da0",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from **2023/05/21**, you mentioned you've been collecting vintage cameras for **three months**."
+    },
+    {
+      "question_id": "e01b8e2f",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you went on a week-long trip to **Hawaii** with your family last month (referenced in the May 22, 2023 conversation)."
+    },
+    {
+      "question_id": "bc8a6e93",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you baked a **lemon blueberry cake** for your niece's birthday party, and it was a huge hit!"
+    },
+    {
+      "question_id": "ccb36322",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you mentioned using **Spotify** to listen to music by Arctic Monkeys and The Neighbourhood."
+    },
+    {
+      "question_id": "001be529",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "The conversation history does not contain any mention of an asylum application or a decision related to one. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "b320f3f8",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, there is no mention of buying an action figure from a thrift store. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "19b5f2b3",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from 2023/05/30, you mentioned that you **spent two weeks traveling solo around Japan**."
+    },
+    {
+      "question_id": "4fd1909e",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation, you attended the Imagine Dragons concert at the **Xfinity Center** on June 15th."
+    },
+    {
+      "question_id": "545bd2b5",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is no mention of your daily Instagram screen time or any specific metrics about how long you spend on the app per day. The conversations only mention that you'"
+    },
+    {
+      "question_id": "8a137a7f",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you didn't replace the bulb in your bedside lamp — you mentioned that you are **currently using a Philips LED bulb** in your bedside lamp and liked the warm tone it "
+    },
+    {
+      "question_id": "76d63226",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, your new Samsung TV is **55 inches**.\n\nYou mentioned it in the conversation on May 21, 2023, when you said: *\"I actually just set up my new Samsung 55-inch 4K smart "
+    },
+    {
+      "question_id": "86f00804",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from May 25, 2023, you bought a book at the museum gift shop during your visit to the local museum's impressionist exhibit. However, the specific title of the book is not men"
+    },
+    {
+      "question_id": "8e9d538c",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you mentioned finding **17 skeins** of worsted weight yarn in your stash."
+    },
+    {
+      "question_id": "311778f1",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from May 25, you mentioned that you spent **10 hours** watching documentaries on Netflix last month."
+    },
+    {
+      "question_id": "c19f7a0b",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from May 23, you mentioned that you usually get home from work around **6:30 pm** on weekdays."
+    },
+    {
+      "question_id": "4100d0a0",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you mentioned that you have a mixed ethnicity — **Irish and Italian**."
+    },
+    {
+      "question_id": "29f2956b",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from May 21, 2023, you mentioned practicing guitar for **30 minutes daily**."
+    },
+    {
+      "question_id": "1faac195",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, your sister Emily lives in **Denver**."
+    },
+    {
+      "question_id": "faba32e5",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no mention of Alex, BBQ ribs, or marinating in any of the conversation history provided."
+    },
+    {
+      "question_id": "f4f1d8a4",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information — there is no mention of a stand mixer or a birthday gift in any of the conversations."
+    },
+    {
+      "question_id": "c14c00dd",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you use a **lavender scented shampoo from Trader Joe's**."
+    },
+    {
+      "question_id": "36580ce8",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, there is no mention of you thinking any health issue was just a cold. I don't have enough information to answer that question."
+    },
+    {
+      "question_id": "3d86fd0a",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you met Sophia at a **coffee shop in the city**."
+    },
+    {
+      "question_id": "a82c026e",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no mention of you playing or beating a game in any of the conversation history provided."
+    },
+    {
+      "question_id": "0862e8bf_abs",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no mention of a hamster or its name in any of the conversations."
+    },
+    {
+      "question_id": "15745da0_abs",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. The conversation history doesn't mention anything about you collecting vintage films."
+    },
+    {
+      "question_id": "bc8a6e93_abs",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, there is no mention of baking anything for an uncle's birthday party. The only birthday-related baking mentioned was a **lemon blueberry cake** made for a **niece's*"
+    },
+    {
+      "question_id": "19b5f2b3_abs",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is no mention of you visiting Korea at all. The conversations discuss **planning** a trip to Seoul, but there's no record of you actually going or how long you"
+    },
+    {
+      "question_id": "29f2956b_abs",
+      "question_type": "single-session-user",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, there is no mention of practicing violin at all. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "f4f1d8a4_abs",
+      "question_type": "single-session-user",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, there is no mention of your dad giving you a birthday gift. The only birthday gift mentioned was a **stand mixer** given to you by your **sister** (mentioned in the "
+    },
+    {
+      "question_id": "0a995998",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversations, there are **2 items**:\n\n1. **Dry cleaning** (navy blue blazer) to pick up from the dry cleaner (mentioned in the 06:30 conversation)\n2. **Boots** to pick up from **Zara** —"
+    },
+    {
+      "question_id": "6d550036",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you mentioned leading **1 project**: the **data analysis team** in your Marketing Research class project, where you did a comprehensive market analysis for a new pro"
+    },
+    {
+      "question_id": "gpt4_59c863d7",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you have mentioned **3 model kits**:\n\n1. **1/72 scale B-29 bomber** – bought at a model show (mentioned May 20)\n2. **1/24 scale '69 Camaro** – also bought at the sam"
+    },
+    {
+      "question_id": "b5ef892d",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversations, I can identify two US camping trips mentioned:\n\n- **Yellowstone**: 5-day camping trip (mentioned in the April 29 conversation as \"last month\")\n- **Big Sur**: 3-day solo cam"
+    },
+    {
+      "question_id": "e831120c",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you mentioned watching all 22 Marvel Cinematic Universe movies in **two weeks**, but there is no mention of watching the main Star Wars films. I don't have enough in"
+    },
+    {
+      "question_id": "3a704032",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from **2023/05/20**, you mentioned acquiring **2 plants two weeks prior** (around May 6th) — a **peace lily** and a **succulent** — from a nursery.\n\nIn the **2023/05/24** con"
+    },
+    {
+      "question_id": "gpt4_d84a3211",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, here are the bike-related expenses mentioned:\n\n- **Bell Zephyr helmet**: $120\n- **Bike lights**: $40\n\n**Total: $160**\n\nNote: Tune-up costs and the Saris Bones 2-Bike"
+    },
+    {
+      "question_id": "aae3761f",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, here are the three driving times mentioned:\n\n1. **Outer Banks, NC** – 4 hours\n2. **Washington D.C.** – 6 hours\n3. **Tennessee mountains** – 5 hours\n\n**Total: 15 hour"
+    },
+    {
+      "question_id": "gpt4_f2262a51",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation, you visited **2 doctors**:\n\n1. **Dr. Patel** – ENT specialist who diagnosed you with chronic sinusitis\n2. An unnamed **primary care physician/doctor** who prescribed antibio"
+    },
+    {
+      "question_id": "dd2973ad",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "The conversation mentions a doctor's appointment at 10 AM on Thursday (May 18, based on the conversation date of May 24), but there is no information about what time you went to bed the night before. "
+    },
+    {
+      "question_id": "c4a1ceb8",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, the following citrus fruits were mentioned in cocktail recipes:\n\n1. **Lemon** (Whiskey Sour, Lime-Mint Collins, etc.)\n2. **Orange** (Orange You Glad It's a Whiskey S"
+    },
+    {
+      "question_id": "gpt4_a56e767c",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you mentioned attending **2** film festivals:\n\n1. **Austin Film Festival** – where you participated in the 48-hour film challenge (mentioned in the May 21 conversati"
+    },
+    {
+      "question_id": "6cb6f249",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n- In the **March 14, 15:01 conversation**, the user mentioned a **week-long (7-day) break** in mid-January.\n- In the **March 14, 14:59 conversation**, the user ment"
+    },
+    {
+      "question_id": "46a3abf7",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you have:\n\n1. Your **20-gallon community tank** (main tank)\n2. The **1-gallon tank** set up for your friend's kid\n\nThat's **2 tanks** total. (Your old 5-gallon betta"
+    },
+    {
+      "question_id": "36b9f61e",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, here are the luxury purchases mentioned:\n\n1. **Gucci handbag** - $1,200 (mentioned on 2023/05/25)\n2. **Luxury evening gown** - $800 (mentioned on 2023/05/24)\n3. **Hi"
+    },
+    {
+      "question_id": "28dc39ac",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversations, here are the gaming hours mentioned:\n\n- **The Last of Us Part II**: 30 hours (mentioned in both the May 23 and May 25 conversations)\n- **Assassin's Creed Odyssey**: 70 hour"
+    },
+    {
+      "question_id": "gpt4_2f8be40d",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I can identify the following weddings you attended:\n\n1. **Emily (college roommate) and Sarah's wedding** – mentioned in the Oct 15, 04:44 conversation as \"just got b"
+    },
+    {
+      "question_id": "2e6d26dc",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversations, here are the babies mentioned as recently born:\n\n1. **Jasper** – David's baby boy (born a few weeks before May 13)\n2. **Max** – Cousin Rachel's baby boy (born in March)\n3. "
+    },
+    {
+      "question_id": "gpt4_15e38248",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I can only find **1** piece of furniture mentioned:\n\n- A **coffee table from West Elm**, purchased approximately 3 weeks before May 26, 2023 (so around early May 202"
+    },
+    {
+      "question_id": "88432d0a",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Looking at the conversation history relative to the current date (2023/05/30):\n\nTwo weeks ago = 2023/05/16\n\nEvents mentioned:\n- **2023/05/23**: Baked Blue Cheese Chocolate Chip Cookies (blog post cont"
+    },
+    {
+      "question_id": "80ec1f4f",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you mentioned **2** visits in February:\n\n1. **The Natural History Museum** on 2/8 (with your niece)\n2. **The Art Cube** on 2/15 (opening night of \"Disrupting Reality"
+    },
+    {
+      "question_id": "d23cf73b",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you have:\n\n1. **Indian cuisine** – learned chicken tikka masala in a cooking class (mentioned 2023/05/26)\n2. **Korean cuisine** – tried bibimbap from a cooking class"
+    },
+    {
+      "question_id": "gpt4_7fce9456",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you viewed at least **2 properties**:\n\n1. A 2-bedroom condo (February 15th) — offer rejected on February 17th\n2. A 3-bedroom townhouse in the Brookside neighborhood "
+    },
+    {
+      "question_id": "d682f1a2",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, only **one** food delivery service was mentioned — **Domino's Pizza** (which you said you ordered from three times last week)."
+    },
+    {
+      "question_id": "7024f17c",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I don't have enough information to answer this accurately.\n\n- **Jogging**: Only one jog was logged on Saturday, May 20 (30 minutes). No other jogs were mentioned for"
+    },
+    {
+      "question_id": "gpt4_5501fe77",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information to answer that question. There is no mention of your social media accounts or follower counts in our conversation history."
+    },
+    {
+      "question_id": "gpt4_2ba83207",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, here are the grocery-related purchases mentioned:\n\n- **Thrive Market** (online order, ~1 month ago): **~$150**\n- **Walmart** (last week): **~$120**\n- **Trader Joe's*"
+    },
+    {
+      "question_id": "2318644b",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n- **Tokyo hostel**: ~$30 per night\n- **Maui (Hawaii) resort**: over $300 per night\n\nYou spent **over $270 more per night** in Hawaii compared to Tokyo."
+    },
+    {
+      "question_id": "2ce6a0f2",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history (current date: March 8, 2023):\n\n1. **\"The Evolution of Street Art\" lecture** at the Art Gallery on **March 3rd**\n\nThat's **1 art-related event** mentioned in the past"
+    },
+    {
+      "question_id": "gpt4_d12ceb0e",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, here's what I know:\n\n- **You**: turned 32 on February 12th (from the May 26 conversation)\n- **Mom**: 55 years old\n- **Dad**: 58 years old\n- **Grandparents**: The May"
+    },
+    {
+      "question_id": "00ca467f",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, here are the medical appointments mentioned in March:\n\n1. **March 20th** – Follow-up with orthopedic surgeon **Dr. Thompson** (knee healing check)\n2. **March 25th** "
+    },
+    {
+      "question_id": "b3c15d39",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "From the conversations:\n- Ordered on **February 5th**\n- Arrived on **February 10th**\n\n10 - 5 = **5 days**"
+    },
+    {
+      "question_id": "gpt4_31ff4165",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversations, you use **2 health-related devices** regularly:\n\n1. **Fitbit Versa 3** – for tracking steps, sleep, guided breathing sessions, and heart rate\n2. **Phonak BTE Hearing Aids**"
+    },
+    {
+      "question_id": "eeda8a6d",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, only **one tank** (a 20-gallon tank) was mentioned, with:\n\n- 10 neon tetras\n- 5 golden honey gouramis\n- 1 small pleco catfish\n\n**Total: 16 fish**\n\nThere is no mentio"
+    },
+    {
+      "question_id": "2788b940",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you attend **4 fitness classes per week**:\n\n- **Mondays**: BodyPump\n- **Tuesdays**: Zumba\n- **Thursdays**: Zumba\n- Plus **yoga** (day not specified)\n\nYou also mentio"
+    },
+    {
+      "question_id": "60bf93ed",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "From the conversation, you mentioned buying the backpack on **1/15** and it arriving on **1/20**.\n\n**1/20 − 1/15 = 5 days** to arrive."
+    },
+    {
+      "question_id": "9d25d4e0",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, the current date is 2023/05/30, so \"last two months\" = approximately March 30 – May 30, 2023.\n\nFrom the conversations, **1 piece** of jewelry was mentioned as acquir"
+    },
+    {
+      "question_id": "129d1232",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you participated in two charity events:\n\n1. **Charity walk** (mentioned in the May 1st, 10:42 conversation): raised **$250**\n2. **Charity yoga event** (mentioned in "
+    },
+    {
+      "question_id": "60472f9c",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you mentioned working on:\n\n1. A **Data Mining course group project** (mentioned on 2023/05/26)\n2. A **Database Systems course group project** (mentioned on 2023/05/2"
+    },
+    {
+      "question_id": "gpt4_194be4b3",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I can identify the following instruments you've mentioned owning:\n\n1. **Black Fender Stratocaster** (electric guitar)\n2. **Korg B1** (digital piano)\n\nYou were also *"
+    },
+    {
+      "question_id": "a9f6b44c",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversations:\n\n1. **Commuter hybrid bike** – You mentioned replacing the front tire (and discussed a bike lock, computer, and lights) in the conversation dated **March 20, 2023**. You no"
+    },
+    {
+      "question_id": "d851d5ba",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversations, here are the charity amounts mentioned:\n\n- **$1,000** raised at a charity bake sale (for local children's hospital)\n- **$250** raised at the \"Run for Hunger\" charity event "
+    },
+    {
+      "question_id": "5a7937c8",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, only **1 day** of faith-related activity in December is mentioned: the **church's annual holiday food drive on December 10th**, where you helped sort donations and p"
+    },
+    {
+      "question_id": "gpt4_ab202e7f",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you replaced or fixed the following kitchen items:\n\n1. **Kitchen shelves** – fixed (mentioned in [2023/05/20])\n2. **Kitchen mat** (in front of sink) – replaced with "
+    },
+    {
+      "question_id": "gpt4_e05b82a6",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, here are the rollercoaster rides mentioned:\n\n- **October 8th**: Rode the **Xcelerator** at Knott's Berry Farm (1 ride mentioned)\n- **October 15th**: Rode the **Reven"
+    },
+    {
+      "question_id": "gpt4_731e37d7",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, here are the workshops mentioned with costs:\n\n1. **Photography workshop** (February 22) - **Free**\n2. **Digital marketing workshop** (March 15-16) - mentioned in two"
+    },
+    {
+      "question_id": "edced276",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n- **New York City**: 5 days (mentioned in the May 21 conversation)\n- **Hawaii**: 10 days (mentioned in the May 24 conversation: \"we had to plan everything out for t"
+    },
+    {
+      "question_id": "10d9b85a",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I can only confirm **1 event** in April: a lecture on sustainable development at the public library on **April 10th**.\n\nNo other workshops or conferences in April ar"
+    },
+    {
+      "question_id": "e3038f8c",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, here's a tally of your rare items:\n\n- **57 rare records**\n- **25 rare coins**\n- **5 rare books**\n- **12 rare figurines**\n- **1 antique vase** (grandmother's)\n\nThat g"
+    },
+    {
+      "question_id": "2b8f3739",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, the only sale mentioned was **$225** earned from selling 15 jars of homemade jam at the Homemade and Handmade Market on May 29th.\n\nThat is the only sales figure ment"
+    },
+    {
+      "question_id": "1a8a66a6",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you have **2 magazine subscriptions**:\n\n1. **The New Yorker** (subscribed in early February 2023)\n2. **Architectural Digest** (mentioned as a current subscription)\n\n"
+    },
+    {
+      "question_id": "c2ac3c61",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you mentioned completing **3 courses on Coursera** (stated in the May 23 conversation)."
+    },
+    {
+      "question_id": "bf659f65",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you have purchased or downloaded **2** music albums/EPs:\n\n1. **Billie Eilish - \"Happier Than Ever\"** (downloaded on Spotify, mentioned in the May 20 conversation)\n2."
+    },
+    {
+      "question_id": "gpt4_372c3eed",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I only know that you completed your Bachelor's degree at UCLA in 2020, which took **4 years**.\n\nThere is no information provided about your high school duration, so "
+    },
+    {
+      "question_id": "gpt4_2f91af09",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, the user mentioned writing **17 poems in the past two weeks** (as of May 21, 2023). There is no mention of short stories or a writing challenge in any of the convers"
+    },
+    {
+      "question_id": "81507db6",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, two graduation ceremonies were mentioned:\n\n1. **Jack's 8th grade graduation** - mentioned in the [07/21 06:56] conversation as happening \"last month\" (so approximate"
+    },
+    {
+      "question_id": "88432d0a_abs",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is no mention of you baking egg tarts at any point. I don't have enough information to answer that question."
+    },
+    {
+      "question_id": "80ec1f4f_abs",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, there is no mention of any museum or gallery visits in December. The conversations all took place on **2023/03/03**, and no December visits are referenced.\n"
+    },
+    {
+      "question_id": "eeda8a6d_abs",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is no mention of a 30-gallon tank. You have a **20-gallon tank** (with 10 neon tetras, 5 golden honey gouramis, and a small pleco catfish) and a **10-gallon ta"
+    },
+    {
+      "question_id": "60bf93ed_abs",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information — there is no mention of an iPad case purchase or delivery in any of the conversations."
+    },
+    {
+      "question_id": "edced276_abs",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I only have information about a **10-day Hawaii trip** (mentioned in the May 23 conversation).\n\nThere is **no mention of a Seattle trip** in any of the conversations"
+    },
+    {
+      "question_id": "gpt4_372c3eed_abs",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I can only calculate partial information:\n\n- **High school**: Arcadia High School, 2010–2014 = **4 years**\n- **Bachelor's at UCLA**: 2016–2020 = **4 years** (graduat"
+    },
+    {
+      "question_id": "8a2466db",
+      "question_type": "single-session-preference",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, the user discussed Adobe Premiere Pro and video editing in detail on **2023/05/21**. From that conversation, here are some recommended resources for learning video e"
+    },
+    {
+      "question_id": "06878be2",
+      "question_type": "single-session-preference",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, your photography setup includes:\n- Sony A7R IV camera\n- Sony 24-70mm f/2.8 lens\n- Godox V1 flash\n- Gitzo GT3543LS tripod\n\nHere are some accessories that would comple"
+    },
+    {
+      "question_id": "75832dbd",
+      "question_type": "single-session-preference",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, I can see you've discussed topics related to **deep learning for medical image analysis**, **explainable AI**, and related research. Here are some relevant conferenc"
+    },
+    {
+      "question_id": "0edc2aef",
+      "question_type": "single-session-preference",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information about your preferences, budget, or specific needs for a Miami hotel, as this topic hasn't come up in our previous conversations. Could you provide more details about wh"
+    },
+    {
+      "question_id": "35a27287",
+      "question_type": "single-session-preference",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information about your location or local events happening this weekend (2023/05/30). \n\nTo find cultural events near you, I'd suggest checking:\n- **Eventbrite** or **Meetup** for lo"
+    },
+    {
+      "question_id": "32260d93",
+      "question_type": "single-session-preference",
+      "verdict": "no",
+      "hypothesis": "The conversation history doesn't contain any discussions about TV shows or movies, so I don't have enough information about your preferences to make a personalized recommendation.\n\nThat said, based on"
+    },
+    {
+      "question_id": "195a1a1b",
+      "question_type": "single-session-preference",
+      "verdict": "no",
+      "hypothesis": "Based on our conversations, here are some evening activities that might suit you:\n\n1. **Guided imagery exercises** - You mentioned wanting to try these before bed to help process emotions and improve "
+    },
+    {
+      "question_id": "afdc33df",
+      "question_type": "single-session-preference",
+      "verdict": "yes",
+      "hypothesis": "Based on our conversation history, I previously gave you tips on organizing kitchen utensils in your utensil holder (on May 22nd). Here are some general kitchen cleanliness tips:\n\n1. **Clean as you go"
+    },
+    {
+      "question_id": "caf03d32",
+      "question_type": "single-session-preference",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information about slow cooker recipes or any struggles you've mentioned with them in our conversation history. This topic hasn't come up in any of our previous discussions.\n\nHoweve"
+    },
+    {
+      "question_id": "54026fce",
+      "question_type": "single-session-preference",
+      "verdict": "no",
+      "hypothesis": "Based on our previous conversation on May 25th, here are some suggestions we discussed:\n\n1. **Virtual Coffee Breaks** - Schedule regular informal video calls for casual chats\n2. **Online Team Activiti"
+    },
+    {
+      "question_id": "06f04340",
+      "question_type": "single-session-preference",
+      "verdict": "no",
+      "hypothesis": "Based on our conversations, I don't have specific information about what homegrown ingredients you have available. Could you share what ingredients you've grown? That way I can suggest a dinner that m"
+    },
+    {
+      "question_id": "6b7dfb22",
+      "question_type": "single-session-preference",
+      "verdict": "yes",
+      "hypothesis": "Based on our previous conversations, I know you've been painting and even started a **30-day painting challenge** (mentioned on May 23rd). Here are some ideas to find new inspiration:\n\n1. **Lean into "
+    },
+    {
+      "question_id": "1a1907b4",
+      "question_type": "single-session-preference",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, I can see that you've been experimenting with cocktails recently. You were working on a **Pimm's Cup with a Twist** featuring Hendrick's gin, Ruby Red Grapefruit sim"
+    },
+    {
+      "question_id": "09d032c9",
+      "question_type": "single-session-preference",
+      "verdict": "no",
+      "hypothesis": "The conversation history doesn't contain any discussion about phone battery life or related topics. I don't have enough information from the provided conversations to answer this question."
+    },
+    {
+      "question_id": "38146c39",
+      "question_type": "single-session-preference",
+      "verdict": "no",
+      "hypothesis": "Based on our conversation history, I don't have any record of discussing chocolate chip cookies. However, I can offer some general advice!\n\nHere are some tips to elevate your chocolate chip cookies:\n\n"
+    },
+    {
+      "question_id": "d24813b1",
+      "question_type": "single-session-preference",
+      "verdict": "no",
+      "hypothesis": "Based on our conversations, here are some great baking ideas for a colleague gathering:\n\n1. **Chocolate Cake with Caramel Ganache** - You just got a recipe for this! It's impressive and crowd-pleasing"
+    },
+    {
+      "question_id": "57f827a0",
+      "question_type": "single-session-preference",
+      "verdict": "no",
+      "hypothesis": "While furniture rearranging wasn't directly discussed in our conversations, here are some quick tips:\n\n1. **Measure first** – Know your room dimensions and furniture sizes before moving anything.\n2. *"
+    },
+    {
+      "question_id": "95228167",
+      "question_type": "single-session-preference",
+      "verdict": "no",
+      "hypothesis": "The conversation history doesn't contain any discussion about guitars or music stores. I don't have enough information from our past conversations to provide personalized tips based on your specific n"
+    },
+    {
+      "question_id": "505af2f5",
+      "question_type": "single-session-preference",
+      "verdict": "yes",
+      "hypothesis": "Based on your earlier conversation (May 21st), you were already making a homemade creamer with **almond milk, vanilla extract, and honey**. Here are some recommendations to try something new:\n\n- **Swa"
+    },
+    {
+      "question_id": "75f70248",
+      "question_type": "single-session-preference",
+      "verdict": "yes",
+      "hypothesis": "Based on our conversation, it's quite possible! We discussed that you have a cat that sheds a lot, which can contribute to increased dust and pet dander in your living room. These are common triggers "
+    },
+    {
+      "question_id": "d6233ab6",
+      "question_type": "single-session-preference",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, there is no mention of a high school reunion. I don't have enough information to give personalized advice about attending one.\n\nGenerally speaking, high sch"
+    },
+    {
+      "question_id": "1da05512",
+      "question_type": "single-session-preference",
+      "verdict": "no",
+      "hypothesis": "The conversation history doesn't contain any discussion about NAS (Network Attached Storage) devices. I don't have enough information from these conversations to advise you on that decision."
+    },
+    {
+      "question_id": "fca70973",
+      "question_type": "single-session-preference",
+      "verdict": "no",
+      "hypothesis": "The conversation history doesn't mention any previous theme park visits or preferences, so I don't have enough information about your specific interests or location to make tailored recommendations.\n\n"
+    },
+    {
+      "question_id": "b6025781",
+      "question_type": "single-session-preference",
+      "verdict": "yes",
+      "hypothesis": "Based on our conversation on May 23rd, you've been exploring meal prep ideas including quinoa with roasted vegetables, lentil bolognese, roasted sweet potatoes with rosemary, and homemade granola.\n\nFo"
+    },
+    {
+      "question_id": "a89d7624",
+      "question_type": "single-session-preference",
+      "verdict": "no",
+      "hypothesis": "Based on our previous conversations, I have some great suggestions for Denver!\n\n**Music & Entertainment:**\n- **Red Rocks Amphitheater** is a must-visit iconic venue — you've already heard about its am"
+    },
+    {
+      "question_id": "b0479f84",
+      "question_type": "single-session-preference",
+      "verdict": "no",
+      "hypothesis": "Based on our conversation history, I don't have any prior discussions about your documentary preferences to draw from. However, I can make some general recommendations!\n\n**Popular and highly-rated doc"
+    },
+    {
+      "question_id": "1d4e3b97",
+      "question_type": "single-session-preference",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, there is no mention of bikes, cycling performance, or Sunday group rides. The conversations cover topics like fitness/running, medical cases, language learn"
+    },
+    {
+      "question_id": "07b6f563",
+      "question_type": "single-session-preference",
+      "verdict": "no",
+      "hypothesis": "Based on our conversation history, I don't have specific details about what phone you have, which would help me make better recommendations. However, here are some generally useful phone accessories:\n"
+    },
+    {
+      "question_id": "1c0ddc50",
+      "question_type": "single-session-preference",
+      "verdict": "yes",
+      "hypothesis": "Based on our conversations, you've already mentioned commuting in two different ways - by bus and potentially by bike. Here are some activities tailored to each:\n\n**If commuting by bus:**\n- Listen to "
+    },
+    {
+      "question_id": "0a34ad58",
+      "question_type": "single-session-preference",
+      "verdict": "yes",
+      "hypothesis": "Based on our previous conversations, you're planning a trip to Tokyo and staying at the Park Hyatt Tokyo in Shinjuku. Here are some helpful tips to ease your anxiety:\n\n**Getting Around:**\n- You alread"
+    },
+    {
+      "question_id": "d3ab962e",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n- **Two weekends ago** (from the Sept 24 conversation): 5-mile hike at Red Rock Canyon\n- **Last weekend** (from the Sept 24 conversation): 3-mile loop trail at Vall"
+    },
+    {
+      "question_id": "2311e44b",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from May 28, the user mentioned they \"just got back to reading 'The Nightingale'\" but didn't specify how far along they were. We only know the book has **440 pages** total, b"
+    },
+    {
+      "question_id": "cc06de0d",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, we know the taxi ride cost **$12** (mentioned in the May 25 conversation), but the train fare amount was **never mentioned**. So I don't have enough information to c"
+    },
+    {
+      "question_id": "a11281a2",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from **2023/05/23**, you mentioned having **around 350 followers after two weeks of posting regularly** on Instagram. Since you started from scratch, the approximate increase"
+    },
+    {
+      "question_id": "4f54b7c9",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you mentioned **2** items acquired from family members:\n\n1. An **antique tea set** from your cousin Rachel\n2. A **vintage typewriter** that belonged to your dad"
+    },
+    {
+      "question_id": "85fa3a3f",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n- Stainless steel food bowl: **$15**\n- Measuring cup: **$5**\n- Dental chews: **$10**\n- Flea and tick collar: **$20**\n\n**Total: $50**"
+    },
+    {
+      "question_id": "9aaed6a3",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from May 23rd, you spent **$75 at SaveMart last Thursday** (which would have been May 18th). With SaveMart's **1% cashback**, you earned:\n\n**$75 × 0.01 = $0.75 in cashback**"
+    },
+    {
+      "question_id": "1f2b8d4f",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversations, the luxury boots cost **$800**, and the similar pair found at the budget store cost **$50**.\n\nThe difference in price is **$800 - $50 = $750**."
+    },
+    {
+      "question_id": "e6041065",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation, you packed \"a lot of shoes\" but only wore **two** — your sneakers and sandals. Since the exact total number of shoes packed isn't specified, a precise percentage can't be ca"
+    },
+    {
+      "question_id": "51c32626",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you mentioned submitting a research paper on sentiment analysis to **ACL**, but you did not specify when you submitted it. The conversation only mentions that you wo"
+    },
+    {
+      "question_id": "d905b33f",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "The conversation history doesn't mention a percentage discount on the book. It only states that the book cost **$24 after a discount**, but the original price and discount percentage are not specified"
+    },
+    {
+      "question_id": "7405e8b1",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history:\n\n- **HelloFresh first order**: 40% discount (mentioned in the [2023/05/23] conversation)\n- **UberEats first order discount**: Not mentioned in the conversations. The"
+    },
+    {
+      "question_id": "f35224e0",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you mentioned finishing **episode 12 of \"My Favorite Murder\"** (as of May 26). There is **no mention** of you listening to any episodes of \"How I Built This.\"\n\nSo th"
+    },
+    {
+      "question_id": "6456829e",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "The conversation history does not mention a specific number of tomato and cucumber plants you initially planted. The discussions covered planting arrangements and care tips, but no specific quantities"
+    },
+    {
+      "question_id": "a4996e51",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from May 24, you mentioned that you typically work **40 hours a week**, but during busier periods (such as peak campaign seasons), it can go up to around **45 hours per week*"
+    },
+    {
+      "question_id": "3c1045c8",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation, you mentioned that the average age of employees in your department is 29.5 years old, and that you are in your 30s. However, your exact age was not specified, so I don't hav"
+    },
+    {
+      "question_id": "60036106",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no mention of a Facebook ad campaign or Instagram influencer collaboration in any of the conversation history provided."
+    },
+    {
+      "question_id": "681a1674",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you mentioned re-watching **one** Marvel movie: **Spider-Man: No Way Home**."
+    },
+    {
+      "question_id": "e25c3b8d",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from 2023/05/24, you mentioned that you got the designer handbag at TK Maxx for **$200**. Since it was originally $500 (mentioned in the 2023/05/21 conversation), you saved *"
+    },
+    {
+      "question_id": "4adc0475",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no mention of you playing in a recreational indoor soccer league or any related statistics in the conversation history."
+    },
+    {
+      "question_id": "4bc144e2",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n- **Car wash**: $15 (February 3rd)\n- **Parking ticket**: $50 (January 5th)\n\n**Total: $65**"
+    },
+    {
+      "question_id": "ef66a6e5",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no mention of any sports you've played competitively in any of the conversations."
+    },
+    {
+      "question_id": "5025383b",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, I don't have enough information to answer that question. No mention of you joining online communities based on specific hobbies appears in any of the conver"
+    },
+    {
+      "question_id": "a1cc6108",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "The conversations mention that Alex is 21 years old (as of the May 21, 2023 conversation), but there is no information about your age. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "9ee3ecd6",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from May 21, the user had **200 points** in Sephora's loyalty program, and the recommended skincare products for redemption were priced at either **50 or 100 points**. So you"
+    },
+    {
+      "question_id": "3fdac837",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history:\n\n- **Japan trip**: The duration is not specified in any conversation.\n- **Chicago trip**: Mentioned as a **4-day trip** (from the May 23 conversation).\n\nI don't have"
+    },
+    {
+      "question_id": "91b15a6e",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n- **Vintage diamond necklace**: worth **$5,000** (mentioned in the May 23rd conversation)\n- **Antique vanity**: at least **$150** (mentioned in the May 25th convers"
+    },
+    {
+      "question_id": "27016adc",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is no mention of any renovations you plan to do on your current house. Therefore, I don't have enough information to calculate that percentage."
+    },
+    {
+      "question_id": "720133ac",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, only the vet consultation fee of **$50** was mentioned for Lola's visit. No flea medication cost was mentioned, so I cannot calculate a total that includes medicatio"
+    },
+    {
+      "question_id": "77eafa52",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, the initial quote from Sakura Travel Agency was **$2,500**, but the corrected price for the entire trip was **$2,800**. So the additional amount was **$300**."
+    },
+    {
+      "question_id": "8979f9ec",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I can only find a reference to the chicken fajitas providing **3 meals** (mentioned on 2023/05/24).\n\nThere is **no mention of lentil soup** in any of the conversatio"
+    },
+    {
+      "question_id": "0100672e",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information — there is no mention of coffee mugs or purchases for coworkers in any of the conversations."
+    },
+    {
+      "question_id": "a96c20ee",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you did not specify which university hosted the conference. You mentioned attending a research conference \"over the summer\" and later mentioned visiting **Harvard Un"
+    },
+    {
+      "question_id": "92a0aa75",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no mention of your current role or when you started it in any of the conversations."
+    },
+    {
+      "question_id": "3fe836c9",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "The conversation history does not mention a pre-approval amount for the house. Only the final sale price of **$325,000** was mentioned. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "1c549ce4",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, the waterproof car cover cost **$120**. However, the cost of a detailing spray was never mentioned — only recommendations were given (such as Meguiar's Quik Interior"
+    },
+    {
+      "question_id": "6c49646a",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I only have information about **three road trips** you mentioned, totaling **1,800 miles** (a solo trip to Durango, a weekend trip to Breckenridge, and a family trip"
+    },
+    {
+      "question_id": "1192316e",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from [2023/05/23], the user takes **1 hour to get ready** (20-min meditation + 30-min workout + quick breakfast) and **30 minutes to commute**, for a total of **1 hour 30 min"
+    },
+    {
+      "question_id": "0ea62687",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from **2023/05/20**, your car was getting **30 MPG** a few months ago, and based on the conversations from **2023/05/24** and **2023/05/24 (23:28)**, it was getting **28 MPG*"
+    },
+    {
+      "question_id": "67e0d0f2",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you mentioned:\n\n- **8 courses on edX** (mentioned in the May 21 conversation)\n- **\"some courses\" on Coursera** (mentioned in the May 27 conversation) — no specific n"
+    },
+    {
+      "question_id": "bb7c3b45",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from May 23, 2023, you mentioned getting the Jimmy Choo heels at an outlet mall for **$200**, but the original retail price wasn't mentioned. So the exact amount saved isn't "
+    },
+    {
+      "question_id": "ba358f49",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "The conversations mention that Rachel is getting married \"next year\" (said during the conversation on 2022/09/01), which would be **2023**. However, your age is never mentioned in any of the conversat"
+    },
+    {
+      "question_id": "61f8c8f8",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no mention of a 5K run or any previous year's time in any of the conversation history provided."
+    },
+    {
+      "question_id": "60159905",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I can identify the following dinner parties you attended:\n\n1. **David's birthday party** - mentioned as \"last week\" in the May 20 conversation → approximately **May "
+    },
+    {
+      "question_id": "ef9cf60a",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversations, you mentioned spending **around $200** on a silver necklace with a small pendant from Tiffany's for your sister."
+    },
+    {
+      "question_id": "73d42213",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from 2023/05/20, you mentioned leaving home at 7 AM on Monday for your doctor's appointment and getting back to the office around 1:00 PM. However, the exact time you **arriv"
+    },
+    {
+      "question_id": "bc149d6b",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, I can only find one feed purchase mentioned:\n\n- **50-pound batch of layer feed** (mentioned in the [2023/05/22 (Mon) 14:05] conversation)\n- **20 pounds of organic sc"
+    },
+    {
+      "question_id": "099778bb",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, a user mentioned attending a workshop on gender equality and was **\"impressed to learn that women occupy 20 of the leadership positions\"** in their company.\n\nHowever"
+    },
+    {
+      "question_id": "09ba9854",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, the user is planning a trip to Japan but hasn't specified which airport (Narita or Haneda) they're flying into in this conversation.\n\nHowever, based on the figures p"
+    },
+    {
+      "question_id": "d6062bb9",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n- **TikTok**: Luna chasing a laser pointer video = **1,456 views**\n- **YouTube**: Social media analytics tutorial = **542 views**\n\n**Total combined views: 1,998**"
+    },
+    {
+      "question_id": "157a136e",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is no information provided about your age or your grandmother's age. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "c18a7dc8",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information — your age and college graduation date were never mentioned in our conversations."
+    },
+    {
+      "question_id": "a3332713",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n- **Brother's graduation gift**: $100 gift card to electronics store\n- **Coworker's baby shower gift**: $100 set of baby clothes and toys from Buy Buy Baby\n\n**Total"
+    },
+    {
+      "question_id": "55241a1f",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n- **Facebook Live session** (vegan recipes): **12 comments**\n- **Most popular YouTube video** (social media analytics): **21 comments**\n\n**Total: 33 comments**"
+    },
+    {
+      "question_id": "a08a253f",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you attend fitness classes **3 days a week**:\n\n- **Tuesdays** – Zumba class at 6:30 PM\n- **Thursdays** – Zumba class at 6:30 PM\n- **Saturdays** – Weightlifting class"
+    },
+    {
+      "question_id": "f0e564bc",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n- **Coach handbag**: $800 (mentioned in the May 23 conversation)\n- **High-end skincare products** (Nordstrom anniversary sale): $500 (mentioned in the May 28 conver"
+    },
+    {
+      "question_id": "078150f1",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from May 20, 2023, you mentioned that you **initially aimed to raise $200** in donations for the local children's hospital, and that you **exceeded your fundraising goal**. H"
+    },
+    {
+      "question_id": "8cf4d046",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the information shared across conversations:\n\n- **Undergraduate (University of Mumbai):** GPA of **3.86 out of 4.0**\n- **Graduate (University of Illinois at Urbana-Champaign):** GPA of **3.8 "
+    },
+    {
+      "question_id": "a346bb18",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from 2023/05/20, you mentioned a **target time of 4 hours 10 minutes**, and from the conversation on 2023/05/25, you completed your marathon in **4 hours 22 minutes**.\n\n4h 22"
+    },
+    {
+      "question_id": "37f165cf",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is no mention of you finishing novels in January or March. The only novel mentioned is **\"The Nightingale\" by Kristin Hannah (440 pages)**, which was discussed"
+    },
+    {
+      "question_id": "8e91e7d9",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is no mention of you having any siblings. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "87f22b4a",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from **May 22**, you mentioned selling **40 dozen eggs** that month, but the price per dozen was never mentioned. So while we know the quantity sold, **the total dollar amoun"
+    },
+    {
+      "question_id": "e56a43b9",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I know you reached **500 points** at FreshMart (the minimum points required for a discount), but the specific **discount amount or percentage** was never mentioned i"
+    },
+    {
+      "question_id": "efc3f7c2",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the morning routine conversation (May 24), you wake up at **6:30 AM every weekday** — there's no mention of a different wake-up time on Fridays. You wake up at the same time each weekday."
+    },
+    {
+      "question_id": "21d02d0d",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation, you mentioned missing **1 fun run** in March — specifically the run on **March 5th** due to work commitments."
+    },
+    {
+      "question_id": "2311e44b_abs",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I don't have enough information about how many pages are in your copy of 'Sapiens' or how far along you are in reading it. You mentioned it was \"slow going,\" but no "
+    },
+    {
+      "question_id": "6456829e_abs",
+      "question_type": "multi-session",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you mentioned planting **5 tomato plants** initially. There is no mention of planting chili peppers."
+    },
+    {
+      "question_id": "e5ba910e_abs",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, the user mentioned purchasing Sony WH-1000XM4 headphones for **$378**, but there is no mention of purchasing an iPad. I don't have enough information to calculate a "
+    },
+    {
+      "question_id": "a96c20ee_abs",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you mentioned presenting a poster on your **thesis research** at your **first research conference**, but you did not specify which university you attended. I don't h"
+    },
+    {
+      "question_id": "ba358f49_abs",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is no information provided about Rachel's age or your own marriage plans. The only mention of Rachel is that she is getting married next year (relative to the "
+    },
+    {
+      "question_id": "09ba9854_abs",
+      "question_type": "multi-session",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there isn't enough specific information to calculate exact savings, as the bus and taxi fares mentioned refer to different cities/airports (Tokyo and Mumbai) without"
+    },
+    {
+      "question_id": "gpt4_59149c77",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation dates:\n\n- The MoMA visit was mentioned on **January 8, 2023**\n- The \"Ancient Civilizations\" exhibit at the Metropolitan Museum of Art was mentioned on **January 15, 2023**\n\n*"
+    },
+    {
+      "question_id": "gpt4_f49edff3",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I can only find one of these three events:\n\n- **Helped friend prepare the nursery**: mentioned on [2023/02/05] as happening \"today\"\n\nThe other two events — helping a"
+    },
+    {
+      "question_id": "71017276",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, there is no mention of meeting up with an aunt or receiving a crystal chandelier. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "b46e15ed",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I only see **one** charity event mentioned — the \"24-Hour Bike Ride\" on **2023/02/14**. There is no mention of a second charity event on a consecutive day.\n\nI don't "
+    },
+    {
+      "question_id": "gpt4_fa19884c",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is no mention of you discovering a bluegrass band. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "0bc8ad92",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, the museum visit with a chemistry professor friend occurred on **2022/10/22**.\n\nCurrent date: **2023/03/25**\n\nThat's approximately **5 months** ago."
+    },
+    {
+      "question_id": "af082822",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "The conversation history doesn't mention you attending a friends and family sale at Nordstrom. I don't have enough information to answer that question."
+    },
+    {
+      "question_id": "gpt4_4929293a",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "**Michael's engagement party** happened first.\n\n- Michael's engagement party: **2023/05/06**\n- Cousin's wedding: **2023/06/15**"
+    },
+    {
+      "question_id": "gpt4_b5700ca9",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Looking at the conversation history, I can see that on **2023/03/29**, the user mentioned attending an **Easter Sunday service** — not a Maundy Thursday service at an Episcopal Church.\n\nSince the even"
+    },
+    {
+      "question_id": "9a707b81",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there's no mention of you making a friend's birthday cake at a baking class. \n\nWhat is mentioned is that you attended a baking class at a local culinary school **\"ye"
+    },
+    {
+      "question_id": "gpt4_1d4ab0c9",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "From the conversations:\n- Started watering herb garden: **March 22, 2023**\n- First herb harvest: **April 15, 2023**\n\n**April 15 − March 22 = 24 days**"
+    },
+    {
+      "question_id": "gpt4_e072b769",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "The user mentioned downloading Ibotta in the conversation dated **2023/04/16**. The current date is **2023/05/06**.\n\nFrom April 16 to May 6 = **20 days**, which is approximately **2 weeks and 6 days**"
+    },
+    {
+      "question_id": "0db4c65d",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, there is no mention of:\n- Reading 'The Seven Husbands of Evelyn Hugo'\n- Attending a book reading event at a local library\n- An author of 'The Silent Patient"
+    },
+    {
+      "question_id": "gpt4_1d80365e",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from May 15, 2023, you mentioned you **just started** your solo camping trip to Yosemite that day. However, the conversations don't mention when the trip ended, so I don't ha"
+    },
+    {
+      "question_id": "gpt4_7f6b06db",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history:\n\n1. **Yosemite solo camping trip** – mentioned as recent in the April 20 conversation, but no exact date given\n2. **Big Sur and Monterey road trip** – mentioned as \""
+    },
+    {
+      "question_id": "gpt4_6dc9b45b",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "The user mentioned attending SIFF on **2021/06/01**. The current date is **2021/10/02**.\n\nThat's approximately **4 months ago**."
+    },
+    {
+      "question_id": "gpt4_8279ba02",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation dated **2023/03/15**, the user said \"I just got a smoker today.\"\n\nCurrent date: **2023/03/25**\n\n2023/03/25 − 2023/03/15 = **10 days ago**"
+    },
+    {
+      "question_id": "gpt4_18c2b244",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, only one of these three events is actually mentioned:\n\n- **\"I used a Buy One Get One Free coupon on Luvs diapers at Walmart\"** — mentioned in the [2023/04/01] conver"
+    },
+    {
+      "question_id": "gpt4_a1b77f9c",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I can only find that you started reading \"The Nightingale\" on **2022/01/01** and finished it by **2022/01/15** — that's **2 weeks**.\n\nHowever, there is **no mention*"
+    },
+    {
+      "question_id": "gpt4_1916e0ea",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I can see that you mentioned cancelling your FarmFresh subscription in the **January 5, 2023** conversation, but there is **no mention of doing online grocery shoppi"
+    },
+    {
+      "question_id": "gpt4_7a0daae1",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you mentioned buying a new tennis racket online on **March 10, 2023**, but there is no mention of when it was delivered/received.\n\n**I don't have enough information*"
+    },
+    {
+      "question_id": "gpt4_468eb063",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "The conversation history does not mention anyone named Emma. I don't have enough information to answer that question."
+    },
+    {
+      "question_id": "gpt4_7abb270c",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, here are the museums visited in chronological order:\n\n1. **Science Museum** (\"Space Exploration\" exhibition) — January 15, 2023\n2. **Museum of Contemporary Art** (Dr"
+    },
+    {
+      "question_id": "gpt4_1e4a8aeb",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, the gardening workshop was attended on **April 15, 2023**. However, there is **no mention** of you planting tomato saplings in any of the conversations. I don't have"
+    },
+    {
+      "question_id": "gpt4_4fc4f797",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, the feedback about the suspension being \"too soft\" was mentioned on **2023/03/17**, and the track day test at VIR was planned for **\"next month\"** from that same con"
+    },
+    {
+      "question_id": "4dfccbf7",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "The conversation history mentions that ukulele lessons started on 2023/02/01, but there is no mention of taking an acoustic guitar to a guitar tech for servicing anywhere in the conversation history.\n"
+    },
+    {
+      "question_id": "gpt4_61e13b3c",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I can only identify **one** Farmers' Market sale mentioned — on **2023/02/26 (Sun)**, where you sold muffins, scones, and cookies.\n\nThere is **no mention of a \"Sprin"
+    },
+    {
+      "question_id": "gpt4_45189cb4",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n1. **January 5** – Lakers vs. Chicago Bulls NBA game at Staples Center (mentioned as \"today\" in the Jan 5 conversation)\n2. **January 14** – Georgia vs. Alabama Coll"
+    },
+    {
+      "question_id": "2ebe6c90",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I don't have enough information to answer this. You mentioned starting \"The Nightingale\" on January 10, 2023, but there is no mention of you finishing it in any of t"
+    },
+    {
+      "question_id": "gpt4_e061b84f",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no mention of you participating in any sports events in the conversation history provided."
+    },
+    {
+      "question_id": "370a8ff4",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. The conversation history mentions your flu recovery on 2023/01/19, but there is no mention of a 10th outdoor jog or when that took place."
+    },
+    {
+      "question_id": "gpt4_d6585ce8",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, here are the musical events in chronological order:\n\n1. **Billie Eilish concert at Wells Fargo Center, Philadelphia** – March 18, 2023 (attended with sister)\n2. **Fr"
+    },
+    {
+      "question_id": "gpt4_4ef30696",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you mentioned finishing 'The Nightingale' on **January 15, 2022**, but there is **no mention** of you starting to read 'The Hitchhiker's Guide to the Galaxy' in any "
+    },
+    {
+      "question_id": "gpt4_ec93e27f",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history:\n\n- Bus ride: [2023/02/27] \"I just got back from a bus ride to attend a friend's wedding today\"\n- Train: No train ride is mentioned as actually taken (only planned fo"
+    },
+    {
+      "question_id": "6e984301",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "The conversation history doesn't mention anything about sculpting classes or investing in sculpting tools. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "8077ef71",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "The networking event was mentioned in the conversation dated **2022/03/09**, and the current date is **2022/04/04**.\n\nFrom March 9 to April 4 = **26 days ago**."
+    },
+    {
+      "question_id": "gpt4_f420262c",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, here are the flights mentioned with their dates:\n\n1. **American Airlines** - February 10th (year not specified, but referenced in Jan 15, 2023 conversation as a past"
+    },
+    {
+      "question_id": "gpt4_8e165409",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "- Repotted spider plant: March 4, 2023\n- Gave cuttings to Mrs. Johnson: March 18, 2023\n\n**14 days** passed between the two events."
+    },
+    {
+      "question_id": "gpt4_74aed68e",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "- Spark plugs replaced: **February 14, 2023**\n- Turbocharged Tuesdays event: **March 15, 2023**\n\n**29 days** passed between the two events."
+    },
+    {
+      "question_id": "bcbe585f",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information — there is no mention of you attending a bird watching workshop at a local Audubon society in any of the conversation history provided."
+    },
+    {
+      "question_id": "gpt4_21adecb5",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I can see that you mentioned completing your undergraduate degree (in the conversation dated **2022/11/17**), but there is **no mention of a master's thesis** anywhe"
+    },
+    {
+      "question_id": "5e1b23de",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "The user attended a 3-day photography workshop on **2023/11/01**. The current date is **2024/02/01**, which is exactly **3 months ago**."
+    },
+    {
+      "question_id": "gpt4_98f46fc6",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is **no mention of a charity gala** at all. The only charity event mentioned was the **charity bake sale** (on March 15, 2023) and a **charity walk for cancer "
+    },
+    {
+      "question_id": "gpt4_af6db32f",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "The conversation history doesn't mention you watching the Super Bowl at all, so I don't have enough information to answer that question."
+    },
+    {
+      "question_id": "eac54adc",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "**Date calculation:**\n- Website launched: mentioned on **Feb 10, 2023**\n- First client contract signed: mentioned on **Mar 1, 2023**\n\nMar 1 − Feb 10 = **19 days** after the website launch."
+    },
+    {
+      "question_id": "gpt4_7ddcf75f",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "The whitewater rafting trip was mentioned on **2023/06/17**, where you said you \"just got back today.\" The current date is **2023/06/20**.\n\n**2023/06/20 − 2023/06/17 = 3 days ago.**"
+    },
+    {
+      "question_id": "gpt4_a2d1d1f6",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no mention of harvesting herbs from an herb garden kit in any of the conversation history provided."
+    },
+    {
+      "question_id": "gpt4_85da3956",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you mentioned attending the \"Summer Nights\" festival at Universal Studios Hollywood in the conversation dated **2023/07/15**. You described it as \"an amazing day,\" i"
+    },
+    {
+      "question_id": "gpt4_b0863698",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you mentioned volunteering at a charity 5K run/walk, but the exact date of that event was never specified. However, looking at the conversation about planning a char"
+    },
+    {
+      "question_id": "gpt4_68e94287",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, only the vegan chili recipe post is mentioned — it was shared on **2023/03/09** (described as \"yesterday\" in the March 10 conversation).\n\nThere is **no mention** of "
+    },
+    {
+      "question_id": "gpt4_e414231e",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Both events occurred in the **same conversation on 2023/03/15** — fixing the mountain bike was mentioned at the start, and the decision to upgrade to clipless pedals came later in the same conversatio"
+    },
+    {
+      "question_id": "gpt4_7ca326fa",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n1. **Emma** graduated on **May 27, 2022** (the conversation on May 28 mentions \"yesterday\")\n2. **Rachel** graduated on **June 21, 2022** (the conversation on June 2"
+    },
+    {
+      "question_id": "gpt4_7bc6cf22",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no mention of you reading a March 15th issue of The New Yorker in any of the conversation history provided."
+    },
+    {
+      "question_id": "2ebe6c92",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Looking at the current date (2023/02/07) and going back one week to approximately **2023/01/31**, there are no conversations mentioning finishing a book around that date in the conversation history.\n\n"
+    },
+    {
+      "question_id": "gpt4_e061b84g",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation dated **2023/06/17 (Sat)**, you mentioned participating in your **company's annual charity soccer tournament** that same day. The current date is 2023/07/01, which is approxi"
+    },
+    {
+      "question_id": "71017277",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, there is no mention of you receiving a piece of jewelry last Saturday. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "b46e15ee",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Looking at the conversation dates:\n- Current date: 2023/04/18\n- One month ago ≈ 2023/03/18\n\nThe conversations I have are from late January and mid-February 2023, so there's no record of a charity even"
+    },
+    {
+      "question_id": "gpt4_d6585ce9",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Looking at the conversation dated **2023/03/18 (Sat)** — which was the Saturday before the current date context — you went to the **Billie Eilish concert at the Wells Fargo Center in Philadelphia with"
+    },
+    {
+      "question_id": "gpt4_1e4a8aec",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no mention of any gardening-related activity in our conversation history."
+    },
+    {
+      "question_id": "gpt4_f420262d",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation dated **2023/02/14 (Tue)** — Valentine's Day — you mentioned recovering from an **American Airlines** flight from LAX to JFK, and you were looking to book a new flight. You u"
+    },
+    {
+      "question_id": "gpt4_59149c78",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from [2023/01/14], you mentioned attending an **Impressionist exhibit** with your sister, but the specific venue was not mentioned by name.\n\nYou also mentioned adding past mu"
+    },
+    {
+      "question_id": "gpt4_e414231f",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "## Date Calculation\n\nCurrent date: **2023/03/21 (Tue)**\n\"Past weekend\" = approximately **2023/03/18-19**\n\nLooking at the conversation dated **2023/03/15 (Wed)**, you mentioned fixing a flat tire on yo"
+    },
+    {
+      "question_id": "gpt4_4929293b",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no mention of you or any relatives' life events in the conversation history."
+    },
+    {
+      "question_id": "gpt4_468eb064",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information — there is no mention of a lunch meeting last Tuesday in any of the conversation history provided."
+    },
+    {
+      "question_id": "gpt4_fa19884d",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "**Date calculation:** Current date is 2023/04/05 (Wed). Last Friday = 2023/03/31.\n\nThere are no conversations from 2023/03/31 in the history, so **I don't have enough information** to answer which art"
+    },
+    {
+      "question_id": "9a707b82",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, there is no mention of you cooking something for a friend. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "eac54add",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "**Date calculation:** Current date is 2023/03/28. Four weeks ago = approximately 2023/02/28.\n\nLooking at conversations around that time, on **2023/03/01**, you mentioned: **\"I just signed a contract w"
+    },
+    {
+      "question_id": "4dfccbf8",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "The conversation history doesn't mention anything about you doing something with Rachel on a Wednesday two months ago. The only mention of Rachel is in the January 4th conversation, where you referenc"
+    },
+    {
+      "question_id": "0bc8ad93",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Looking at the conversations, I need to find a museum visit ~2 months before the current date (2023/03/11).\n\nTwo months ago ≈ January 2023.\n\nIn the **[2023/01/11]** conversation, you mentioned attendi"
+    },
+    {
+      "question_id": "6e984302",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Let me calculate: Current date is 2023/04/01. Four weeks ago would be around 2023/03/04.\n\nLooking at the conversation history, there are no conversations from around that date. The sculpting-related c"
+    },
+    {
+      "question_id": "gpt4_8279ba03",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is no mention of you buying any kitchen appliance. The only purchase mentioned around that timeframe was an **Anker power bank** (bought March 10th), which is "
+    },
+    {
+      "question_id": "gpt4_b5700ca0",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "The conversation date is 2023/04/04 (Tue). \"Last week\" would be approximately March 27 – April 2.\n\nLooking at the conversation history, there is no mention of a religious activity attended during that"
+    },
+    {
+      "question_id": "gpt4_68e94288",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "The current date is 2023/03/20, so 5 days ago was 2023/03/15. Looking through the conversation history, there is no mention of any social media activity on that date.\n\nI don't have enough information "
+    },
+    {
+      "question_id": "gpt4_2655b836",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, the issue mentioned was with the **GPS system** (mentioned on 2023/04/10 at 10:12), where it malfunctioned and had to be taken back to the dealership, which replaced"
+    },
+    {
+      "question_id": "gpt4_2487a7cb",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, only the **\"Data Analysis using Python\" webinar** is mentioned (in the conversation dated 2023/05/24, the user states they participated in it \"two months ago\"). Ther"
+    },
+    {
+      "question_id": "gpt4_76048e76",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n- **Bike repair**: \"mid-February\" (gears acting up)\n- **Skin tag removal** (not a vehicle): February 22nd\n\nThe only vehicle mentioned is the **bike**, which was rep"
+    },
+    {
+      "question_id": "gpt4_2312f94c",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation, the Dell XPS 13 arrived on **February 25th**, while there is no specific purchase/arrival date mentioned for the Samsung Galaxy S22. However, the user bought the Anker Power"
+    },
+    {
+      "question_id": "0bb5a684",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation dated **2023/01/13**, the user mentioned:\n- The workshop was attended on **January 10th**\n- The team meeting was **upcoming** (i.e., after January 13th, the conversation date"
+    },
+    {
+      "question_id": "08f4fc43",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "The conversation mentions an Ash Wednesday service at the cathedral on February 1st, but there is no mention of a Sunday mass at St. Mary's Church anywhere in the conversation history. I don't have en"
+    },
+    {
+      "question_id": "2c63a862",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "From the homebuying conversation:\n- Started working with Rachel: **February 15**\n- Saw the house they loved: **March 1**\n\nMarch 1 − February 15 = **14 days**"
+    },
+    {
+      "question_id": "gpt4_385a5000",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, only the marigold seeds are mentioned — the user stated they started marigold seeds that **arrived on March 3rd**, and they were already germinating as of the March "
+    },
+    {
+      "question_id": "2a1811e2",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "The conversation mentions Sunday mass at St. Mary's Church on **March 19th**, but there is no mention of the Hindu festival of Holi anywhere in the conversation history.\n\nI don't have enough informati"
+    },
+    {
+      "question_id": "bbf86515",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "The terms \"Rack Fest\" and \"Turbocharged Tuesdays\" do not appear anywhere in the conversation history. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "gpt4_5dcc0aab",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is no mention of you cleaning any pair of shoes last month. The shoe-related topics discussed include:\n\n- Lending running shoes to your sister\n- Getting brown "
+    },
+    {
+      "question_id": "gpt4_0b2f1d21",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n- **Stand mixer malfunction**: Mentioned in the [2023/05/25 01:41] conversation, where the user says \"I had to take mine to a repair shop **last month**\" — so appro"
+    },
+    {
+      "question_id": "f0853d11",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "The \"Walk for Hunger\" 5K walk took place on **February 21st**, and the Coastal Cleanup event took place on **March 7th**.\n\nMarch 7 − February 21 = **14 days** passed between the two events."
+    },
+    {
+      "question_id": "gpt4_6ed717ea",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "The conversations don't mention any purchases of a dog bed for Max or training pads for Luna. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "gpt4_70e84552",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from [2023/05/25 14:25], the fence was fixed **three weeks ago** and the goat vaccination was done **last Thursday**.\n\nFrom the earlier conversation [2023/05/25 07:52], the h"
+    },
+    {
+      "question_id": "a3838d2b",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is **no mention** of any charity events you participated in **before** the \"Run for the Cure\" event on October 15th. The \"Run for the Cure\" appears to be the f"
+    },
+    {
+      "question_id": "gpt4_93159ced",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, the user mentioned they graduated from UC Berkeley with a Computer Science degree and have been working at NovaTech for about **4 years and 3 months**. However, ther"
+    },
+    {
+      "question_id": "gpt4_2d58bcd6",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n- **\"The Hate U Give\"** was finished a few days before a book club meeting that took place **two weeks before May 30** — so roughly finished around **mid-May 2023**"
+    },
+    {
+      "question_id": "gpt4_65aabe59",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is **no mention of a smart thermostat** being set up at all. Only the **mesh network system** is referenced (upgraded approximately 3 weeks before the May 25 c"
+    },
+    {
+      "question_id": "982b5123",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is no mention of you booking an Airbnb in San Francisco. The only reference to San Francisco is that you were on a flight there today (May 21, 2023) and experi"
+    },
+    {
+      "question_id": "b9cfe692",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n- **The Seven Husbands of Evelyn Hugo**: took **2.5 weeks** (mentioned in the 08:41 conversation)\n- **The Nightingale**: took **3 weeks** (mentioned in the 11:25 co"
+    },
+    {
+      "question_id": "gpt4_4edbafa2",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you mentioned attending **a backyard BBQ party at your colleague's house on June 3rd**."
+    },
+    {
+      "question_id": "c8090214",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "From the conversation history:\n\n- The Holiday Market was attended **a week before Black Friday**. Black Friday 2023 was November 24, so the Holiday Market was around **November 17**.\n- The iPhone 13 P"
+    },
+    {
+      "question_id": "gpt4_483dd43c",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, **\"Game of Thrones\"** was started first. The user mentioned they had been meaning to check it out \"for a while\" and started it \"about a month ago\" (from the 04:31 co"
+    },
+    {
+      "question_id": "e4e14d04",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "The conversation mentions you attended a meetup organized by **Book Lovers Unite** \"last week\" (relative to the conversation date of 2023/05/28), but there is **no mention of when you joined** the gro"
+    },
+    {
+      "question_id": "c9f37c46",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "The conversation doesn't mention anything about you watching stand-up comedy specials regularly before attending the open mic night. It only states that you \"finally worked up the courage to attend an"
+    },
+    {
+      "question_id": "gpt4_2c50253f",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from May 27 at 07:56, you wake up **15 minutes earlier than usual** on Tuesdays and Thursdays to meditate and practice yoga poses before your morning walk."
+    },
+    {
+      "question_id": "dcfa8644",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "**Date calculation:**\n- Adidas running shoes bought: **January 10th**\n- Converse shoelace broke: **January 24th**\n\n**January 24 - January 10 = 14 days**\n\n**14 days** had passed since buying the Adidas"
+    },
+    {
+      "question_id": "gpt4_b4a80587",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from 2023/05/23 02:49, the user mentioned getting the 50mm f/1.8 prime lens **a month ago**, and also took it on the coastal trip. This means the lens arrived **before** the "
+    },
+    {
+      "question_id": "gpt4_9a159967",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you mentioned:\n\n- **American Airlines**: Flew from your hometown to Honolulu, then a connecting flight to Maui during your Hawaii vacation (April 20th–27th).\n- **Uni"
+    },
+    {
+      "question_id": "cc6d1ec1",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from **2023/05/21**, you mentioned you had been getting into bird watching for **about three months**. However, there is no mention of you attending a bird watching workshop "
+    },
+    {
+      "question_id": "gpt4_8c8961ae",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, only the **solo trip to Thailand** is mentioned (in the May 28 conversation at 05:31). There is **no mention of a trip to Europe with family** in any of the conversa"
+    },
+    {
+      "question_id": "gpt4_d9af6064",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n- New router set up: **January 15th**\n- Smart thermostat set up: **February 10th**\n\nThe **new router** was set up first."
+    },
+    {
+      "question_id": "gpt4_7de946e7",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from [2023/02/28 01:14], the skin tag removal occurred on **February 22nd**, while the persistent cough led to a doctor visit on **February 10th**.\n\nTherefore, the **persiste"
+    },
+    {
+      "question_id": "d01c6aa8",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. You haven't mentioned anything about moving to the United States in our conversations."
+    },
+    {
+      "question_id": "993da5e2",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history:\n\n- The area rug was purchased **about a month before** the plant care conversation on **2023/05/26 at 03:36**\n- The furniture was rearranged **three weeks before** t"
+    },
+    {
+      "question_id": "a3045048",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "From the conversation on 2022/05/15:\n- The user ordered the personalized photo album on **April 15th**\n- The best friend's birthday party was on **April 22nd**\n\n**April 22 - April 15 = 7 days**\n\nThe g"
+    },
+    {
+      "question_id": "gpt4_d31cdae3",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, the user mentioned taking a **family road trip across the American Southwest** (which included the Grand Canyon) \"a few years ago,\" and a **solo trip to Europe** \"la"
+    },
+    {
+      "question_id": "gpt4_cd90e484",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "The conversation mentions that you have new binoculars that have made a difference in your birding trips, but there is no mention of American goldfinches returning to the area. I don't have enough inf"
+    },
+    {
+      "question_id": "gpt4_88806d6e",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, I only have information about **Tom** — mentioned in the [2023/05/28 02:45] conversation as someone met at a charity event \"a few months ago.\"\n\nThere is **no mention"
+    },
+    {
+      "question_id": "gpt4_4cd9eba1",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "From the conversation history:\n- Pre-departure orientation sessions started: **3/27** (every Friday)\n- Exchange program acceptance date: **March 20th**\n\n3/27 is about **1 week** after the acceptance d"
+    },
+    {
+      "question_id": "gpt4_93f6379c",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n- **\"Page Turners\"** book club was joined **\"last week\"** relative to the conversation on **2023/05/25 at 01:50**, meaning it was joined around **May 18, 2023**.\n- "
+    },
+    {
+      "question_id": "b29f3365",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "From the first conversation (2023/05/25), you mentioned taking weekly guitar lessons with Alex for **6 weeks**. You also mentioned buying a new amp **2 weeks ago**.\n\nSo you had been taking guitar less"
+    },
+    {
+      "question_id": "gpt4_2f56ae70",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you mentioned starting a **free trial of Disney+** last month (referenced in the conversation dated 2023/05/26), making it the most recently started streaming servic"
+    },
+    {
+      "question_id": "6613b389",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Rachel got engaged on May 15th, and your anniversary is July 22nd.\n\nJuly 22 minus May 15 = approximately **2 months and 7 days** before your anniversary."
+    },
+    {
+      "question_id": "gpt4_78cf46a3",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversations:\n\n- **New phone case**: received ~1 month ago (mentioned in the 19:11 conversation on 2023/05/26, so approximately late April 2023)\n- **Lost phone charger**: lost ~2 weeks a"
+    },
+    {
+      "question_id": "gpt4_0a05b494",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n- The **jam maker at the farmer's market** was met \"two weeks ago\" as mentioned in the conversation dated **2023/05/23** → approximately **May 9**\n- The **Australia"
+    },
+    {
+      "question_id": "gpt4_1a1dc16d",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation dates:\n\n- The meeting with mentor Rachel took place on **April 10th** (mentioned in the May 9, 07:55 conversation)\n- The pride parade took place on **May 1st** (mentioned in "
+    },
+    {
+      "question_id": "gpt4_2f584639",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from **2023/05/30 at 03:18**, you mentioned:\n\n- The **photo album from Shutterfly** was ordered **two weeks ago** → approximately **May 16**\n- The **necklace from Tiffany's**"
+    },
+    {
+      "question_id": "gpt4_213fd887",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, neither a volleyball league nor a charity 5K run are mentioned at all. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "gpt4_5438fa52",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n- **Spanish classes**: Started ~3 months before May 27, 2023 (conversation at 14:08), so approximately **late February 2023**\n- **Cultural festival**: Attended \"yes"
+    },
+    {
+      "question_id": "gpt4_c27434e8",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from 2023/05/29 at 09:33, the user mentioned they are **currently working on** the Ferrari 288 GTO, while the Japanese Zero fighter plane was started **about a month ago**.\n\n"
+    },
+    {
+      "question_id": "gpt4_fe651585",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "The conversation history doesn't mention Rachel or Alex becoming parents. The only \"Alex\" mentioned is a friend who went on a fishing trip, with no mention of parenthood. I don't have enough informati"
+    },
+    {
+      "question_id": "8c18457d",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. The conversations provided don't mention purchasing a gift for a brother's graduation ceremony or a birthday gift for a best friend."
+    },
+    {
+      "question_id": "gpt4_70e84552_abs",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, neither fixing a fence nor purchasing three cows from Peter is mentioned at all. The conversations only reference considering purchasing a new cow (not yet completed"
+    },
+    {
+      "question_id": "gpt4_93159ced_abs",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversations, there is no mention of you working at Google or any current employer. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "982b5123_abs",
+      "question_type": "temporal-reasoning",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history provided, there is no mention of booking an Airbnb in Sacramento. You mentioned a past Airbnb stay in **Haight-Ashbury** (for a friend's wedding) and accommodations i"
+    },
+    {
+      "question_id": "c8090214_abs",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "The conversations mention attending the Holiday Market \"a week before Black Friday,\" but there is no mention of purchasing an iPad anywhere in the conversation history. I don't have enough information"
+    },
+    {
+      "question_id": "gpt4_c27434e8_abs",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is no mention of a Porsche 991 Turbo S model at all. The models discussed were a **Ferrari 288 GTO** and a **Japanese Zero fighter plane**. I don't have enough"
+    },
+    {
+      "question_id": "gpt4_fe651585_abs",
+      "question_type": "temporal-reasoning",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, Alex adopted a baby girl from China in **January 2023**. There is no mention of anyone named \"Tom\" in the conversations.\n\nI don't have enough information to answer t"
+    },
+    {
+      "question_id": "6a1eabeb",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Your personal best time in the charity 5K run was **27:12**."
+    },
+    {
+      "question_id": "6aeb4375",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from **2023/08/11**, you mentioned trying **3 different Korean restaurants** in your city recently."
+    },
+    {
+      "question_id": "830ce83f",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "The conversation history doesn't mention Rachel relocating anywhere. The only \"Rachel\" referenced is Rachel Smith, an author who gave a book reading at a local library. I don't have enough information"
+    },
+    {
+      "question_id": "852ce960",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from **2023/08/11**, you were pre-approved for **$350,000** from Wells Fargo."
+    },
+    {
+      "question_id": "945e3d21",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from August 11, 2023, you mentioned attending yoga **twice a week**, and in the November 30, 2023 conversation, you mentioned attending yoga classes **three times a week**."
+    },
+    {
+      "question_id": "d7c942c3",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Yes! Based on the conversation from [2023/04/30], your mom is now using the **same grocery list app** as you, which allows you both to share lists and keep track of what you need. This is a change fro"
+    },
+    {
+      "question_id": "71315a70",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you've spent **10-12 hours** on your abstract ocean sculpture, as mentioned in the conversation on **June 17, 2023**.\n\n(Note: Earlier, on June 11, you mentioned spen"
+    },
+    {
+      "question_id": "89941a93",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you own **4 bikes**:\n1. Road bike\n2. Mountain bike\n3. Commuter bike\n4. A new hybrid bike (recently purchased, mentioned in the October 10, 2023 conversation)"
+    },
+    {
+      "question_id": "ce6d2d27",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from **2023/06/30**, you mentioned that you have a cocktail-making class on **Fridays**."
+    },
+    {
+      "question_id": "9ea5eabc",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, your most recent family trip was to **Hawaii**."
+    },
+    {
+      "question_id": "07741c44",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from **2023/07/22**, you mentioned keeping your old sneakers **under your bed** for storage."
+    },
+    {
+      "question_id": "a1eacc2a",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you have written **7 short stories** in three months of writing regularly. This was mentioned in the conversation dated **2023/05/30**."
+    },
+    {
+      "question_id": "184da446",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you mentioned being on **page 200** of \"A Short History of Nearly Everything\" (stated on 2023/05/20)."
+    },
+    {
+      "question_id": "031748ae",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n**When you just started the role:** You lead **4 engineers** (mentioned in the May 11, 2023 conversation).\n\n**Now:** You lead **5 engineers** (mentioned in the Octo"
+    },
+    {
+      "question_id": "4d6b87c8",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from **2023/05/22**, you mentioned having **25 titles** on your to-watch list."
+    },
+    {
+      "question_id": "0f05491a",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there were conflicting answers given:\n\n1. First, the assistant said **300 stars**\n2. Then corrected it to **400 stars**\n3. Finally, the user corrected it to **125 st"
+    },
+    {
+      "question_id": "08e075c7",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation dated **2023/06/18**, the user mentioned they had been using their Fitbit Charge 3 for **6 months** at that time."
+    },
+    {
+      "question_id": "f9e8c073",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you attended **3 sessions** of the bereavement support group."
+    },
+    {
+      "question_id": "41698283",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from **2023/03/11**, you mentioned recently getting a new **50mm prime lens**, which you said \"has been working out great.\""
+    },
+    {
+      "question_id": "2698e78f",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation, you mentioned that your therapy sessions with Dr. Smith are **every two weeks**."
+    },
+    {
+      "question_id": "b6019101",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no mention of MCU films in any of the conversation history provided."
+    },
+    {
+      "question_id": "45dc21b6",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you mentioned trying Emma's recipes in two separate conversations:\n\n- On **2023/05/29 at 04:51**, you said you'd tried **2 of Emma's recipes**.\n- On **2023/05/30 at "
+    },
+    {
+      "question_id": "5a4f22c0",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, Rachel is described as \"an old colleague from my previous company\" — meaning she was a former colleague, but her current company is not mentioned in the conversation"
+    },
+    {
+      "question_id": "6071bd76",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from **2023/02/11**, you stated that **1 tablespoon of coffee for every 6 ounces of water** is your perfect ratio. There was no mention of switching to a different ratio, so "
+    },
+    {
+      "question_id": "e493bb7c",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from October 30, 2023, the user mentioned moving the \"Ethereal Dreams\" painting to their **bedroom**.\n\n(Note: The artist's name \"Emma Taylor\" is not mentioned in any of the c"
+    },
+    {
+      "question_id": "618f13b2",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you've worn your black Converse Chuck Taylor All Star sneakers **4 times** as of the May 30 conversation (including to your friend's birthday party last Saturday)."
+    },
+    {
+      "question_id": "72e3ee87",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from **2023/05/24**, you mentioned that you are **currently on episode 10** of the Crash Course Science series."
+    },
+    {
+      "question_id": "c4ea545c",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you mentioned going to the gym on **Tuesdays, Thursdays, and Saturdays** (3 days per week), but there's no information about your previous gym frequency to compare i"
+    },
+    {
+      "question_id": "01493427",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n- In the **August 11, 2023** conversation, you mentioned you had added **17 new postcards** since you started collecting again.\n- In the **November 30, 2023** conve"
+    },
+    {
+      "question_id": "6a27ffc2",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you mentioned completing **30 videos** of Corey Schafer's Python series (as stated in the May 26 conversation). You had previously mentioned completing 20 videos in "
+    },
+    {
+      "question_id": "2133c1b5",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from 2023/04/11, you mentioned you had been living in your Harajuku apartment for **a month** at that time. Since the current date is 2023/10/15, that means you've been livin"
+    },
+    {
+      "question_id": "18bc8abd",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from 2023/04/16, you mentioned stocking up on **Sweet Baby Ray's** BBQ sauce to serve with your ribs."
+    },
+    {
+      "question_id": "db467c8c",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation dated **2023/07/16**, you mentioned that your parents have been living with you **for the past six months**."
+    },
+    {
+      "question_id": "7a87bd0c",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from **June 11, 2023**, you mentioned you had been sticking to your daily tidying routine for **3 weeks** at that time.\n\nAs of the current date (**September 30, 2023**), that"
+    },
+    {
+      "question_id": "e61a7584",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you mentioned having Luna for **about 9 months** (stated in the November 30, 2023 conversation), and **about 6 months** in an earlier conversation dated August 11, 2"
+    },
+    {
+      "question_id": "1cea1afa",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from May 27, 2023, you mentioned reaching **500 followers** last week prior to that conversation."
+    },
+    {
+      "question_id": "ed4ddc30",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from **January 11, 2023**, you mentioned having **30 dozen eggs** stocked up in the fridge."
+    },
+    {
+      "question_id": "8fb83627",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from 2023/04/20, you mentioned finishing **3 issues** of National Geographic and being currently on your **4th**."
+    },
+    {
+      "question_id": "b01defab",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is **no information** about whether you finished reading *The Nightingale*. The conversations only mention that you had put it down temporarily due to its emot"
+    },
+    {
+      "question_id": "22d2cb42",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you got your guitar serviced at **Rhythm Central**, a music shop on **Main St**, which was recommended by your friend."
+    },
+    {
+      "question_id": "0e4e4c46",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, your highest score in Ticket to Ride is **124 points**, as mentioned in the conversation on 2023/05/23."
+    },
+    {
+      "question_id": "4b24c848",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from **2023/08/11**, you mentioned that you had already bought **three tops** from H&M."
+    },
+    {
+      "question_id": "7e974930",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from March 12, 2023, you listed two visits to the Downtown Farmers Market:\n\n- **March 18th**: $220\n- **May 6th**: $350\n\nYour most recent visit was **May 6th at the Downtown F"
+    },
+    {
+      "question_id": "603deb26",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from **2023/08/11**, you mentioned that you had tried making a Negroni at home **5 times** since Emma taught you how to make it."
+    },
+    {
+      "question_id": "59524333",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from February 11, 2023, you usually go to the gym at **7:00 PM on Mondays, Wednesdays, and Fridays**."
+    },
+    {
+      "question_id": "5831f84d",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you mentioned watching **10 Crash Course videos** in the first few weeks (mentioned on 2023/08/11), and later updated that you had finished your **12th video** on co"
+    },
+    {
+      "question_id": "eace081b",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you haven't specified which area or accommodation you plan to stay at for your birthday trip to Hawaii in October. You only mentioned that it's a birthday trip and a"
+    },
+    {
+      "question_id": "affe2881",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you mentioned spotting **27 different species** in your local park."
+    },
+    {
+      "question_id": "50635ada",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you mentioned that you \"just hit 20,000 miles on United Airlines, which means I'm finally eligible for Premier Silver status.\" This implies that Premier Silver was y"
+    },
+    {
+      "question_id": "e66b632c",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from April 11, 2023, your personal best time for the charity 5K run was **27 minutes and 45 seconds**."
+    },
+    {
+      "question_id": "0ddfec37",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from **2023/07/11**, you mentioned that you had collected **15 autographed baseballs** in the first three months of collecting, with the signed Mike Trout baseball being your"
+    },
+    {
+      "question_id": "f685340e",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from **2023/03/11**, you mentioned playing **weekly tennis sessions** with friends at the local park, and you were planning to play **that coming Sunday** (2023/03/12).\n\nTher"
+    },
+    {
+      "question_id": "cc5ded98",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you mentioned **two different amounts**:\n\n- In the **May 20 conversation**, you mentioned dedicating **about an hour each day** to coding exercises.\n- In the **May 2"
+    },
+    {
+      "question_id": "dfde3500",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from 2023/05/20, you mentioned that you meet with Juan on **Wednesday evenings**."
+    },
+    {
+      "question_id": "69fee5aa",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from May 27, 2023, you mentioned having **37 coins** in your pre-1920 American coin collection. You also added a **1915-S Barber quarter** on May 29, 2023, bringing the total"
+    },
+    {
+      "question_id": "7401057b",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from May 29, 2023, you mentioned that you have **accumulated enough points for a single free night's stay** at any Hilton property."
+    },
+    {
+      "question_id": "cf22b7bf",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "The conversation history doesn't mention you starting a gym routine or tracking weight loss from gym activity specifically. However, in the May 21 conversation, you mentioned losing **5 pounds in the "
+    },
+    {
+      "question_id": "a2f3aa27",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you mentioned having **1,250 followers** (on May 25, 2023) and later said you thought you were **close to 1,300**. The exact current count isn't confirmed, but it's "
+    },
+    {
+      "question_id": "c7dc5443",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from **June 16, 2023**, you mentioned that your volleyball team's record was **3-2** at that time."
+    },
+    {
+      "question_id": "06db6396",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from **August 16, 2023**, you mentioned that you had completed **4 projects** since starting painting classes."
+    },
+    {
+      "question_id": "3ba21379",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you are currently working on a **Ford F-150 pickup truck** model (you switched to it after wrapping up a previous model, as mentioned in the conversation dated 2023/"
+    },
+    {
+      "question_id": "9bbe84a2",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, your previous goal mentioned was reaching **level 100** before the end of the year (mentioned in the June 16 conversation), before you later updated your goal to rea"
+    },
+    {
+      "question_id": "10e09553",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from **August 11, 2023**, you mentioned catching **7 largemouth bass** on a trip to Lake Michigan with Alex on **July 10th**."
+    },
+    {
+      "question_id": "dad224aa",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversations, two different Saturday wake-up times were mentioned:\n\n- The **previous Saturday** (relative to the May 23 conversation): **7:30 AM**\n- **Last Saturday** (also relative to t"
+    },
+    {
+      "question_id": "ba61f0b9",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from January 18, 2023, Rachel leads a team of 10 people, and **5 of them are women** (50% of the team)."
+    },
+    {
+      "question_id": "42ec0761",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "The conversation history contains no information about you having a screwdriver or any tools. I don't have enough information to answer that question."
+    },
+    {
+      "question_id": "5c40ec5b",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is no mention of you actually meeting up with Alex from Germany. In the August 11 conversation, you mentioned he was **planning to come to your city for work s"
+    },
+    {
+      "question_id": "c6853660",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history:\n\n- In the [2023/05/25] conversation, you mentioned you had **cut back to just one cup** in the morning.\n- In the [2023/05/26] conversation, you said you had **increa"
+    },
+    {
+      "question_id": "26bdc477",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you mentioned taking your Canon EOS 80D on **three trips** — to Yellowstone, Yosemite, and the Grand Canyon."
+    },
+    {
+      "question_id": "0977f2af",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, there is no mention of any kitchen gadget purchased before an Air Fryer. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "6aeb4375_abs",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, there is no mention of you trying any Italian restaurants. You mentioned trying **three Korean restaurants**, but no Italian restaurants were discussed."
+    },
+    {
+      "question_id": "031748ae_abs",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. The conversation history doesn't mention anything about you starting a new role as a Software Engineer Manager or how many engineers you lead."
+    },
+    {
+      "question_id": "2698e78f_abs",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, there is no mention of a \"Dr. Johnson.\" You see **Dr. Smith** — initially mentioned as every two weeks, but later clarified as **every week**."
+    },
+    {
+      "question_id": "2133c1b5_abs",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "The conversation history doesn't mention you living in an apartment in Shinjuku. In fact, the only mention of a Tokyo apartment is from the [2023/04/11] conversation, where you mentioned living in a *"
+    },
+    {
+      "question_id": "0ddfec37_abs",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no mention of an autographed football collection in any of the conversation history provided."
+    },
+    {
+      "question_id": "f685340e_abs",
+      "question_type": "knowledge-update",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, you play **tennis** (not table tennis) with friends at the local park. The conversations mention **weekly tennis sessions** with friends, so you play approximately *"
+    },
+    {
+      "question_id": "89941a94",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, you mentioned having a **road bike**, a mountain bike, and a commuter bike (3 bikes total). Later, you added a **hybrid bike**, bringing the total to 4 bikes. There "
+    },
+    {
+      "question_id": "07741c45",
+      "question_type": "knowledge-update",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversations, you mentioned storing your old sneakers **under your bed** (mentioned in the May 25 conversation), but you were also planning to move them to a **shoe rack in your closet**"
+    },
+    {
+      "question_id": "7161e7e2",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the shift rotation sheet created in our conversation, **Admon** was assigned to the **8 am - 4 pm (Day Shift)** on Sunday."
+    },
+    {
+      "question_id": "c4f10528",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information about a restaurant in Cihampelas Walk, Bandung that serves Nasi Goreng. This was never mentioned in any of our previous conversations."
+    },
+    {
+      "question_id": "89527b6b",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "Based on the children's book conversation, the Plesiosaur was described as having a **blue** scaly body."
+    },
+    {
+      "question_id": "e9327a54",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "Based on our conversation, the dessert spot with giant milkshakes is **The Sugar Factory**, located at Icon Park in Orlando. It offers an enormous menu of sweet treats, including specialty drinks and "
+    },
+    {
+      "question_id": "4c36ccef",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, I never recommended a romantic Italian restaurant in Rome. There is no mention of Rome or any restaurant recommendations there in any of our conversations."
+    },
+    {
+      "question_id": "6ae235be",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on our earlier conversation, the Lake Charles Refinery uses the following processes:\n\n1. **Atmospheric distillation** - the first step where crude oil is heated and separated into fractions base"
+    },
+    {
+      "question_id": "7e00a6cb",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, the hostel near the Red Light District that was recommended was the **International Budget Hostel**."
+    },
+    {
+      "question_id": "1903aded",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from May 26, 2023, the 7th item in the work from home jobs for seniors list was **Transcriptionist**."
+    },
+    {
+      "question_id": "ceb54acb",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, the four other options suggested were:\n\n1. **Sexual fixations**\n2. **Problematic sexual behaviors**\n3. **Sexual impulsivity**\n4. **Compulsive sexuality**"
+    },
+    {
+      "question_id": "f523d9fe",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "Yes, you mentioned **Doc Martin** as an example of a show that was taken down from Netflix, with only the last season remaining available."
+    },
+    {
+      "question_id": "0e5e2d1a",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, the study published in the journal *Music and Medicine* involved **38 subjects** who listened to binaural beats for 30 minutes daily for three weeks."
+    },
+    {
+      "question_id": "fea54f57",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from May 25, 2023, the song mentioned as best exemplifying the band's growth and development was **\"Evolution\"** from the Fifth Album."
+    },
+    {
+      "question_id": "cc539528",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, there was no previous conversation about front-end and back-end development. The topics discussed in the available conversation history include hip-hop danc"
+    },
+    {
+      "question_id": "dc439ea3",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from [2023/05/23], the **Hoop Dance** was described as the traditional dance performed by skilled dancers at powwows, involving intricate movements with multiple hoops."
+    },
+    {
+      "question_id": "18dcd5a5",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "The conversation history provided does not contain any discussion about a \"Lost Temple of the Djinn\" one-shot or mummies. I don't have enough information to answer that question."
+    },
+    {
+      "question_id": "488d3006",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no mention of the Natural Park of Moncayo mountain in Aragón or any hiking trail recommendations for that location in our conversation history."
+    },
+    {
+      "question_id": "58470ed2",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, Borges wrote: **\"The Library is a sphere whose exact center is any one of its hexagons and whose circumference is inaccessible.\"**"
+    },
+    {
+      "question_id": "8cf51dda",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no previous conversation in the provided history about a grant aim page on molecular subtypes and endometrial cancer. The conversations covered topics like ur"
+    },
+    {
+      "question_id": "1d4da289",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from **2023/05/23**, the two-factor authentication methods mentioned were:\n\n- **Biometric authentication** (e.g., fingerprint, facial recognition)\n- **One-time passwords (OTP"
+    },
+    {
+      "question_id": "8464fc84",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history provided, there is no mention of you visiting the Vatican or any deli near the Vatican. I don't have enough information to answer this question."
+    },
+    {
+      "question_id": "8aef76bc",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation from May 20th, the recommended sealant for the newspaper flower vase was **Mod Podge** (or another sealant) to make it water-resistant."
+    },
+    {
+      "question_id": "71a3fd6b",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from May 29th, the phone number I provided for the Speyer Tourismus Marketing GmbH was:\n\n**+49 (0) 62 32 / 14 23 - 0**"
+    },
+    {
+      "question_id": "2bf43736",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information to answer that question. Our previous conversations covered topics like Lenten devotionals, data science, mental health, musicals, and book recommendations — there was "
+    },
+    {
+      "question_id": "70b3e69b",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on our previous conversation, the Spanish-Catalan singer/songwriter mentioned who supports unity between Catalonia and Spain was **Manolo García**. He has spoken publicly about his belief that C"
+    },
+    {
+      "question_id": "8752c811",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from May 22, the 27th parameter on the list was:\n\n**27. Sound effects (e.g., ambient, diegetic, non-diegetic, etc.)**"
+    },
+    {
+      "question_id": "3249768e",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from May 23, 2023, the five recommended bottles for gin-based cocktails were:\n\n1. Sweet Vermouth\n2. Dry Vermouth\n3. Campari\n4. Elderflower Liqueur\n5. **Absinthe**"
+    },
+    {
+      "question_id": "1b9b7252",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on our previous conversation, the website that offered free guided imagery exercises like \"The Mountain Meditation\" and \"The Body Scan Meditation\" was **Mindful.org**."
+    },
+    {
+      "question_id": "1568498a",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "Based on the conversation history, after **27. Kg2 Bd5+**, White played **28. Kg3**."
+    },
+    {
+      "question_id": "6222b6eb",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "There is no previous conversation about atmospheric correction methods, remote sensing images, or the SIAC_GEE tool in the conversation history provided. I don't have enough information to answer this"
+    },
+    {
+      "question_id": "e8a79c70",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on our earlier conversation about the classic French omelette, **2-3 eggs** were listed in the ingredients. Later, when you asked specifically about a 3-egg omelette, the recipe used **3 large e"
+    },
+    {
+      "question_id": "d596882b",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "Based on our conversation from May 25th, the vegan eatery with multiple locations throughout NYC that was recommended is **By Chloe** — a popular plant-based spot offering vegan burgers, salads, pasta"
+    },
+    {
+      "question_id": "e3fc4d6e",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the article about the fusion breakthrough, the President's Chief Advisor for Science and Technology mentioned is **Dr. Arati Prabhakar**, who is also the Director of the White House Office of"
+    },
+    {
+      "question_id": "51b23612",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "There is no previous conversation about political propaganda, humor, or Soviet cartoons in the conversation history provided. I don't have enough information to answer that question."
+    },
+    {
+      "question_id": "3e321797",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "There was no previous conversation about natural remedies for dark circles under the eyes in our conversation history. This topic was never discussed, so I don't have any information about recommendin"
+    },
+    {
+      "question_id": "e982271f",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no conversation in the history where I recommended venues in Portland for indie music shows."
+    },
+    {
+      "question_id": "352ab8bd",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from **2023/05/22**, the experimental results showed an average improvement in framerate of approximately **20%** when using the Hardware-Aware Modular Training (HAMT) agent."
+    },
+    {
+      "question_id": "fca762bc",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, the app that uses mnemonics to help learners memorize words and phrases is **Memrise**."
+    },
+    {
+      "question_id": "7a8d0b71",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, the budget allocated for influencer marketing in the DHL Wellness Retreats campaign plan was **$2,000**."
+    },
+    {
+      "question_id": "a40e080f",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on our previous conversation, the two companies mentioned were:\n\n1. **Patagonia** - known for flexible work arrangements, generous parental leave, and employee wellness programs.\n2. **Southwest "
+    },
+    {
+      "question_id": "8b9d4367",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, the company that employs over 40,000 people in the rug-manufacturing industry in Chaudhary is **Jaipur Rugs**."
+    },
+    {
+      "question_id": "5809eb10",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no mention of a \"Bajimaya v Reward Homes Pty Ltd case\" or any construction of a house in any of the conversation history provided to me."
+    },
+    {
+      "question_id": "41275add",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, the Mayo Clinic video recommended was **\"How to Sit Properly at a Desk to Avoid Back Pain\"** with the link: https://www.youtube.com/watch?v=UfOvNlX9Hh0"
+    },
+    {
+      "question_id": "4388e9dd",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, Andy was wearing an untidy, stained white shirt."
+    },
+    {
+      "question_id": "4baee567",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from **2023/05/28**, the Chiefs played the Jaguars **12 times** at Arrowhead Stadium in Kansas City, winning 10 of those games."
+    },
+    {
+      "question_id": "561fabcd",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "I don't have enough information. There is no previous conversation in the provided history about a \"Radiation Amplified zombie\" or any naming discussion related to it."
+    },
+    {
+      "question_id": "b759caee",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, the UK-based designer who works with unusual gemstones is **Jessica Poole**, and her Instagram handle is **@jessica\\_poole\\_jewellery**."
+    },
+    {
+      "question_id": "ac031881",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, the designation on your jumpsuit was **\"LIV\"** (enclosed in a square), which you recognized as the Roman numeral for **54**, leading you to search for file number 54"
+    },
+    {
+      "question_id": "28bcfaac",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "Based on our previous conversation, the website recommended for free lessons and exercises on music theory was **MusicTheory.net**. It was described as offering free lessons and exercises covering top"
+    },
+    {
+      "question_id": "16c90bf4",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "Looking back through all the conversation history provided, there is no mention of a \"Seco de Cordero recipe from Ancash\" or any beer recommendation related to it. That conversation is not part of the"
+    },
+    {
+      "question_id": "c8f1aeed",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation history, the state mentioned as an example was **Pennsylvania**. Specifically, it was noted that Pennsylvania requires fracking companies to monitor groundwater quality at ne"
+    },
+    {
+      "question_id": "eaca4986",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "Looking back at the conversation, the second song (the more romantic and heart-felt version) had the following notes for the chorus:\n\n**C D E F G A B A G F E D C**\n\nNote that these were individual not"
+    },
+    {
+      "question_id": "c7cf7dfd",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "There is no conversation in the provided history about traditional Indian embroidery, tailoring techniques, or an online store selling Indian fabrics. That topic was never discussed in any of the conv"
+    },
+    {
+      "question_id": "e48988bc",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on the conversation from **2023/05/28**, the company mentioned as doing a great job with sustainability in their supply chain was **Patagonia**, the outdoor clothing and gear company. They were "
+    },
+    {
+      "question_id": "1de5cff2",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "There was no discussion about high-end fashion brands or wild rubber sourced from the Amazon rainforest in any of our previous conversations. I don't have enough information to answer that question."
+    },
+    {
+      "question_id": "65240037",
+      "question_type": "single-session-assistant",
+      "verdict": "yes",
+      "hypothesis": "Based on our previous conversation, the recommended ratio for diluting tea tree oil with a carrier oil is **1:10** (a few drops of tea tree oil to carrier oil such as coconut oil, jojoba oil, or almon"
+    },
+    {
+      "question_id": "778164c6",
+      "question_type": "single-session-assistant",
+      "verdict": "no",
+      "hypothesis": "There is no previous conversation about Caribbean dishes or a Jamaican dish with snapper and fruit in the conversation history provided. I don't have enough information to answer that question."
+    }
+  ]
+}

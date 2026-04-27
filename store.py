@@ -1,0 +1,117 @@
+"""
+store.py — Facade re-export（迭代79: Modular Kernel）
+
+OS 类比：Linux 模块化内核——arch/ 和 mm/ 是独立子系统，通过统一接口暴露给用户空间。
+这里 store_core.py = 核心 CRUD/FTS5/swap/checkpoint，
+     store_mm.py  = 内存管理子系统（kswapd/PSI/DAMON/MGLRU/OOM/cgroup/balloon/...）
+     store.py     = 向后兼容 facade，所有 `from store import xxx` 无需修改。
+
+代码量：4496 行 → store_core(1555) + store_mm(2923) + facade(~80) = 4558 行
+（core 核心路径可独立 import，减少热路径加载时间）
+"""
+# ── Core CRUD + FTS5 + Observability + Swap + Checkpoint ──
+from store_core import (  # noqa: F401
+    MEMORY_OS_DIR,
+    STORE_DB,
+    CHUNK_VERSION_FILE,
+    DMESG_INFO,
+    DMESG_WARN,
+    DMESG_DEBUG,
+    DMESG_ERR,
+    OOM_ADJ_MIN,
+    OOM_ADJ_PROTECTED,
+    OOM_ADJ_DEFAULT,
+    OOM_ADJ_PREFER,
+    OOM_ADJ_MAX,
+    open_db,
+    ensure_schema,
+    fts_search,
+    get_chunks,
+    insert_chunk,
+    bump_chunk_version,
+    read_chunk_version,
+    update_accessed,
+    insert_trace,
+    find_similar,
+    already_exists,
+    merge_similar,
+    delete_chunks,
+    get_chunk_count,
+    get_project_chunk_count,
+    evict_lowest_retention,
+    # ── 迭代104：chunk_pins — 项目级 pin（VMA per-process mlock 语义）──
+    pin_chunk,
+    unpin_chunk,
+    is_pinned,
+    get_pinned_chunks,
+    get_pinned_ids,
+    proc_stats,
+    dmesg_log,
+    dmesg_read,
+    dmesg_clear,
+    swap_out,
+    swap_in,
+    swap_fault,
+    get_swap_count,
+    gc_orphan_swap,
+    checkpoint_dump,
+    checkpoint_restore,
+    checkpoint_collect_hits,
+    chunk_recall_counts,
+    # 私有符号（测试需要直接 import）
+    _ensure_checkpoint_schema,
+    _checkpoint_cleanup,
+    # ── 迭代87：Scheduler CRUD ──
+    sched_create_task,
+    sched_update_task,
+    sched_get_tasks,
+    sched_get_task,
+    sched_delete_task,
+    sched_append_log,
+    sched_link_decision,
+    sched_dump_tasks,
+    sched_restore_tasks,
+)
+
+# ── Memory Management Subsystems ──
+from store_mm import (  # noqa: F401
+    kswapd_scan,
+    set_oom_adj,
+    get_oom_adj,
+    batch_set_oom_adj,
+    get_protected_chunks,
+    cgroup_throttle_check,
+    compact_zone,
+    madvise_write,
+    madvise_read,
+    madvise_clear,
+    watchdog_check,
+    psi_stats,
+    damon_scan,
+    mglru_aging,
+    mglru_promote,
+    mglru_stats,
+    balloon_quota,
+    readahead_pairs,
+    aimd_stats,
+    aimd_window,
+    gc_traces,
+    autotune,
+    context_pressure_governor,
+    GOV_LOW,
+    GOV_NORMAL,
+    GOV_HIGH,
+    GOV_CRITICAL,
+    # 私有符号（供测试使用）
+    _governor_load_state,
+    _governor_save_state,
+    _GOVERNOR_STATE_FILE,
+    _reclaim_stale_chunks,
+    # iter90: 补全 AIMD + madvise 私有符号（iter79 模块化后断链）
+    _AIMD_STATE_FILE,
+    _aimd_load_cwnd,
+    _aimd_save_cwnd,
+    _cwnd_to_policy,
+    _MADVISE_FILE,
+    _madvise_load,
+)

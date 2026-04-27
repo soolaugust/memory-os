@@ -1,0 +1,57 @@
+{
+  "timestamp": "2026-04-20T08:49:46.805932+00:00",
+  "scenario_a": {
+    "scenario": "A-SingleChunkRoundtrip",
+    "chunks_written": 10,
+    "chunks_recovered": 10,
+    "content_match": true,
+    "errors": [],
+    "elapsed_ms": 180.35112495999783,
+    "checkpoint_restored": true,
+    "checkpoint_chunks": 10
+  },
+  "scenario_b": {
+    "scenario": "B-CompressionRetention",
+    "original_summary_chars": 980,
+    "original_content_chars": 5840,
+    "recovered_summary_chars": 980,
+    "recovered_content_chars": 5840,
+    "total_chunks": 20,
+    "recovered_chunks": 20,
+    "summary_retention_pct": 100.0,
+    "content_retention_pct": 100.0,
+    "info_types": {
+      "decision": 5,
+      "reasoning_chain": 5,
+      "prompt_context": 5,
+      "code_snippet": 5
+    },
+    "errors": [],
+    "elapsed_ms": 12.369483010843396
+  },
+  "scenario_c": {
+    "scenario": "C-MultiCompactionLoss",
+    "rounds": 3,
+    "initial_chars": 10320,
+    "round_retention": [
+      {
+        "round": 1,
+        "chars": 10320,
+        "rate_pct": 100.0
+      },
+      {
+        "round": 2,
+        "chars": 5250,
+        "rate_pct": 50.872093023255815
+      },
+      {
+        "round": 3,
+        "chars": 5250,
+        "rate_pct": 50.872093023255815
+      }
+    ],
+    "decay_slope_pct_per_round": -24.563953488372093,
+    "errors": [],
+    "elapsed_ms": 49.83709694352001
+  }
+}

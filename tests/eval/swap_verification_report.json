@@ -1,0 +1,77 @@
+{
+  "timestamp": "2026-04-19T05:29:38.731569",
+  "files": {
+    "files_present": {
+      "store.db": true,
+      "latest.json": true,
+      "swap_errors.log": false
+    },
+    "file_sizes": {
+      "store.db": 397312,
+      "latest.json": 540
+    },
+    "swap_errors": []
+  },
+  "database": {
+    "db_exists": true,
+    "chunks_summary": {
+      "total_count": 35,
+      "distinct_projects": 2,
+      "by_type": {
+        "decision": 20,
+        "prompt_context": 7,
+        "excluded_path": 4,
+        "reasoning_chain": 3,
+        "conversation_summary": 1
+      },
+      "top_projects": {
+        "abspath:7e3095aef7a6": 31,
+        "abspath:ea65ed9a9fae": 4
+      }
+    },
+    "recall_traces_summary": {
+      "total_count": 93,
+      "distinct_sessions": 7
+    }
+  },
+  "latest_json": {
+    "file_exists": true,
+    "content": {
+      "id": "73482c92-ee92-4bc4-850e-aca3428a1aaa",
+      "created_at": "2026-04-19T05:12:34.195291+00:00",
+      "updated_at": "2026-04-19T05:12:34.195302+00:00",
+      "project": "abspath:7e3095aef7a6",
+      "source_session": "ca340c0f-e7d5-430f-9980-48981d89fd26",
+      "chunk_type": "task_state",
+      "content": "\uff08\u65e0\u6d3b\u8dc3\u4efb\u52a1\uff09",
+      "summary": "",
+      "tags": [
+        "task_state",
+        "abspath:7e3095aef7a6"
+      ],
+      "importance": 0.5,
+      "retrievability": 0.2,
+      "last_accessed": "2026-04-19T05:12:34.195306+00:00",
+      "embedding": [],
+      "feishu_url": null
+    },
+    "keys": [
+      "id",
+      "created_at",
+      "updated_at",
+      "project",
+      "source_session",
+      "chunk_type",
+      "content",
+      "summary",
+      "tags",
+      "importance",
+      "retrievability",
+      "last_accessed",
+      "embedding",
+      "feishu_url"
+    ]
+  },
+  "health_score": 100,
+  "issues": []
+}

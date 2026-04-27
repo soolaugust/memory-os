@@ -1,0 +1,86 @@
+{
+  "timestamp": "2026-04-20T08:51:44.475233+00:00",
+  "tests": {
+    "intent_prediction": {
+      "passed": true,
+      "accuracy": 0.9411764705882353,
+      "correct": 16,
+      "total": 17,
+      "wrong": [
+        {
+          "prompt": "investigate why",
+          "expected": "explore",
+          "got": "unknown",
+          "ok": false
+        }
+      ]
+    },
+    "feedback_loop": {
+      "passed": true,
+      "original_imp": 0.5,
+      "new_imp": 0.12004999999999996,
+      "oom_adj": 200,
+      "detected": 4
+    },
+    "global_layer": {
+      "passed": true,
+      "found_in_get_chunks": true,
+      "found_in_prefetch": false
+    },
+    "goal_tracking": {
+      "passed": true,
+      "detected": 2,
+      "new_goals": 0,
+      "total": 4
+    },
+    "intent_latency": {
+      "passed": true,
+      "p50_ms": 0.05,
+      "p95_ms": 0.12
+    },
+    "db_health": {
+      "passed": true,
+      "all_tables_exist": true,
+      "fts5_ok": true,
+      "tables": {
+        "memory_chunks": {
+          "ok": true,
+          "count": 197
+        },
+        "goals": {
+          "ok": true,
+          "count": 8
+        },
+        "tool_patterns": {
+          "ok": true,
+          "count": 386
+        },
+        "change_log": {
+          "ok": true,
+          "count": 0
+        },
+        "scheduler_tasks": {
+          "ok": true,
+          "count": 0
+        },
+        "recall_traces": {
+          "ok": true,
+          "count": 140
+        },
+        "checkpoints": {
+          "ok": true,
+          "count": 9
+        },
+        "dmesg": {
+          "ok": true,
+          "count": 500
+        }
+      }
+    }
+  },
+  "summary": {
+    "passed": 6,
+    "total": 6,
+    "pass_rate": 1.0
+  }
+}
