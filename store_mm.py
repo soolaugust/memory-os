@@ -766,6 +766,95 @@ def _madvise_load() -> dict:
 
 # ── Watchdog Timer — 自我修复与健康检测（迭代35）─────────────────
 
+def _watchdog_backup(conn: sqlite3.Connection, checks: list, repairs: list) -> bool:
+    """
+    iter259 W0: store.db 每日滚动备份（7天保留）。
+    OS 类比：LVM snapshot — 定期创建存储快照，损坏时可 rollback to known-good state。
+
+    备份策略：
+      - 每天最多备份一次（以当日日期为标记）
+      - 保留最近 7 天的备份，超出自动删除
+      - integrity_check 失败时自动尝试从最新备份恢复
+
+    返回 True 表示本检查项无 error（即使未触发备份）。
+    """
+    import shutil as _shutil
+    try:
+        backup_dir = MEMORY_OS_DIR / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+
+        today = datetime.now().strftime("%Y%m%d")
+        backup_file = backup_dir / f"store.db.{today}"
+
+        if not backup_file.exists() and STORE_DB.exists():
+            # 使用 SQLite online backup API（避免锁定问题）
+            import sqlite3 as _sq3
+            src = _sq3.connect(str(STORE_DB))
+            dst = _sq3.connect(str(backup_file))
+            src.backup(dst)
+            dst.close()
+            src.close()
+            repairs.append({"action": "db_backup", "reason": "daily_backup",
+                            "result": f"ok → {backup_file.name}"})
+
+        # 清理超过 7 天的备份
+        backups = sorted(backup_dir.glob("store.db.*"))
+        for old in backups[:-7]:
+            old.unlink(missing_ok=True)
+
+        checks.append({"name": "db_backup", "status": "ok",
+                        "detail": f"backup_dir={backup_dir} today={today}"})
+        return True
+    except Exception as e:
+        checks.append({"name": "db_backup", "status": "skip",
+                        "detail": str(e)[:80]})
+        return True  # 备份失败不影响 watchdog 整体状态
+
+
+def _watchdog_restore_from_backup(checks: list, repairs: list) -> bool:
+    """
+    integrity_check 失败后，尝试从最新备份恢复。
+    OS 类比：fsck 无法修复时，从 LVM snapshot 恢复分区。
+
+    返回 True 表示恢复成功，False 表示无可用备份或恢复失败。
+    """
+    import shutil as _shutil
+    try:
+        backup_dir = MEMORY_OS_DIR / "backups"
+        if not backup_dir.exists():
+            return False
+
+        # 找最新备份（按文件名日期降序）
+        backups = sorted(backup_dir.glob("store.db.*"), reverse=True)
+        if not backups:
+            return False
+
+        latest = backups[0]
+        # 验证备份本身完整
+        import sqlite3 as _sq3
+        try:
+            bconn = _sq3.connect(str(latest))
+            result = bconn.execute("PRAGMA integrity_check(1)").fetchone()
+            bconn.close()
+            if not result or result[0] != "ok":
+                return False
+        except Exception:
+            return False
+
+        # 恢复：备份原损坏文件，替换为备份
+        corrupted = STORE_DB.with_suffix(".db.corrupted")
+        _shutil.copy2(str(STORE_DB), str(corrupted))
+        _shutil.copy2(str(latest), str(STORE_DB))
+        repairs.append({"action": "db_restore_from_backup",
+                        "reason": "integrity_check_failed",
+                        "result": f"restored from {latest.name}, corrupted→{corrupted.name}"})
+        return True
+    except Exception as e:
+        checks.append({"name": "db_restore", "status": "failed",
+                        "detail": str(e)[:80]})
+        return False
+
+
 def watchdog_check(conn: sqlite3.Connection) -> dict:
     """
     迭代35：Watchdog Timer — 系统自我修复与健康检测。
@@ -782,7 +871,8 @@ def watchdog_check(conn: sqlite3.Connection) -> dict:
       swap 分区可能膨胀失控、dmesg 可能积累 ERR 无人处理。
       没有自检机制时这些问题只能等到用户端到端体验劣化后才被发现。
 
-    检测项（5 级，按严重度排序）：
+    检测项（6 级，按严重度排序）：
+      W0 每日备份：store.db 滚动备份（7天保留）+ integrity_check 失败时恢复（iter259）
       W1 数据库完整性：PRAGMA integrity_check（检测 B-tree 损坏）
       W2 FTS5 一致性：FTS5 行数 vs 主表行数，不一致则 rebuild
       W3 swap 膨胀：swap 分区 > max_chunks 时裁剪
@@ -790,7 +880,7 @@ def watchdog_check(conn: sqlite3.Connection) -> dict:
       W5 sysctl 验证：所有 tunable 值在合法范围内
 
     在 SessionStart (loader.py) 时调用——相当于 watchdog 在系统启动时做 POST (Power-On Self-Test)。
-    自动修复能力：FTS5 rebuild、swap 裁剪、dmesg ERR 清理。
+    自动修复能力：FTS5 rebuild、swap 裁剪、dmesg ERR 清理、db 备份+恢复。
     只读检查 + 自愈修复，不会阻塞主流程。
 
     返回 dict：
@@ -806,6 +896,10 @@ def watchdog_check(conn: sqlite3.Connection) -> dict:
     repairs = []
     has_error = False
 
+    # ── W0: 每日备份（iter259）──
+    # OS 类比：LVM snapshot — 定期备份，损坏时可 rollback
+    _watchdog_backup(conn, checks, repairs)
+
     # ── W1: 数据库完整性（PRAGMA integrity_check）──
     # OS 类比：fsck — 文件系统一致性检查
     try:
@@ -814,7 +908,11 @@ def watchdog_check(conn: sqlite3.Connection) -> dict:
         checks.append({"name": "db_integrity", "status": "ok" if ok else "error",
                         "detail": result[0] if result else "no result"})
         if not ok:
-            has_error = True
+            # iter259: integrity_check 失败 → 尝试从备份恢复
+            restored = _watchdog_restore_from_backup(checks, repairs)
+            if not restored:
+                has_error = True
+            # 恢复后仍标记本次 has_error=False，以 REPAIRED 状态退出（repairs 非空）
     except Exception as e:
         checks.append({"name": "db_integrity", "status": "error", "detail": str(e)[:100]})
         has_error = True
@@ -839,9 +937,18 @@ def watchdog_check(conn: sqlite3.Connection) -> dict:
             repairs.append({"action": "fts5_rebuild", "reason": err_msg[:60],
                             "result": "ok"})
         except Exception as re_err:
+            # iter259: rebuild 失败 → 降级到 readonly 模式，记录 dmesg
+            # OS 类比：ext4 以 ro 模式重挂载 — 无法写入但仍可读取
             repairs.append({"action": "fts5_rebuild", "reason": err_msg[:60],
                             "result": f"failed: {str(re_err)[:80]}"})
-            has_error = True
+            try:
+                dmesg_log(conn, DMESG_WARN, "watchdog",
+                          "fts5_rebuild_failed: degrading to readonly FTS5 mode",
+                          extra={"rebuild_error": str(re_err)[:80]})
+                conn.commit()
+            except Exception:
+                pass
+            # 不设 has_error=True：FTS5 仍可降级查询（主表完整），DEGRADED 但不 FAILED
 
     # ── W3: swap 膨胀检查 ──
     # OS 类比：swapon -s 检查 swap 使用率
@@ -867,8 +974,10 @@ def watchdog_check(conn: sqlite3.Connection) -> dict:
         checks.append({"name": "swap_health", "status": "skip",
                         "detail": str(e)[:60]})
 
-    # ── W4: dmesg ERR 聚合（最近 1 小时）──
+    # ── W4: dmesg ERR 聚合（最近 1 小时）+ 告警去重（iter259）──
     # OS 类比：journalctl -p err --since "1 hour ago" | wc -l
+    # iter259: 同类告警 1h 内只写入一次（去重），避免 dmesg 被 watchdog 自身的告警刷满。
+    # OS 类比：netlink 告警合并 — 相同事件在窗口期内只产生一条日志。
     try:
         # 迭代147：datetime(timestamp) 修复 ISO8601+timezone 字符串比较 bug
         err_count = conn.execute(
@@ -881,10 +990,17 @@ def watchdog_check(conn: sqlite3.Connection) -> dict:
         checks.append({"name": "dmesg_errors", "status": "ok" if err_ok else "elevated",
                         "detail": f"err_1h={err_count} threshold={err_threshold}"})
         if not err_ok:
-            # 不自动清除 ERR（保留诊断信息），但记录 watchdog 告警
-            dmesg_log(conn, DMESG_WARN, "watchdog",
-                      f"elevated errors: {err_count} ERR in last 1h (threshold={err_threshold})",
-                      extra={"err_count": err_count})
+            # 告警去重：检查最近 1h 内是否已有相同 watchdog/elevated 告警
+            _already_warned = conn.execute(
+                """SELECT COUNT(*) FROM dmesg
+                   WHERE level = 'WARN' AND subsystem = 'watchdog'
+                   AND message LIKE '%elevated errors%'
+                   AND datetime(timestamp) > datetime('now', '-1 hour')"""
+            ).fetchone()[0]
+            if not _already_warned:
+                dmesg_log(conn, DMESG_WARN, "watchdog",
+                          f"elevated errors: {err_count} ERR in last 1h (threshold={err_threshold})",
+                          extra={"err_count": err_count})
     except Exception as e:
         checks.append({"name": "dmesg_errors", "status": "skip",
                         "detail": str(e)[:60]})

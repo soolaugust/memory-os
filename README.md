@@ -382,18 +382,6 @@ nohup bash iterate-vm.sh >> /tmp/memory-os-vm.log 2>&1 &
 - `PROJECT_MD`：项目状态文件（可选，默认 `$HOME/self-improving/projects/memory-os.md`）
 - `WORKSPACE`：工作目录（可选，默认自动从脚本位置推导）
 
-### GitHub 同步（可选）
-
-如需同时推送到 GitHub，先一次性配置身份：
-
-```bash
-git config push-github.name  "your-github-username"
-git config push-github.email "your@gmail.com"
-
-# 之后每次同步
-bash push-github.sh
-```
-
 ---
 
 ## 依赖

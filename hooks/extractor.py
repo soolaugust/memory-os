@@ -2733,6 +2733,19 @@ def main():
     try:
         _intent = _extract_session_intent(text)
         if _intent:
+            # iter259: 记录关联 chunk IDs，用于 soft-pin
+            # 收集检索日志中最近注入的 chunk IDs（shadow_trace）
+            _intent_chunk_ids: list = []
+            try:
+                _shadow_file = MEMORY_OS_DIR / ".shadow_trace.json"
+                if _shadow_file.exists():
+                    _st = json.loads(_shadow_file.read_text(encoding="utf-8"))
+                    _stproj = _st.get("project", project)
+                    if _stproj == project:
+                        _intent_chunk_ids = _st.get("top_k_ids", [])
+            except Exception:
+                pass
+
             _intent_file = MEMORY_OS_DIR / "session_intent.json"
             _intent_file.write_text(
                 json.dumps({
@@ -2740,9 +2753,31 @@ def main():
                     "project": project,
                     "saved_at": datetime.now(timezone.utc).isoformat(),
                     "intent": _intent,
+                    "pinned_chunk_ids": _intent_chunk_ids,  # iter259: soft-pin 追踪
                 }, ensure_ascii=False, indent=2),
                 encoding="utf-8"
             )
+
+            # iter259: soft-pin 关联 chunk，防止被 kswapd 在 24h 有效期内淘汰
+            # OS 类比：mlock() — 将断点恢复所需页面锁定，确保 CRIU restore 时页面可用
+            if _intent_chunk_ids:
+                try:
+                    from store_vfs import pin_chunk as _pin_chunk
+                    _pin_conn = open_db()
+                    ensure_schema(_pin_conn)
+                    _pinned = 0
+                    for _cid in _intent_chunk_ids:
+                        if _pin_chunk(_pin_conn, _cid, project, pin_type="soft"):
+                            _pinned += 1
+                    if _pinned:
+                        _pin_conn.commit()
+                        dmesg_log(_pin_conn, DMESG_DEBUG, "extractor",
+                                  f"intent_soft_pin: pinned {_pinned} chunks for 24h (CRIU intent restore)",
+                                  session_id=session_id, project=project)
+                        _pin_conn.commit()
+                    _pin_conn.close()
+                except Exception:
+                    pass  # soft-pin 失败不影响 intent 保存
     except Exception:
         pass  # Intent 保存失败不影响主流程
 

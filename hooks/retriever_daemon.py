@@ -1781,6 +1781,12 @@ def _handle_connection(conn_sock: socket.socket):
             conn_sock.sendall(b'{"error":"invalid_json"}\n')
             return
 
+        # iter259: heartbeat ping — 快速响应 pong，用于 wrapper 存活探针
+        # OS 类比：systemd watchdog notify — 进程证明自己仍在响应
+        if hook_input.get("ping"):
+            conn_sock.sendall(b'{"pong":1}\n')
+            return
+
         # 运行检索逻辑，捕获 stdout 输出
         # iter215: use module-level _io ref instead of per-request 'import io' (~0.2us saved)
         old_stdout = sys.stdout

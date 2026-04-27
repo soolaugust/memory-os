@@ -69,6 +69,8 @@ def checkpoint_dump(conn: sqlite3.Connection, project: str, session_id: str,
 
     # iter89: 内联快照 — dump 时保存完整 content + summary，防止 kswapd 淘汰后丢失
     # 修复：之前只存 summary 导致 content retention=13.9%，现在同时保存 content
+    # iter259: 保存 content_hash，用于 restore 时版本校验（防止 stale snapshot 注入）
+    import hashlib as _hashlib
     placeholders = ",".join("?" * len(unique_ids))
     snapshot_rows = conn.execute(f"""
         SELECT id, chunk_type, content, summary, importance
@@ -82,6 +84,8 @@ def checkpoint_dump(conn: sqlite3.Connection, project: str, session_id: str,
             "content": r[2] or "",
             "summary": r[3] or "",
             "importance": r[4] or 0.5,
+            # iter259: content hash 用于 restore 时版本校验
+            "content_hash": _hashlib.md5((r[2] or "").encode()).hexdigest()[:8],
         }
         for r in snapshot_rows
     ]
@@ -193,13 +197,23 @@ def checkpoint_restore(conn: sqlite3.Connection, project: str) -> Optional[dict]
         })
 
     # iter89: Snapshot Fallback — 被淘汰的 chunk 从内联快照恢复（含 content）
+    # iter259: 版本校验 — live chunk 与 snapshot content_hash 不一致时标记 _stale=True
+    # OS 类比：CRIU restore 时检查 ELF 文件 checksum — 若二进制已更新则放弃旧快照
     if snapshots_json:
+        import hashlib as _hashlib
         try:
             snapshots = json.loads(snapshots_json)
+            # 构建 live chunk content hash 映射（用于版本校验）
+            live_hash = {}
+            for c in chunks:
+                live_hash[c["id"]] = _hashlib.md5(c.get("content", "").encode()).hexdigest()[:8]
+
             for snap in snapshots:
-                if snap.get("id") not in live_ids:
+                snap_id = snap.get("id")
+                if snap_id not in live_ids:
+                    # chunk 已被淘汰，从快照恢复
                     chunks.append({
-                        "id": snap["id"],
+                        "id": snap_id,
                         "chunk_type": snap.get("chunk_type", "decision"),
                         "content": snap.get("content", ""),
                         "summary": snap.get("summary", ""),
@@ -207,6 +221,16 @@ def checkpoint_restore(conn: sqlite3.Connection, project: str) -> Optional[dict]
                         "last_accessed": "",
                         "_from_snapshot": True,
                     })
+                else:
+                    # iter259: live chunk 版本校验 — 比较 content_hash
+                    snap_hash = snap.get("content_hash")
+                    if snap_hash and live_hash.get(snap_id) != snap_hash:
+                        # content 已更新（chunk 被修改），标记为 stale
+                        # loader 可据此决定是否优先使用 live 版本
+                        for c in chunks:
+                            if c["id"] == snap_id:
+                                c["_snapshot_stale"] = True
+                                break
         except (json.JSONDecodeError, TypeError):
             pass
 
