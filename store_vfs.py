@@ -8111,6 +8111,27 @@ def decay_stability_by_type(
     return total_decayed
 
 
+# ── iter435: Recency-Induced Decay Resistance (RDR) — 近期访问记忆的巩固窗口保护（McGaugh 2000）──
+# 认知科学依据：McGaugh (2000) "Memory — a century of consolidation" —
+#   记忆形成后进入 consolidation window（数分钟至数小时），海马体持续重放记忆痕迹，
+#   这期间记忆对遗忘干扰的抵抗力最强（retrograde amnesia gradient 的基础）。
+#   Müller & Pilzecker (1900) perseveration-consolidation hypothesis：
+#     记忆痕迹需要时间"硬化"（consolidate），窗口期内应保护而非加速衰减。
+#   Baddeley & Hitch (1974) Working Memory — phonological loop 维持近期信息的活跃表示，
+#     防止立即遗忘，为长期记忆转移提供缓冲。
+#
+# memory-os 等价：
+#   decay_stability_by_type 扫描时，last_accessed < 6h 且 importance >= 0.5 的 chunk
+#   正处于 consolidation window，跳过本次衰减（等下次扫描时已过窗口再参与）。
+#   效果：近期被检索的重要 chunk 额外获得 6 小时的衰减豁免期，
+#   模拟海马体对刚访问记忆的主动保护机制。
+#
+# OS 类比：Linux MGLRU young generation minimum age (min_lru_age) —
+#   刚被提升到 young generation 的页面有最短存活期，kswapd 在此期间不执行 aging，
+#   避免"刚提升就被驱逐"的 LRU thrashing。等价于：
+#   最近 access 的 chunk（young generation）在 rdr_window_hours 内不参与 stability decay。
+# 实现：在 decay_stability_by_type 中追加 WHERE NOT (last_accessed > rdr_cutoff AND importance >= min_imp)
+
 # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
 # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
 #   检索某条记忆（practiced item）主动抑制同类别相关但未被检索的记忆（unpracticed items）。
@@ -8225,13 +8246,32 @@ def apply_rif_by_summary(
         if chunk_type in protect_types:
             continue
 
+        # ── iter435: RDR — 计算近期访问保护截止时间（巩固窗口） ──
+        # 近期访问的重要 chunk 正处于 McGaugh consolidation window，豁免 RIF 抑制
+        try:
+            _rdr_enabled_rif = _cfg_mod.get("store_vfs.rdr_enabled")
+            if _rdr_enabled_rif:
+                _rdr_wh = _cfg_mod.get("store_vfs.rdr_window_hours")
+                _rdr_min_imp_rif = _cfg_mod.get("store_vfs.rdr_min_importance")
+                from datetime import timedelta as _td_rdr
+                _rdr_cutoff_rif = (datetime.now(timezone.utc) - _td_rdr(hours=_rdr_wh)).isoformat()
+                _rdr_excl = (
+                    f"AND NOT (last_accessed > '{_rdr_cutoff_rif}' "
+                    f"AND COALESCE(importance, 0.0) >= {_rdr_min_imp_rif})"
+                )
+            else:
+                _rdr_excl = ""
+        except Exception:
+            _rdr_excl = ""
+
         # 查询同类型的非命中 chunk
         competitors = conn.execute(
-            """SELECT id, summary, COALESCE(stability, 1.0), importance
+            f"""SELECT id, summary, COALESCE(stability, 1.0), importance
                FROM memory_chunks
                WHERE project = ? AND chunk_type = ?
                  AND COALESCE(importance, 0.5) < ?
                  AND COALESCE(oom_adj, 0) > -1000
+                 {_rdr_excl}
                ORDER BY stability ASC""",
             (project, chunk_type, protect_imp),
         ).fetchall()

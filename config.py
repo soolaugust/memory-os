@@ -205,6 +205,32 @@ _REGISTRY: dict = {
     "store_vfs.bump_min_project_age_days": (7.0, float, 1.0, 90.0, None,
         "iter433: 应用 Reminiscence Bump 的最短项目年龄（天），项目太新时禁用（避免误判）"),
 
+    # ── iter435: Recency-Induced Decay Resistance — 近期访问记忆的衰减保护窗口（McGaugh 2000）──
+    # 认知科学依据：McGaugh (2000) "Memory — a century of consolidation" (Science 287) —
+    #   记忆巩固需要时间：学习后数分钟到数小时内，海马体持续重放，将工作记忆转移到新皮层。
+    #   在巩固窗口内（post-learning consolidation window），记忆对干扰的抵抗力更强。
+    #   Müller & Pilzecker (1900) — perseveration 理论：记忆痕迹形成后有一段"硬化"期，
+    #   该期内的干扰（如 electroconvulsive shock）可打断巩固；但正常干扰无法破坏已过窗口的记忆。
+    #   Baddeley & Hitch (1974) Working Memory Model — 工作记忆的 phonological loop 和
+    #   visuospatial sketchpad 维持近期信息的活跃表示，防止短期遗忘。
+    #
+    # memory-os 等价：
+    #   decay_stability_by_type 运行时，last_accessed 在近期窗口内的 chunk 正处于海马巩固阶段，
+    #   应跳过本次衰减（或应用更弱的衰减），等待巩固完成后再参与正常遗忘曲线。
+    #   窗口期结束后恢复正常衰减率。
+    #
+    # OS 类比：Linux MGLRU young generation minimum age (min_lru_age) —
+    #   刚被访问/提升到 young generation 的页面有一个最短存活期（grace period），
+    #   在此期间 kswapd 不会 age 该页面（避免频繁 access 导致 LRU 抖动）。
+    #   memory-os: recently-accessed chunks get a decay grace period —
+    #   在 min_lru_age（recency_window_hours）内不参与 stability 衰减。
+    "store_vfs.rdr_enabled": (True, bool, None, None, None,
+        "iter435: 是否启用 Recency-Induced Decay Resistance — 近期访问的 chunk 在巩固窗口内跳过衰减"),
+    "store_vfs.rdr_window_hours": (6.0, float, 0.5, 48.0, None,
+        "iter435: 巩固保护窗口时长（小时）：last_accessed 在此窗口内的 chunk 跳过 decay_stability_by_type"),
+    "store_vfs.rdr_min_importance": (0.5, float, 0.0, 1.0, None,
+        "iter435: 触发 RDR 保护的最低 importance 阈值（低重要性 chunk 不受保护，避免噪音积累）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。

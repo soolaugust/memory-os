@@ -53,17 +53,25 @@ def _now_iso():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+def _ago_iso(hours: float = 0.0) -> str:
+    return (datetime.datetime.now(datetime.timezone.utc) -
+            datetime.timedelta(hours=hours)).isoformat()
+
+
 def _insert(conn, cid, chunk_type="decision", project="test",
             stability=5.0, importance=0.6,
-            summary="python async await concurrent programming code"):
+            summary="python async await concurrent programming code",
+            last_accessed_hours_ago: float = 48.0):
+    """Insert a chunk with last_accessed defaulting to 48h ago (outside RDR 6h window)."""
     now = _now_iso()
+    last_acc = _ago_iso(hours=last_accessed_hours_ago)
     conn.execute(
         """INSERT OR REPLACE INTO memory_chunks
            (id, project, chunk_type, content, summary, importance, stability,
             created_at, updated_at, retrievability, last_accessed, access_count)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0.9, ?, 1)""",
         (cid, project, chunk_type, f"content {cid}", summary,
-         importance, stability, now, now, now)
+         importance, stability, now, now, last_acc)
     )
     conn.commit()
 
