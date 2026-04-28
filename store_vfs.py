@@ -7184,6 +7184,14 @@ def sleep_consolidate(
     except Exception:
         pass
 
+    # ── 子操作 11（iter442）：Schema-Consistent Consolidation — 图式一致性新知识快速巩固 ──
+    # OS 类比：Linux readahead pattern detection — 顺序模式匹配 → 预取窗口扩大 → 更快 I/O
+    try:
+        scc_result = apply_schema_consistent_consolidation(conn, project)
+        result["scc_schema_consolidated"] = scc_result.get("schema_consolidated", 0)
+    except Exception:
+        pass
+
     return result
 
 
@@ -9097,6 +9105,148 @@ def apply_emotional_consolidation(
         conn.commit()
 
     return {"consolidated": consolidated, "total_examined": total_examined}
+
+
+# ── iter442: Schema-Consistent Consolidation — 图式一致性记忆的额外巩固（Bartlett 1932 / Tse 2007）──
+# 认知科学依据：Tse et al. (2007) Science "Schemas and memory consolidation" —
+#   已有丰富图式后，新知识 1 天内完成系统巩固（vs 无图式时需 3 天）。
+#   Bartlett (1932) Schema Theory：图式一致的信息被快速整合，获得额外巩固强化。
+# OS 类比：Linux readahead pattern detection — 顺序访问模式匹配 → 预取窗口扩大 → 更快完成 I/O。
+
+def apply_schema_consistent_consolidation(
+    conn: sqlite3.Connection,
+    project: str,
+) -> dict:
+    """
+    iter442: Schema-Consistent Consolidation — 与项目核心图式高度重叠的近期 chunk 获得额外巩固加成。
+
+    步骤：
+    1. 识别图式核（schema cores）：access_count >= scc_schema_min_access + importance >= scc_schema_min_importance
+    2. 对近期写入（created_at >= now - scc_window_days）的 chunk：
+       计算其 encode_context 与所有图式核的最大 entity 重叠数；
+       若重叠 >= scc_min_overlap → 给予 stability 加成。
+    3. new_stab = min(365.0, stab × (1 + scc_bonus × 0.04))
+
+    区别于 iter440（PF）：
+      PF = stale 旧 chunk 被锚定（老知识保护）
+      SCC = 近期新 chunk 嵌入图式（新知识快速系统巩固）
+    """
+    try:
+        import config as _cfg_scc
+    except ImportError:
+        return {"schema_consolidated": 0, "total_examined": 0}
+
+    try:
+        if not _cfg_scc.get("store_vfs.scc_enabled"):
+            return {"schema_consolidated": 0, "total_examined": 0}
+        scc_schema_min_access = _cfg_scc.get("store_vfs.scc_schema_min_access")
+        scc_schema_min_imp = _cfg_scc.get("store_vfs.scc_schema_min_importance")
+        scc_min_overlap = _cfg_scc.get("store_vfs.scc_min_overlap")
+        scc_window_days = _cfg_scc.get("store_vfs.scc_window_days")
+        scc_bonus = _cfg_scc.get("store_vfs.scc_bonus")
+    except Exception:
+        return {"schema_consolidated": 0, "total_examined": 0}
+
+    scc_multiplier = 1.0 + scc_bonus * 0.04  # 0.15 × 0.04 = 0.006 ≈ 0.6% 加成
+
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    now = _dt.now(_tz.utc)
+    now_iso = now.isoformat()
+
+    # ── Step 1: 构建图式核 entity 集合列表 ──
+    cutoff_window = (now - _td(days=scc_window_days)).isoformat()
+
+    try:
+        schema_rows = conn.execute(
+            """SELECT encode_context FROM memory_chunks
+               WHERE project = ?
+                 AND COALESCE(access_count, 0) >= ?
+                 AND COALESCE(importance, 0.0) >= ?
+                 AND COALESCE(encode_context, '') != ''""",
+            (project, scc_schema_min_access, scc_schema_min_imp),
+        ).fetchall()
+    except Exception:
+        return {"schema_consolidated": 0, "total_examined": 0}
+
+    if not schema_rows:
+        return {"schema_consolidated": 0, "total_examined": 0}
+
+    schema_entity_sets = []
+    for sr in schema_rows:
+        try:
+            ec = sr[0] if isinstance(sr, (list, tuple)) else sr["encode_context"]
+            if ec and ec.strip():
+                eset = frozenset(e.strip().lower() for e in ec.split(",") if e.strip())
+                if eset:
+                    schema_entity_sets.append(eset)
+        except Exception:
+            continue
+
+    if not schema_entity_sets:
+        return {"schema_consolidated": 0, "total_examined": 0}
+
+    # ── Step 2: 近期写入的 chunk（创建时间 >= now - scc_window_days）──
+    try:
+        rows = conn.execute(
+            """SELECT id, stability, encode_context FROM memory_chunks
+               WHERE project = ?
+                 AND created_at >= ?
+                 AND COALESCE(encode_context, '') != ''
+                 AND COALESCE(stability, 0.1) > 0.1
+               LIMIT 500""",
+            (project, cutoff_window),
+        ).fetchall()
+    except Exception:
+        return {"schema_consolidated": 0, "total_examined": 0}
+
+    total_examined = len(rows)
+    schema_consolidated = 0
+
+    for row in rows:
+        try:
+            cid = row[0] if isinstance(row, (list, tuple)) else row["id"]
+            stab = row[1] if isinstance(row, (list, tuple)) else row["stability"]
+            ec = row[2] if isinstance(row, (list, tuple)) else row["encode_context"]
+
+            stab_f = float(stab or 0.1)
+            if stab_f <= 0.1:
+                continue
+
+            if not ec or not ec.strip():
+                continue
+
+            cand_entities = frozenset(e.strip().lower() for e in ec.split(",") if e.strip())
+            if not cand_entities:
+                continue
+
+            # 检查与任何图式核的重叠
+            max_overlap = 0
+            for schema_set in schema_entity_sets:
+                overlap = len(cand_entities & schema_set)
+                if overlap > max_overlap:
+                    max_overlap = overlap
+                if max_overlap >= scc_min_overlap:
+                    break  # 已找到足够重叠，无需继续
+
+            if max_overlap < scc_min_overlap:
+                continue
+
+            new_stab = min(365.0, stab_f * scc_multiplier)
+            if new_stab <= stab_f + 0.0001:
+                continue
+
+            conn.execute(
+                "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=?",
+                (round(new_stab, 4), now_iso, cid),
+            )
+            schema_consolidated += 1
+        except Exception:
+            continue
+
+    if schema_consolidated > 0:
+        conn.commit()
+
+    return {"schema_consolidated": schema_consolidated, "total_examined": total_examined}
 
 
 # ── iter432: Cumulative Interference Effect — 累积干扰加速遗忘（Underwood 1957）──

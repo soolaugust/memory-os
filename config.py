@@ -416,6 +416,50 @@ _REGISTRY: dict = {
     "store_vfs.ec_min_importance": (0.40, float, 0.0, 1.0, None,
         "iter441: 触发 Emotional Consolidation 的最低 importance 阈值（低重要性情绪 chunk 不受保护）"),
 
+    # ── iter442: Schema-Consistent Consolidation — 图式一致性记忆的额外巩固（Bartlett 1932 / Tse 2007）──
+    # 认知科学依据：
+    #   Bartlett (1932) "Remembering: A Study in Experimental and Social Psychology" —
+    #     记忆不是精确录像，而是根据已有"图式"（schema）重构的。与已有图式高度一致的新信息
+    #     被更快、更完整地整合（assimilation），在睡眠巩固期能"嵌入"已有图式结构而获得额外强化。
+    #   Tse et al. (2007) Science "Schemas and memory consolidation" —
+    #     已有丰富图式（schema）后，新的关联记忆可以在 1 天内（而非 3 天）完成系统巩固（rapid schema assimilation）。
+    #     实验：大鼠在已有丰富 flavor-place 图式后，新 pair 1天即完成海马→新皮层转移（而非 3天）。
+    #     意义：图式的存在大幅缩短了系统巩固时间，类似于预置的"知识框架"加速新信息整合。
+    #   McClelland et al. (1995) Complementary Learning Systems —
+    #     海马快速编码（episodic）+ 新皮层慢速图式整合（semantic）；图式越强，新皮层整合越快。
+    #     图式一致性 → 跳过海马中间步骤 → 直接写入新皮层（快速系统巩固）。
+    #
+    # memory-os 等价：
+    #   sleep_consolidate 时，若 chunk 的 encode_context 与项目的"图式核"
+    #   （schema_cores：access_count >= scc_schema_min_access + importance >= scc_schema_min_importance）
+    #   有足够 entity 重叠（>= scc_min_overlap），说明该 chunk 已嵌入项目核心知识图式，
+    #   给予额外 stability 加成：new_stab = stab × (1 + scc_bonus × 0.04)
+    #   适用于近期写入的 chunk（created_at >= now - scc_window_days，代表"新信息"），
+    #   而非 stale chunk（PF 已覆盖老 chunk 的锚定）。
+    #
+    # 与 iter440（PF）的区别：
+    #   PF：stale 候选被强邻居（access_count>=2，importance>=0.75）锚定 → 减慢衰减
+    #   SCC：近期新 chunk 嵌入核心图式（access_count>=5，importance>=0.80）→ 加速系统巩固
+    #   触发条件不同：PF=旧知识保护；SCC=新知识快速整合（Tse 2007 的快速图式同化）
+    #
+    # OS 类比：Linux page cache readahead pattern — sequential prefetch window 扩展
+    #   顺序访问模式（与已有 I/O 模式 = 图式 一致）的 page，内核 readahead 算法将预取窗口扩大
+    #   （ra->size 增加），因为"符合模式"降低了预取代价（等价于快速系统巩固降低了整合代价）。
+    #   SCC：encode_context 与 schema core 高度重叠 = 符合访问模式 = readahead 窗口扩大 = 更快巩固。
+    "store_vfs.scc_enabled": (True, bool, None, None, None,
+        "iter442: 是否启用 Schema-Consistent Consolidation — 与图式核高度重叠的近期 chunk 获得额外巩固加成"),
+    "store_vfs.scc_schema_min_access": (5, int, 2, 50, None,
+        "iter442: 图式核的最低 access_count（>= 此值才视为'已稳固'的核心图式，默认 5）"),
+    "store_vfs.scc_schema_min_importance": (0.80, float, 0.5, 1.0, None,
+        "iter442: 图式核的最低 importance 阈值（默认 0.80，比 PF 锚点 0.75 更严格）"),
+    "store_vfs.scc_min_overlap": (3, int, 1, 10, None,
+        "iter442: 触发 SCC 保护所需的最小 encode_context entity 重叠数（默认 3）"),
+    "store_vfs.scc_window_days": (7.0, float, 1.0, 30.0, None,
+        "iter442: 近期 chunk 时间窗口（天）：只对 created_at >= now - window_days 的 chunk 应用 SCC，"
+        "代表'刚写入的新知识'（默认 7 天）"),
+    "store_vfs.scc_bonus": (0.15, float, 0.0, 0.50, None,
+        "iter442: SCC stability 加成系数（new_stab = stab × (1 + scc_bonus × 0.04)，默认 0.15 → 0.6% 加成）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。
