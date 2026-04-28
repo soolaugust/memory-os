@@ -366,6 +366,26 @@ _REGISTRY: dict = {
     "store_vfs.df_penalty_cap": (0.15, float, 0.0, 0.50, None,
         "iter418: Directed Forgetting stability 惩罚上限（从 base 减去 base × 此系数，默认 0.15）"),
 
+    # ── iter421: Retroactive Interference — 新学习干扰旧记忆回忆 ─────────────────────────
+    # 认知科学依据：McGeoch (1932) Interference Theory; Barnes & Underwood (1959) —
+    #   新学习的信息（新 chunk）干扰对旧相关信息的回忆（retroactive interference）。
+    #   RI 与 PI（iter408）互补：PI=旧→新，RI=新→旧。
+    #   Anderson & Green (2001): 主动抑制相似记忆是 RI 的神经机制。
+    # 应用：insert_chunk 时，对同项目中 encode_context 高度重叠的低 importance 旧 chunk
+    #   施加轻微 stability 衰减（× ri_decay_factor=0.98），模拟新记忆干扰旧记忆。
+    #   高重要性（>= ri_protect_importance=0.85）的 chunk 免疫 RI。
+    # OS 类比：TLB shootdown — 新 VA→PA 映射建立时，发送 IPI 使其他核的旧 TLB 条目失效。
+    "store_vfs.ri_enabled": (True, bool, None, None, None,
+        "是否启用 iter421 Retroactive Interference：新 chunk 写入时对语义邻居旧 chunk 施加轻微 stability 衰减"),
+    "store_vfs.ri_min_overlap": (2, int, 1, 10, None,
+        "iter421: 触发 RI 的最小 encode_context token 重叠数（默认 2）"),
+    "store_vfs.ri_decay_factor": (0.98, float, 0.90, 1.00, None,
+        "iter421: RI stability 衰减因子（旧 chunk stability × 此值，默认 0.98，轻微 2% 衰减）"),
+    "store_vfs.ri_max_targets": (3, int, 1, 10, None,
+        "iter421: 每次 insert_chunk 最多影响的旧 chunk 数量（按重叠度降序取前 N）"),
+    "store_vfs.ri_protect_importance": (0.85, float, 0.5, 1.0, None,
+        "iter421: importance >= 此值的 chunk 免疫 RI（高重要性核心知识受保护）"),
+
     # ── iter420: Spacing Effect — 分布式练习的记忆优势（间隔效应）────────────────────────
     # 认知科学依据：Ebbinghaus (1885) Spacing Effect; Cepeda et al. (2006) Review (300+ studies) —
     #   分布式练习（相同次数的学习，分散在多个时间间隔）比集中练习产生更强的长时记忆保留。

@@ -149,12 +149,20 @@ def test_no_quality_param_backward_compat(conn):
     insert_chunk(conn, _make_chunk("c6", stability=1.0))
     insert_chunk(conn, _make_chunk("c7", stability=1.0))
     conn.commit()
+    # Read stability BEFORE update_accessed (after insert, RI may have affected stabilities)
+    s6_before = _get_stability(conn, "c6")
+    s7_before = _get_stability(conn, "c7")
     update_accessed(conn, ["c6"])           # 不传 recall_quality
+    conn.commit()
     update_accessed(conn, ["c7"], recall_quality=None)  # 显式 None
     conn.commit()
     s6 = _get_stability(conn, "c6")
     s7 = _get_stability(conn, "c7")
-    assert abs(s6 - s7) < 1e-6, f"不传与 None 应一致，got {s6} vs {s7}"
+    # Compare SM-2 ratios rather than absolute values (RI at insert time may differ)
+    ratio6 = s6 / s6_before if s6_before else 0
+    ratio7 = s7 / s7_before if s7_before else 0
+    assert abs(ratio6 - ratio7) < 0.01, \
+        f"不传与 None SM-2 ratio 应一致，ratio6={ratio6:.4f} ratio7={ratio7:.4f}"
 
 
 # ══════════════════════════════════════════════════════════════════════

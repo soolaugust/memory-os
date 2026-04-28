@@ -1908,6 +1908,17 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
     except Exception:
         pass  # associative memory 写入失败不阻塞主流程
 
+    # iter421: Retroactive Interference — 新知识干扰旧相关 chunk 的稳定性（McGeoch 1932）
+    try:
+        _ri_project = d.get("project", "")
+        _ri_base_stability = d.get("stability", 1.0)
+        if _ri_project:
+            apply_retroactive_interference(
+                conn, d["id"], _ri_project, base_stability=_ri_base_stability
+            )
+    except Exception:
+        pass  # retroactive interference 写入失败不阻塞主流程
+
     # iter415: store original encode_context token count for variability tracking
     # This count is used by apply_encoding_variability at access time to measure enrichment
     try:
@@ -4026,6 +4037,98 @@ def apply_associative_memory_bonus(
         return new_stability
     except Exception:
         return base_stability
+
+
+# ── iter421: Retroactive Interference — 新学习干扰旧记忆回忆 ────────────────────
+# 认知科学依据：McGeoch (1932) Interference Theory; Barnes & Underwood (1959) —
+#   新学习的信息（新 chunk）干扰对旧相关信息（高重叠旧 chunk）的回忆。
+#   RI 与 PI（iter408）互补：PI = 旧→新，RI = 新→旧。
+#   McGeoch: 遗忘的主因是相似记忆的竞争性干扰，而非 Ebbinghaus 的被动衰减。
+#   Anderson & Green (2001): 主动抑制相似记忆是 RI 的神经机制。
+# 应用：insert_chunk 时，对同项目中 encode_context 高度重叠的低importance旧 chunk
+#   施加轻微 stability 衰减（× ri_decay_factor=0.98），模拟新记忆干扰旧记忆。
+#   高重要性（importance >= ri_protect_importance=0.85）的 chunk 免疫 RI（核心知识受保护）。
+# OS 类比：TLB shootdown (inter-processor interrupt) —
+#   当一个核建立新的 VA→PA 映射时，发送 IPI 使其他所有核的相同 VA TLB 条目失效。
+#   新 chunk 写入 = 新映射建立 = 旧相关 chunk（旧 VA 条目）需要被"失效"（stability 降低）。
+
+def apply_retroactive_interference(
+    conn: sqlite3.Connection,
+    new_chunk_id: str,
+    project: str,
+    base_stability: float = 1.0,
+) -> int:
+    """
+    iter421: 写入新 chunk 后，对同项目中 encode_context 高重叠的旧 chunk 施加轻微 stability 衰减。
+
+    在 insert_chunk 管线中调用（Associative Memory 之后）。
+
+    Returns:
+      int — 被干扰的 chunk 数量
+    """
+    if not new_chunk_id or not project:
+        return 0
+    import config as _config
+    if not _config.get("store_vfs.ri_enabled"):
+        return 0
+    try:
+        min_overlap = _config.get("store_vfs.ri_min_overlap")
+        decay_factor = _config.get("store_vfs.ri_decay_factor")
+        max_targets = _config.get("store_vfs.ri_max_targets")
+        protect_imp = _config.get("store_vfs.ri_protect_importance")
+
+        if decay_factor >= 1.0:
+            return 0  # no-op
+
+        # Get new chunk's encode_context tokens
+        new_row = conn.execute(
+            "SELECT encode_context FROM memory_chunks WHERE id=?",
+            (new_chunk_id,)
+        ).fetchone()
+        if not new_row:
+            return 0
+        new_ec = new_row[0] if isinstance(new_row, (list, tuple)) else new_row["encode_context"]
+        new_tokens = frozenset(t.strip() for t in (new_ec or "").split(",") if t.strip())
+        if not new_tokens:
+            return 0
+
+        # Find existing chunks in same project (not self, not high-importance anchors)
+        candidates = conn.execute(
+            "SELECT id, encode_context, stability FROM memory_chunks "
+            "WHERE project=? AND id!=? AND importance < ? AND encode_context IS NOT NULL",
+            (project, new_chunk_id, protect_imp)
+        ).fetchall()
+
+        # Compute overlap for each candidate
+        overlapping = []
+        for cand in candidates:
+            c_id = cand[0] if isinstance(cand, (list, tuple)) else cand["id"]
+            c_ec = cand[1] if isinstance(cand, (list, tuple)) else cand["encode_context"]
+            c_stab = float(cand[2] if isinstance(cand, (list, tuple)) else cand["stability"]) or 1.0
+            c_tokens = frozenset(t.strip() for t in (c_ec or "").split(",") if t.strip())
+            overlap = len(new_tokens & c_tokens)
+            if overlap >= min_overlap:
+                overlapping.append((c_id, c_stab, overlap))
+
+        if not overlapping:
+            return 0
+
+        # Sort by overlap descending, take top max_targets
+        overlapping.sort(key=lambda x: x[2], reverse=True)
+        overlapping = overlapping[:max_targets]
+
+        inhibited = 0
+        for c_id, c_stab, _ in overlapping:
+            new_stab = max(0.1, c_stab * decay_factor)
+            if abs(new_stab - c_stab) > 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?",
+                    (new_stab, c_id)
+                )
+                inhibited += 1
+        return inhibited
+    except Exception:
+        return 0
 
 
 # ── iter413: Sleep Consolidation — 离线记忆巩固（Stickgold 2005）───────────────
