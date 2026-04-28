@@ -319,6 +319,40 @@ _REGISTRY: dict = {
     "store_vfs.encoding_variability_scale": (0.05, float, 0.0, 0.20, None,
         "iter415: 每个新增 encode_context token 的 stability 加成系数（默认 0.05，上限 base × 0.15）"),
 
+    # ── iter416: Zeigarnik Effect — 未完成任务的记忆优势 ──────────────────────────────
+    # 认知科学依据：Zeigarnik (1927) — 未完成任务比已完成任务被记忆得更好（+90% recall superiority）。
+    #   Lewin (1935) Tension System Theory — 未完成任务在认知系统中维持"心理张力"，
+    #   保持记忆激活直到任务完成（类比未释放的 futex 锁）。
+    #   Ovsiankina (1928) — 被中断的任务在有机会时自发恢复（resumption tendency）。
+    # 应用：chunk 内容含 TODO/FIXME/pending/unresolved 信号词 → 代表"未完成"认知任务，
+    #   给予 stability 加成，防止被 kswapd 过早驱逐（这些信息最需要在下次会话中恢复）。
+    # OS 类比：Linux futex waitqueue / O_SYNC dirty page —
+    #   待处理的 I/O 请求保留在内核等待队列，不被 swapd 驱逐；
+    #   未完成写入的 dirty page 被 writeback 守护进程跟踪，优先处理。
+    "store_vfs.zeigarnik_enabled": (True, bool, None, None, None,
+        "是否启用 iter416 Zeigarnik Effect：含未完成任务信号词的 chunk 获得 stability 加成"),
+    "store_vfs.zeigarnik_bonus_cap": (0.20, float, 0.0, 0.50, None,
+        "iter416: Zeigarnik Effect stability 加成上限（作为 base × 此系数，默认 0.20）"),
+
+    # ── iter417: Retrieval-Induced Forgetting — 检索引发的竞争性抑制 ─────────────────
+    # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
+    #   检索一个记忆时，与之竞争的语义邻居记忆受到主动抑制（inhibitory tagging）。
+    #   抑制强度与语义相似度正相关（高相似 = 强竞争 = 更多抑制）。
+    #   MacLeod et al. (2003): RIF 是真实的记忆抑制（non-retrieval 控制组无此效应）。
+    # 应用：update_accessed 时，对语义邻居（高 encode_context token 重叠但未被检索）
+    #   应用轻微 stability 衰减，模拟竞争性抑制，促进检索多样性。
+    # OS 类比：MESI 缓存一致性协议 —
+    #   一个核写入 cache line（Modified状态）→ 其他核的相同 cache line 被 Invalidated；
+    #   一个 chunk 被"激活"→ 其语义竞争者的局部性降低（类比 cache invalidation）。
+    "store_vfs.rif_enabled": (True, bool, None, None, None,
+        "是否启用 iter417 Retrieval-Induced Forgetting：检索时对语义竞争者施加轻微 stability 衰减"),
+    "store_vfs.rif_decay_factor": (0.99, float, 0.90, 1.00, None,
+        "iter417: RIF stability 衰减因子（neighbor stability × 此值），默认 0.99（轻微 1% 衰减）"),
+    "store_vfs.rif_min_overlap": (2, int, 1, 10, None,
+        "iter417: 触发 RIF 所需的最小 encode_context token 重叠数（2 token 重叠 = 语义竞争者）"),
+    "store_vfs.rif_max_neighbors": (5, int, 1, 20, None,
+        "iter417: 每次检索最多影响的语义邻居数量（按 overlap 降序取前 N）"),
+
     # ── Deadline I/O Scheduler（迭代41）──
     "retriever.deadline_ms": (50.0, float, 5.0, 200.0, None,
         "检索截止时间（ms），超过时跳过低优先级阶段（从30ms调整为50ms，适应VFS+PSI开销）"),

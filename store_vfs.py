@@ -1870,6 +1870,13 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
     except Exception:
         pass  # self-reference effect 写入失败不阻塞主流程
 
+    # iter416: Zeigarnik Effect — 未完成任务信号词 → stability 加成（Zeigarnik 1927）
+    try:
+        _zg_base_stability = d.get("stability", 1.0)
+        apply_zeigarnik_effect(conn, d["id"], base_stability=_zg_base_stability)
+    except Exception:
+        pass  # zeigarnik effect 写入失败不阻塞主流程
+
     # iter415: store original encode_context token count for variability tracking
     # This count is used by apply_encoding_variability at access time to measure enrichment
     try:
@@ -3602,6 +3609,217 @@ def apply_encoding_variability(
         return current_stability or 0.0
 
 
+# ── iter416: Zeigarnik Effect — 未完成任务的记忆优势（Zeigarnik 1927）──────────────
+# 认知科学依据：Zeigarnik (1927) — 未完成任务 recall superiority ≈ +90% vs completed tasks。
+#   Lewin (1935) Tension System Theory — 未完成任务维持认知系统"张力"，保持记忆激活。
+# OS 类比：Linux futex waitqueue — pending I/O 保留在内核队列，不被 swapd 驱逐。
+
+_ZEIGARNIK_MARKERS = frozenset([
+    "todo", "fixme", "hack", "xxx", "wip", "pending", "unresolved",
+    "incomplete", "not done", "need to", "needs to", "need to check",
+    "investigate", "to be done", "to do", "follow up", "follow-up",
+    "open issue", "open question", "tbd", "tbf", "tbr", "revisit",
+    "blocked on", "waiting for", "in progress",
+    # Chinese pending markers
+    "待", "待确认", "待完成", "待处理", "未完成", "未解决", "需要确认",
+    "需要调查", "跟进", "待跟进", "后续", "TODO", "FIXME",
+])
+
+
+def compute_zeigarnik_score(content: str, chunk_type: str = "") -> float:
+    """
+    iter416: 计算内容的 Zeigarnik 未完成任务分数 [0.0, 1.0]。
+
+    检测内容中未完成任务信号词的存在，以及 task_state chunk_type 加成。
+
+    Returns:
+      float — Zeigarnik 分数 [0.0, 1.0]
+    """
+    if not content:
+        return 0.0
+    try:
+        content_lower = content.lower()
+        total_matches = 0
+        for marker in _ZEIGARNIK_MARKERS:
+            if marker.lower() in content_lower:
+                total_matches += 1
+
+        # Normalize: 1 match = 0.4, 2+ matches = higher, capped at 0.8 from content
+        content_score = min(0.8, total_matches * 0.4) if total_matches > 0 else 0.0
+
+        # chunk_type bonus: task_state chunks are inherently about pending tasks
+        type_bonus = 0.0
+        if chunk_type == "task_state":
+            type_bonus = 0.2  # task_state = tracking incomplete workflow
+
+        return min(1.0, content_score + type_bonus)
+    except Exception:
+        return 0.0
+
+
+def zeigarnik_stability_bonus(score: float, base_stability: float,
+                               bonus_cap: float = 0.20) -> float:
+    """
+    iter416: 根据 Zeigarnik score 计算 stability 加成。
+
+    bonus = score × base × bonus_cap（线性比例，最大为 base × cap）
+    """
+    if score <= 0.0 or base_stability <= 0.0:
+        return 0.0
+    return min(base_stability * bonus_cap, score * base_stability * bonus_cap)
+
+
+def apply_zeigarnik_effect(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    base_stability: float = 1.0,
+) -> float:
+    """
+    iter416: 检测 chunk 的未完成任务信号，给予 stability 加成。
+
+    在 insert_chunk 管线中调用（Self-Reference Effect 之后）。
+
+    Returns:
+      float — 更新后的 stability
+    """
+    if not chunk_id:
+        return base_stability
+    import config as _config
+    if not _config.get("store_vfs.zeigarnik_enabled"):
+        return base_stability
+    try:
+        row = conn.execute(
+            "SELECT content, chunk_type, stability FROM memory_chunks WHERE id=?",
+            (chunk_id,)
+        ).fetchone()
+        if not row:
+            return base_stability
+
+        content = row[0] if isinstance(row, (list, tuple)) else row["content"]
+        chunk_type = row[1] if isinstance(row, (list, tuple)) else row["chunk_type"]
+        stab = float(row[2] if isinstance(row, (list, tuple)) else row["stability"]) or 1.0
+
+        bonus_cap = _config.get("store_vfs.zeigarnik_bonus_cap")
+        score = compute_zeigarnik_score(content or "", chunk_type or "")
+        bonus = zeigarnik_stability_bonus(score, stab, bonus_cap)
+        new_stability = min(365.0, stab + bonus)
+        if bonus > 0.001:
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?",
+                (new_stability, chunk_id)
+            )
+        return new_stability
+    except Exception:
+        return base_stability
+
+
+# ── iter417: Retrieval-Induced Forgetting — 检索引发的竞争性抑制（Anderson et al. 1994）──
+# 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
+#   检索一个记忆时主动抑制其语义竞争者（inhibitory tagging），
+#   抑制强度 ∝ 语义相似度（高相似 = 强竞争 = 更多抑制）。
+# OS 类比：MESI 缓存一致性协议 —
+#   写入 Modified cache line → 其他核心的相同 cache line 变为 Invalid。
+#   访问 chunk A → 其语义竞争者 B 的"有效性"下降（类比 cache invalidation）。
+
+
+def apply_retrieval_induced_forgetting(
+    conn: sqlite3.Connection,
+    chunk_ids: list,
+    project: str,
+) -> int:
+    """
+    iter417: 对被检索 chunk 的语义竞争者施加轻微 stability 衰减。
+
+    在 update_accessed 调用后，对未被检索但与检索 chunk 高度重叠的语义邻居
+    施加 RIF 抑制（stability × decay_factor）。
+
+    Args:
+      conn: SQLite 连接
+      chunk_ids: 本次被检索的 chunk ID 列表
+      project: 项目 ID（限定 RIF 范围，跨项目不产生干扰）
+
+    Returns:
+      int — 受到 RIF 抑制的邻居数量
+    """
+    if not chunk_ids or not project:
+        return 0
+    import config as _config
+    if not _config.get("store_vfs.rif_enabled"):
+        return 0
+    try:
+        decay_factor = _config.get("store_vfs.rif_decay_factor")
+        min_overlap = _config.get("store_vfs.rif_min_overlap")
+        max_neighbors = _config.get("store_vfs.rif_max_neighbors")
+
+        if decay_factor >= 1.0:
+            return 0  # no-op if factor is 1.0
+
+        # Get encode_context tokens for each accessed chunk
+        placeholders = ",".join(["?"] * len(chunk_ids))
+        acc_rows = conn.execute(
+            f"SELECT id, encode_context FROM memory_chunks WHERE id IN ({placeholders})",
+            chunk_ids,
+        ).fetchall()
+
+        # Collect all tokens from accessed chunks
+        accessed_token_sets = {}
+        for row in acc_rows:
+            cid = row[0] if isinstance(row, (list, tuple)) else row["id"]
+            ec = row[1] if isinstance(row, (list, tuple)) else row["encode_context"]
+            tokens = frozenset(t.strip() for t in (ec or "").split(",") if t.strip())
+            accessed_token_sets[cid] = tokens
+
+        if not accessed_token_sets:
+            return 0
+
+        # Get candidate neighbors: same project, not in accessed set, has encode_context
+        accessed_set = set(chunk_ids)
+        candidates = conn.execute(
+            "SELECT id, encode_context, stability FROM memory_chunks "
+            "WHERE project=? AND encode_context IS NOT NULL AND stability > 0.1 "
+            "AND id NOT IN ({})".format(",".join(["?"] * len(accessed_set))),
+            [project] + list(accessed_set),
+        ).fetchall()
+
+        # Compute overlap for each candidate
+        neighbor_overlaps = []
+        for row in candidates:
+            cid = row[0] if isinstance(row, (list, tuple)) else row["id"]
+            ec = row[1] if isinstance(row, (list, tuple)) else row["encode_context"]
+            stab = float(row[2] if isinstance(row, (list, tuple)) else row["stability"])
+            c_tokens = frozenset(t.strip() for t in (ec or "").split(",") if t.strip())
+            if not c_tokens:
+                continue
+            # Find max overlap with any accessed chunk
+            max_overlap = max(
+                len(c_tokens & acc_tokens)
+                for acc_tokens in accessed_token_sets.values()
+            )
+            if max_overlap >= min_overlap:
+                neighbor_overlaps.append((cid, stab, max_overlap))
+
+        if not neighbor_overlaps:
+            return 0
+
+        # Sort by overlap descending, take top N
+        neighbor_overlaps.sort(key=lambda x: -x[2])
+        to_inhibit = neighbor_overlaps[:max_neighbors]
+
+        # Apply RIF decay
+        inhibited = 0
+        for n_cid, n_stab, _ in to_inhibit:
+            new_stab = max(0.1, n_stab * decay_factor)
+            if abs(new_stab - n_stab) > 0.001:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?",
+                    (new_stab, n_cid)
+                )
+                inhibited += 1
+        return inhibited
+    except Exception:
+        return 0
+
+
 # ── iter413: Sleep Consolidation — 离线记忆巩固（Stickgold 2005）───────────────
 # 认知科学依据：NREM 睡眠中海马体重放最近学习的记忆，将其转移到新皮层。
 # OS 类比：Linux pdflush/writeback daemon — session 间 idle period 内后台巩固 dirty pages。
@@ -4016,6 +4234,21 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
     try:
         for _cid in chunk_ids:
             apply_encoding_variability(conn, _cid)
+    except Exception:
+        pass
+
+    # iter417: Retrieval-Induced Forgetting — 检索引发语义竞争者 stability 轻微衰减
+    # Anderson et al. (1994): 检索记忆 A 抑制其语义竞争者 B/C
+    # OS 类比：MESI 协议 — 写入 cache line 使其他核的相同 line 变为 Invalid
+    try:
+        # Get project from the accessed chunks (use first hit)
+        _rif_proj_row = conn.execute(
+            f"SELECT project FROM memory_chunks WHERE id IN ({placeholders}) LIMIT 1",
+            chunk_ids,
+        ).fetchone()
+        if _rif_proj_row:
+            _rif_proj = _rif_proj_row[0] if isinstance(_rif_proj_row, (list, tuple)) else _rif_proj_row["project"]
+            apply_retrieval_induced_forgetting(conn, chunk_ids, _rif_proj)
     except Exception:
         pass
 
