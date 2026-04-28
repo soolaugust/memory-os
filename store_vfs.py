@@ -1795,6 +1795,22 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
     except Exception:
         pass
 
+    # iter406：Generation Effect — 主动生成内容 stability 加成（McDaniel & Einstein 1986）
+    # 检测内容中的生成标记（推理人称/假设检验/元认知），计算 generation score，
+    # score 越高 → stability 增量越大（补充 iter401 结构深度 + iter392 类型加成）
+    try:
+        _ge_content = d.get("content") or ""
+        _ge_summary = d.get("summary") or ""
+        _ge_source_type = d.get("source_type")
+        _ge_base_stability = d.get("stability", 1.0)
+        apply_generation_effect(
+            conn, d["id"], _ge_content, _ge_summary,
+            source_type=_ge_source_type,
+            base_stability=_ge_base_stability,
+        )
+    except Exception:
+        pass  # generation effect 写入失败不阻塞主流程
+
 
 # ── iter403：Cue-Dependent Forgetting — Context-Sensitive Retrieval（Tulving 1974）──
 #
@@ -2356,6 +2372,227 @@ def get_newer_same_topic_count(
         return count, round(avg_overlap, 4)
     except Exception:
         return 0, 0.0
+
+
+# ── iter406：Generation Effect — 自生成内容 stability 加成（McDaniel & Einstein 1986）
+#            ────────────────────────────────────────────────────────────────────────────
+#
+# 认知科学依据：
+#   Slamecka & Graf (1978) The Generation Effect: Delineation of a Phenomenon:
+#     被试自己生成的词汇（相对于阅读词汇）回忆率高 20-50%，即"生成效应"。
+#     生成行为本身（无论结果）强化了记忆痕迹。
+#   McDaniel & Einstein (1986) Bizarre Imagery as an Effective Memory Aid:
+#     生成效应与精细阐述（elaboration）协同——不只是"生成"，
+#     而是"在主动建构意义的过程中生成"，是决定 stability 的关键因子。
+#   Jacoby (1978) On Interpreting the Effects of Repetition:
+#     主动加工（active processing）vs 被动加工（passive processing）：
+#     主动生成：推理、假设检验、类比构建 → 记忆强度更高
+#     被动接受：直接复制、引用、简单整理 → 记忆强度较低
+#
+# OS 类比：Linux Write-Allocate 缓存策略 (write-allocate + write-back, 1974)
+#   Write-Allocate（写分配）：CPU 写 miss 时，将整个 cache line 从 DRAM 读入，
+#     在 cache 中修改后标记 dirty，等 writeback 时才写回 DRAM。
+#     效果：写入触发完整 cache line 的加载和激活，该 line 进入 active 状态，
+#     后续访问命中率显著提升（vs Write-No-Allocate 直写穿透）。
+#   类比：agent 主动生成的内容相当于触发 Write-Allocate——
+#     不只是被动写入（Write-No-Allocate），而是在生成过程中激活并构建完整 cache line；
+#     生成标记密度越高 → Write-Allocate 程度越高 → 初始 stability 越高。
+#
+# 与 iter392（type-based）和 iter401（structural depth）的区别：
+#   iter392：基于 chunk_type（reasoning_chain/decision/causal_chain）的粗粒度加成
+#   iter401：基于结构性标记（因果词、对比词、层级结构）的深度加工检测
+#   iter406：基于词汇层面的"主动生成标记"密度——
+#     推理人称（"我认为"/"因此"/"我的理解是"）
+#     假设检验（"如果...那么"/"假设"/"验证"）
+#     元认知（"这说明"/"这意味着"/"关键在于"）
+#     这三类标记直接指示了 agent 处于"主动建构"状态，而非"被动整理"状态。
+#
+# 实现：
+#   compute_generation_score(content, summary, source_type) → float [0.0, 1.0]
+#     检测内容中"主动生成"词汇标记密度，返回 generation score。
+#   generation_stability_bonus(generation_score, base_stability) → float
+#     将 generation score 映射为 stability 增量：
+#       score >= 0.7 → bonus = base × 0.35（强生成，类比 Slamecka: +50%）
+#       score 0.4-0.7 → bonus = base × 0.15（中等生成）
+#       score 0.2-0.4 → bonus = base × 0.05（弱生成信号）
+#       score < 0.2 → bonus = 0（无生成标记，被动内容）
+#   apply_generation_effect(conn, chunk_id, content, summary, source_type, base_stability)
+#     查找、计算并写入 stability 更新
+
+# ── 生成标记词典（三层：推理人称 / 假设检验 / 元认知）──
+# 中英文各有独立的识别规则
+_GEN_REASONING_PERSON_ZH = frozenset([
+    "我认为", "我觉得", "我的理解", "我推断", "我判断", "我估计",
+    "在我看来", "据我分析", "从我的角度", "基于上述",
+])
+_GEN_REASONING_PERSON_EN = frozenset([
+    "i think", "i believe", "i infer", "in my view", "as i see it",
+    "i conclude", "i estimate", "my understanding", "i reason",
+])
+_GEN_HYPOTHETICAL_ZH = frozenset([
+    "如果", "假设", "假如", "倘若", "若", "要是",
+    "验证", "检验", "测试下", "实验", "推测",
+])
+_GEN_HYPOTHETICAL_EN = frozenset([
+    "if we", "suppose", "hypothesis", "assuming", "let's verify", "let me check",
+    "hypothetically", "let's test", "what if", "assume that",
+])
+_GEN_METACOG_ZH = frozenset([
+    "这说明", "这意味着", "关键在于", "核心是", "本质是",
+    "因此可以", "由此得出", "综上所述", "总结来看", "换句话说",
+    "值得注意", "需要强调", "重要的是", "这表明", "这证明",
+])
+_GEN_METACOG_EN = frozenset([
+    "this means", "therefore", "thus", "hence", "this implies",
+    "in summary", "in conclusion", "the key insight", "this suggests",
+    "it follows that", "importantly", "crucially", "this demonstrates",
+    "as a result", "consequently",
+])
+
+# 最小内容长度（太短的内容不做生成检测，避免噪音）
+_GEN_MIN_CHARS: int = 30
+# 生成分层阈值
+_GEN_STRONG_THRESHOLD: float = 0.7
+_GEN_MEDIUM_THRESHOLD: float = 0.4
+_GEN_WEAK_THRESHOLD: float = 0.2
+# 最大稳定性加成（生成效应增量上限）
+_GEN_MAX_STABILITY_BONUS_FACTOR: float = 0.35  # base × 0.35，即最多 +35%
+
+
+def compute_generation_score(
+    content: str,
+    summary: str = "",
+    source_type: str = None,
+) -> float:
+    """
+    iter406：计算内容的"主动生成"标记密度，返回 generation score ∈ [0.0, 1.0]。
+
+    检测三类生成标记：
+      1. 推理人称（agent 以第一人称推理）
+      2. 假设/验证（agent 主动构建假设并检验）
+      3. 元认知（agent 反思、总结、得出结论）
+
+    source_type 快速路径：
+      "direct"（直接人类输入）→ 0.0（非生成内容，被动接收）
+      "tool_output"（工具输出）→ 0.1 cap（工具输出为主，agent 生成为辅）
+      None/"inferred"/"hearsay" → 正常检测
+
+    Returns:
+      float ∈ [0.0, 1.0]
+    """
+    if not content and not summary:
+        return 0.0
+
+    # source_type 快速判断
+    if source_type == "direct":
+        return 0.0  # 直接人类输入：非生成内容
+    cap = 1.0
+    if source_type == "tool_output":
+        cap = 0.1  # 工具输出：agent 生成成分极少
+
+    text = ((content or "") + " " + (summary or "")).lower().strip()
+    if len(text) < _GEN_MIN_CHARS:
+        return 0.0
+
+    # 统计各类标记命中数
+    reasoning_hits = sum(1 for m in _GEN_REASONING_PERSON_ZH if m in text)
+    reasoning_hits += sum(1 for m in _GEN_REASONING_PERSON_EN if m in text)
+    hypo_hits = sum(1 for m in _GEN_HYPOTHETICAL_ZH if m in text)
+    hypo_hits += sum(1 for m in _GEN_HYPOTHETICAL_EN if m in text)
+    meta_hits = sum(1 for m in _GEN_METACOG_ZH if m in text)
+    meta_hits += sum(1 for m in _GEN_METACOG_EN if m in text)
+
+    # 分层权重：元认知 > 推理人称 > 假设（从确定度排序）
+    # 元认知标记代表 agent 已得出结论，生成效应最强
+    # 推理人称代表 agent 正在推理，次之
+    # 假设标记代表 agent 在探索，生成效应相对最弱
+    # 归一化到 [0.0, 1.0]：每层最多贡献 1/3
+    meta_contribution = min(1.0, meta_hits / 3.0) * 0.45
+    reasoning_contribution = min(1.0, reasoning_hits / 2.0) * 0.35
+    hypo_contribution = min(1.0, hypo_hits / 3.0) * 0.20
+
+    raw_score = meta_contribution + reasoning_contribution + hypo_contribution
+    return round(min(1.0, min(cap, raw_score)), 4)
+
+
+def generation_stability_bonus(
+    generation_score: float,
+    base_stability: float,
+) -> float:
+    """
+    iter406：将 generation score 映射为 stability 增量。
+
+    设计原则（Slamecka & Graf 1978）：
+      强生成（>= 0.7）：回忆率提升 ~50% → stability bonus = base × 0.35
+      中等生成（0.4-0.7）：回忆率提升 ~15% → stability bonus = base × 0.15
+      弱生成（0.2-0.4）：回忆率提升 ~5% → stability bonus = base × 0.05
+      无生成（< 0.2）：0 增量
+
+    上限保护：total stability 不超过 base × 1.5（防止叠加后 stability 爆炸）
+
+    Returns:
+      float — stability 增量（非绝对值，需加到 base_stability 上）
+    """
+    try:
+        generation_score = float(generation_score)
+        base_stability = float(base_stability)
+    except (TypeError, ValueError):
+        return 0.0
+    if generation_score <= 0.0 or base_stability <= 0.0:
+        return 0.0
+    try:
+        score = float(generation_score)
+        base = float(base_stability)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if score >= _GEN_STRONG_THRESHOLD:
+        factor = _GEN_MAX_STABILITY_BONUS_FACTOR
+    elif score >= _GEN_MEDIUM_THRESHOLD:
+        # 线性插值：[0.4, 0.7) → factor [0.05, 0.35]
+        t = (score - _GEN_MEDIUM_THRESHOLD) / (_GEN_STRONG_THRESHOLD - _GEN_MEDIUM_THRESHOLD)
+        factor = 0.05 + t * (_GEN_MAX_STABILITY_BONUS_FACTOR - 0.05)
+    elif score >= _GEN_WEAK_THRESHOLD:
+        # 弱生成：[0.2, 0.4) → factor [0.0, 0.05]
+        t = (score - _GEN_WEAK_THRESHOLD) / (_GEN_MEDIUM_THRESHOLD - _GEN_WEAK_THRESHOLD)
+        factor = t * 0.05
+    else:
+        return 0.0
+
+    bonus = base * factor
+    # 上限：total stability 不超过 base × 1.5
+    max_bonus = base * 0.50
+    return round(min(bonus, max_bonus), 4)
+
+
+def apply_generation_effect(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    content: str,
+    summary: str = "",
+    source_type: str = None,
+    base_stability: float = 1.0,
+) -> float:
+    """
+    iter406：计算生成效应并更新 chunk 的 stability。
+
+    Returns:
+      float — 更新后的 stability（= base + bonus）
+    """
+    if not chunk_id:
+        return base_stability
+    try:
+        score = compute_generation_score(content, summary, source_type)
+        bonus = generation_stability_bonus(score, base_stability)
+        new_stability = base_stability + bonus
+        if bonus > 0.001:
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?",
+                (new_stability, chunk_id)
+            )
+        return new_stability
+    except Exception:
+        return base_stability
 
 
 # ── 迭代100：IPC 共享内存 API（OS 类比：shmget/shmat/shmdt + MESI 协议）────────

@@ -250,6 +250,12 @@ _REGISTRY: dict = {
     "extractor.generation_boost_types": ("reasoning_chain,decision,causal_chain", str, None, None, None,
         "应用 generation_boost 的 chunk_type 集合（逗号分隔，iter392）"),
 
+    # ── iter406: Generation Effect — Lexical Marker Detection ──────────────────
+    "store_vfs.generation_effect_enabled": (True, bool, None, None, None,
+        "是否启用 iter406 Generation Effect：检测内容中的推理/假设/元认知标记，对主动生成内容提升 stability"),
+    "store_vfs.generation_effect_source_direct_bypass": (True, bool, None, None, None,
+        "source_type='direct' 时跳过生成效应检测（人直接输入=被动录入，非 agent 生成），默认 True"),
+
     # ── Deadline I/O Scheduler（迭代41）──
     "retriever.deadline_ms": (50.0, float, 5.0, 200.0, None,
         "检索截止时间（ms），超过时跳过低优先级阶段（从30ms调整为50ms，适应VFS+PSI开销）"),
