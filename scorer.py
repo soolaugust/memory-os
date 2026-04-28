@@ -106,15 +106,46 @@ def recency_score(iso_str: str) -> float:
     return 1.0 / (1.0 + age_days)
 
 
-def importance_with_decay(importance: float, last_accessed: str) -> float:
+def importance_with_decay(importance: float, last_accessed: str,
+                          chunk_type: str = "") -> float:
     """
     OS 类比：page aging bit — 未被访问的页 age 递增。
     遗忘曲线：effective_importance = importance × decay(age)
     decay = 0.95^(age_days / 7)  →  每 7 天衰减 5%
     半衰期 ≈ 90 天，最低下限 0.3。
+
+    iter375: Type-Differential Decay Rates — 人类记忆中情节记忆比语义记忆衰减更快
+    (Tulving 1972 / Squire 1987 — 记忆系统双重过程理论)
+    OS 类比：Linux MGLRU 按 generation 分级淘汰 — younger pages age faster
+      - episodic (task_state, conversation_summary): 快速衰减，half-life 短
+      - semantic (decision, design_constraint, reasoning_chain): 慢速衰减
+      - procedural (procedure): 中速衰减
+    实现：通过 per-type 的 decay_rate sysctl，覆盖全局 _DECAY_RATE
     """
+    # iter375: 按 chunk_type 查找类型专属 decay_rate
+    # 未配置时 fallback 到全局 _DECAY_RATE
+    _TYPE_DECAY_SYSCTL = {
+        "task_state":             "scorer.decay_rate_task_state",
+        "conversation_summary":   "scorer.decay_rate_conversation_summary",
+        "decision":               "scorer.decay_rate_decision",
+        "design_constraint":      "scorer.decay_rate_design_constraint",
+        "reasoning_chain":        "scorer.decay_rate_reasoning_chain",
+        "quantitative_evidence":  "scorer.decay_rate_quantitative_evidence",
+        "causal_chain":           "scorer.decay_rate_causal_chain",
+        "excluded_path":          "scorer.decay_rate_excluded_path",
+        "procedure":              "scorer.decay_rate_procedure",
+    }
+    effective_decay = _DECAY_RATE
+    if chunk_type and chunk_type in _TYPE_DECAY_SYSCTL:
+        try:
+            _td = _sysctl(_TYPE_DECAY_SYSCTL[chunk_type])
+            if _td is not None:
+                effective_decay = float(_td)
+        except Exception:
+            pass  # fallback to global _DECAY_RATE
+
     age = _age_days(last_accessed)
-    decay = _DECAY_RATE ** (age / 7.0)
+    decay = effective_decay ** (age / 7.0)
     return max(_IMP_FLOOR, importance * decay)
 
 
@@ -409,7 +440,8 @@ def retrieval_score(relevance: float, importance: float,
                     current_project: str = "",
                     encoding_context: dict = None,
                     query_context: dict = None,
-                    query_alpha: float = None) -> float:
+                    query_alpha: float = None,
+                    chunk_type: str = "") -> float:
     """
     召回评分（retriever.py 使用）。
     score = relevance × (base_score + access_bonus + freshness_bonus)
@@ -440,7 +472,8 @@ def retrieval_score(relevance: float, importance: float,
       context_match: 情境匹配加分（最高+0.20）
     """
     _refresh_now()  # iter260: 单次刷新 now 缓存，后续 _age_days 复用
-    eff_imp = importance_with_decay(importance, last_accessed)
+    # iter375: type-differential decay — pass chunk_type for per-type decay rate
+    eff_imp = importance_with_decay(importance, last_accessed, chunk_type=chunk_type)
     rec = recency_score(last_accessed)
     ab = access_bonus(access_count)
     fb = freshness_bonus(created_at) if created_at else 0.0

@@ -8,7 +8,7 @@
 [![SQLite](https://img.shields.io/badge/storage-SQLite%20WAL-lightgrey?logo=sqlite)](https://sqlite.org/)
 [![Tests](https://img.shields.io/badge/tests-44%20passing-brightgreen)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Iterations](https://img.shields.io/badge/iterations-362%2B-orange)](#roadmap)
+[![Iterations](https://img.shields.io/badge/iterations-374%2B-orange)](#roadmap)
 
 [English](./README.md) · [中文](./README.zh.md)
 
@@ -65,7 +65,7 @@ The entire pipeline runs inside **Claude Code hooks**. Zero manual memory manage
 | Cross-session recall | **94.2%** |
 | Knowledge base size | **427 chunks / 8 types** |
 | Hot-path retrieval | **1.74 µs/op** (iter 258, −84.7% from baseline) |
-| Total iterations | **362+** |
+| Total iterations | **374+** |
 | **Token injection per call** | **~44 tokens** (avg 178 chars) |
 | **Token net ROI per call** | **~+256 tokens** saved (inject 44, save ~300 re-explanation) |
 | FULL→LITE demotion savings (iter 361) | **~62 tokens/repeat** (69.6% reduction on re-injection) |
@@ -130,6 +130,14 @@ Every subsystem maps to a Linux kernel mechanism:
 | FTS5 auto-optimize | ext4 online defrag | iter 360 |
 | FULL→LITE injection demotion | page cache dirty bit fast-path | iter 361 |
 | Proactive swap warmup | MGLRU proactive reclaim | iter 362 |
+| Workspace-aware memory | exec() address space switch | iter 363 |
+| Session episode timeline | Hippocampal sequential replay | iter 364 |
+| Workspace prospective memory | Prefrontal prospective codes | iter 365 |
+| Knowledge graph spreading activation | CPU cache prefetch L2 warm-up | iter 366 |
+| Temporal proximity edges | Sequential readahead | iter 367 |
+| Attention focus stack | CPU register file | iter 368 |
+| Soft forgetting | DAMON cold page detection | iter 369 |
+| Uncertainty signal extraction | MMU soft page fault | iter 370 |
 
 ---
 
@@ -234,7 +242,11 @@ Context cap enforced:     ≤ 800 chars (max_context_chars sysctl)
 | Multi-agent isolation — per-session namespacing, IPC broadcast (iter 259) | ✅ Done |
 | Async extraction pool — Stop hook offload, kworker pool (iter 260) | ✅ Done |
 | Token budget optimization — FULL→LITE demotion, session dedup, swap warmup (iter 359–362) | ✅ Done |
-| Distributed multi-agent shared memory — NUMA/RDMA analogy (iter 363+) | 🔜 Planned |
+| Workspace-aware memory — exec() address space switch, filesystem sensing (iter 363) | ✅ Done |
+| Cognitive memory systems — episodes, workspace todos, knowledge graph spreading activation (iter 364–366) | ✅ Done |
+| Temporal proximity, attention focus, soft forgetting, uncertainty signals (iter 367–370) | ✅ Done |
+| Conflict detection, context-aware boost, timeline, chunk coalescing (iter 371–374) | ✅ Done |
+| Distributed multi-agent shared memory — NUMA/RDMA analogy (iter 375+) | 🔜 Planned |
 
 ---
 

@@ -292,6 +292,57 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     #   eviction_score = age_days / stability（越小越不驱逐）
     _safe_add_column(conn, "memory_chunks", "stability", "REAL DEFAULT 1.0")
 
+    # ── iter399：emotional_weight — 写入时情绪显著性权重（McGaugh 2000）──
+    # OS 类比：Linux mempolicy MPOL_PREFERRED_MANY — 写入时标注页面的"情感节点亲和性"，
+    #   检索时 retriever 用此权重决定 boost 量（类比 NUMA locality hint）。
+    # emotional_weight ∈ [0.0, 1.0]：0=情感中性，1=极高唤醒（崩溃/critical 类词）
+    _safe_add_column(conn, "memory_chunks", "emotional_weight", "REAL DEFAULT 0.0")
+
+    # ── iter401：depth_of_processing — 加工深度（Craik & Lockhart 1972）──
+    # OS 类比：Linux page writeback dirty throttle — 页面在 dirty state 停留时间越长，
+    #   获得的 write aggregation 越充分，落盘后数据更完整（类比深度加工 → 更稳固的记忆痕迹）。
+    # 认知科学依据：加工层次理论 — 语义加工（深处理）比音韵/字形加工（浅处理）
+    #   形成更持久的记忆痕迹，因为语义处理触发了更多的关联激活。
+    # depth_of_processing ∈ [0.0, 1.0]：
+    #   0.0 = 浅处理（简单陈述，无推理/因果/结构）
+    #   1.0 = 深处理（丰富的因果推理、结构化分析、多概念关联）
+    # 影响：写入时 stability += depth_bonus（深处理的 chunk 初始稳定性更高）
+    _safe_add_column(conn, "memory_chunks", "depth_of_processing", "REAL DEFAULT 0.5")
+
+    # ── iter400：chunk_type_decay — 个体化遗忘速率（Ebbinghaus 1885 + 记忆类型差异）──
+    # OS 类比：Linux cgroup memory.reclaim_ratio — 不同 cgroup 有不同的内存回收速率，
+    #   而非全局统一的 vm.swappiness。
+    # 认知科学依据：Squire (1992) / Tulving (1972) 记忆类型理论：
+    #   程序性记忆（如技能/约束）比情节记忆（如任务状态）衰减更慢。
+    #   design_constraint/decision → 衰减极慢（类比肌肉记忆）
+    #   task_state/reasoning_chain → 衰减较快（类比工作记忆/情节记忆）
+    # 字段：存储在 sysctl / 配置层，每次 idle_consolidation 查询该表确定 per-type 衰减率。
+    # （该 iter 不新增 DB 列，而是影响算法行为）
+
+    # ── iter396：source_type / source_reliability — 信源监控（Johnson 1993）──
+    # OS 类比：Linux LSM (Linux Security Modules) — 每次文件访问/进程创建前，
+    #   LSM hook 检查来源的"域"（SELinux context / AppArmor label），
+    #   来源不同 → 不同信任级别 → 不同访问权限。
+    # source_type ∈ {direct, tool_output, inferred, hearsay, unknown}：
+    #   direct      = 用户直接陈述/观察（第一手信源，最高可信度）
+    #   tool_output = 代码运行/命令输出（机器生成，高可重复性，取决于工具可靠性）
+    #   inferred    = 从多条信息推断（合理推断，中等可信度）
+    #   hearsay     = 间接转述/用户描述他人说的（可信度最低）
+    #   unknown     = 来源不明（默认值）
+    # source_reliability ∈ [0.0, 1.0]：
+    #   写入时由 compute_source_reliability() 估算；
+    #   检索时作为 retrieval_score 的加权因子（source_monitor_weight()）。
+    _safe_add_column(conn, "memory_chunks", "source_type", "TEXT DEFAULT 'unknown'")
+    _safe_add_column(conn, "memory_chunks", "source_reliability", "REAL DEFAULT 0.7")
+
+    # ── iter403：encode_context — 编码时上下文关键词（Tulving 1974）──
+    # OS 类比：Linux NUMA-aware memory allocation — 进程倾向从本地 node 取页；
+    #   编码时 context = home node；检索时 context 越接近 = NUMA距离越小 = 命中率越高。
+    # encode_context TEXT：编码时的上下文关键词集合（逗号分隔的 token 列表）。
+    # 写入时从 content + summary + tags + chunk_type 中提取关键词集。
+    # 检索时计算 context overlap（Jaccard）→ 调整检索分（context cue boost）。
+    _safe_add_column(conn, "memory_chunks", "encode_context", "TEXT DEFAULT ''")
+
     # ── 迭代306：raw_snippet — 写入时保真原始片段（≤500字）──
     # OS 类比：Linux page cache 保存原始 disk block，VFS 层面不压缩；
     #   读取时 on-demand 合并（类比 copy-on-read 模式）。
@@ -398,6 +449,26 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     except Exception:
         pass
 
+    # ── iter404：priming_state — 语义启动状态表（Collins & Loftus 1975）──
+    # OS 类比：Linux page readahead / ra_state —
+    #   访问一个 page 触发相邻 pages 预取进 page cache（readahead window）；
+    #   类似地，检索一个 chunk 时，相关 entity 被"启动"（primed），
+    #   后续短时间内（prime_half_life ~ 30min）相关 chunk 检索分提升。
+    # prime_strength ∈ [0.0, 1.0]：当前启动强度（随时间指数衰减）
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS priming_state (
+            entity_name TEXT NOT NULL,
+            project     TEXT NOT NULL DEFAULT '',
+            primed_at   TEXT NOT NULL,
+            prime_strength REAL NOT NULL DEFAULT 1.0,
+            PRIMARY KEY (entity_name, project)
+        )
+    """)
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_prime_project ON priming_state(project, primed_at)")
+    except Exception:
+        pass
+
     # ── 迭代305：curiosity_queue — 知识空白探索队列（OS 类比：kswapd 水位触发）──
     # 当 retriever 检测到「弱命中」（FTS 有结果但 top-1 分数 < WMARK_LOW=0.25）时，
     # 说明 DB 里「有相关内容但不够用」——把 query 写入此队列。
@@ -432,6 +503,37 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_cq_project_query_time "
             "ON curiosity_queue(project, query, detected_at)"
+        )
+    except Exception:
+        pass
+
+    # ── iter380：schema_anchors — Bartlett (1932) Schema Theory ─────────────
+    # OS 类比：Linux SLUB Allocator kmem_cache — 相似对象共享结构模板（kmem_cache），
+    #   新对象写入时自动归属对应 cache；检索时 cache 整体激活，批量命中。
+    #
+    # schema_anchors 记录 chunk → schema 的绑定关系：
+    #   chunk 写入时，扫描 summary 匹配预定义 schema 规则 → 写入绑定行
+    #   retriever 命中 chunk 后，查 schema_anchors → 激活同 schema 的其他 chunk
+    #   类比：kmem_cache 命中后，同 cache 的相邻 slab 自动预热到 L2
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS schema_anchors (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            chunk_id    TEXT NOT NULL,
+            schema_name TEXT NOT NULL,
+            project     TEXT NOT NULL,
+            confidence  REAL DEFAULT 0.8,
+            created_at  TEXT NOT NULL,
+            UNIQUE(chunk_id, schema_name)
+        )
+    """)
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sa_schema_project "
+            "ON schema_anchors(schema_name, project)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sa_chunk "
+            "ON schema_anchors(chunk_id)"
         )
     except Exception:
         pass
@@ -729,11 +831,107 @@ def _ensure_fts5(conn: sqlite3.Connection) -> None:
     except Exception:
         pass
 
+    # ── iter390: trigger_conditions — 展望记忆触发条件 ──────────────────────────
+    # 认知科学依据：Einstein & McDaniel (1990) Prospective Memory —
+    #   意图性记忆：在未来某个时刻执行某个动作的意图（"下次打开 X 时记得..."）。
+    #   触发模式：特定信号（context cue）激活相关延迟意图记忆。
+    # OS 类比：Linux inotify/fanotify — 注册文件系统事件监听，触发条件满足时唤醒等待进程。
+    # trigger_conditions 存储 extractor 检测到的"将来触发"意图，
+    # retriever 在匹配到 trigger_pattern 时注入关联 chunk。
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS trigger_conditions (
+            id          TEXT PRIMARY KEY,
+            chunk_id    TEXT NOT NULL,
+            project     TEXT NOT NULL,
+            session_id  TEXT NOT NULL DEFAULT '',
+            trigger_pattern TEXT NOT NULL,
+            trigger_type TEXT NOT NULL DEFAULT 'keyword',
+            created_at  TEXT NOT NULL,
+            fired_count INTEGER DEFAULT 0,
+            last_fired  TEXT,
+            expires_at  TEXT
+        )
+    """)
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tc_project ON trigger_conditions(project)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tc_chunk ON trigger_conditions(chunk_id)")
+    except Exception:
+        pass
+
     # ── iter259：entity_edges 补充 agent_id 复合唯一约束 ──
     # 多 Agent 场景下同一实体对可被不同 agent 提取，需按 agent 隔离唯一性
     _safe_add_column(conn, "entity_edges", "agent_id", "TEXT DEFAULT ''")
 
     conn.commit()
+
+
+# ── iter390: trigger_conditions CRUD ────────────────────────────────────────
+
+def insert_trigger(conn: sqlite3.Connection, trigger: dict) -> None:
+    """写入一条 trigger_conditions 记录。"""
+    conn.execute("""
+        INSERT OR REPLACE INTO trigger_conditions
+        (id, chunk_id, project, session_id, trigger_pattern, trigger_type,
+         created_at, fired_count, last_fired, expires_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+    """, (
+        trigger["id"],
+        trigger["chunk_id"],
+        trigger["project"],
+        trigger.get("session_id", ""),
+        trigger["trigger_pattern"],
+        trigger.get("trigger_type", "keyword"),
+        trigger["created_at"],
+        trigger.get("fired_count", 0),
+        trigger.get("last_fired"),
+        trigger.get("expires_at"),
+    ))
+
+
+def query_triggers(conn: sqlite3.Connection, project: str,
+                   query_text: str, max_triggers: int = 3) -> list:
+    """
+    查询与 query_text 匹配的 trigger_conditions，返回相关 chunk_id 列表。
+    OS 类比：inotify_read() — 读取待处理的文件系统事件（触发条件已满足）。
+
+    匹配逻辑：trigger_pattern 是关键词/正则，query_text 中包含时触发。
+    返回 [(chunk_id, trigger_id, trigger_pattern), ...] 最多 max_triggers 条。
+    """
+    import re as _re
+    now_iso = datetime.now(timezone.utc).isoformat()
+    rows = conn.execute(
+        "SELECT id, chunk_id, trigger_pattern, trigger_type FROM trigger_conditions "
+        "WHERE project=? AND (expires_at IS NULL OR expires_at > ?) "
+        "ORDER BY fired_count ASC, created_at DESC LIMIT 50",
+        (project, now_iso),
+    ).fetchall()
+
+    matched = []
+    for row in rows:
+        tid, cid, pattern, ttype = row[0], row[1], row[2], row[3]
+        try:
+            if ttype == "regex":
+                if _re.search(pattern, query_text, _re.IGNORECASE):
+                    matched.append((cid, tid, pattern))
+            else:
+                # keyword: pattern is a simple keyword/phrase
+                if pattern.lower() in query_text.lower():
+                    matched.append((cid, tid, pattern))
+        except Exception:
+            continue
+        if len(matched) >= max_triggers:
+            break
+    return matched
+
+
+def fire_trigger(conn: sqlite3.Connection, trigger_id: str) -> None:
+    """记录 trigger 已触发（更新 fired_count + last_fired）。"""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE trigger_conditions SET fired_count=fired_count+1, last_fired=? WHERE id=?",
+        (now_iso, trigger_id),
+    )
+
 
 def _fts5_escape(query: str) -> str:
     """
@@ -1295,7 +1493,9 @@ def fts_search(conn: sqlite3.Connection, query: str, project: str,
                    mc.chunk_type, COALESCE(mc.access_count, 0), mc.created_at,
                    -bm25(memory_chunks_fts, 0, 2.0, 1.0) AS fts_rank,
                    COALESCE(mc.lru_gen, 0), mc.project,
-                   mc.verification_status, mc.confidence_score
+                   mc.verification_status, mc.confidence_score,
+                   COALESCE(mc.retrievability, 1.0),
+                   COALESCE(mc.source_reliability, 0.7)
             FROM memory_chunks_fts
             JOIN memory_chunks mc ON mc.rowid = CAST(memory_chunks_fts.rowid_ref AS INTEGER)
             WHERE memory_chunks_fts MATCH ?
@@ -1361,7 +1561,7 @@ def fts_search(conn: sqlite3.Connection, query: str, project: str,
                 break
 
     result = []
-    for rid, summary, content, importance, last_accessed, chunk_type, access_count, created_at, fts_rank, lru_gen, chunk_project, verification_status, confidence_score in rows:
+    for rid, summary, content, importance, last_accessed, chunk_type, access_count, created_at, fts_rank, lru_gen, chunk_project, verification_status, confidence_score, retrievability, source_reliability in rows:
         result.append({
             "id": rid,
             "summary": summary or "",
@@ -1376,6 +1576,8 @@ def fts_search(conn: sqlite3.Connection, query: str, project: str,
             "project": chunk_project or "",  # 迭代111: NUMA distance scoring
             "verification_status": verification_status,
             "confidence_score": confidence_score,
+            "retrievability": retrievability if retrievability is not None else 1.0,  # iter369
+            "source_reliability": float(source_reliability) if source_reliability is not None else 0.7,  # iter396
         })
     return result
 
@@ -1521,6 +1723,640 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
                     )
     except Exception:
         pass  # entity_map 写入失败不阻塞主流程
+
+    # iter396：Source Monitoring — 自动推断 source_type，写入 source_reliability
+    # 仅在 chunk dict 未明确提供 source_type 时自动推断
+    try:
+        _sm_chunk_id = d["id"]
+        _sm_source_type = d.get("source_type")  # 允许外部显式指定
+        _sm_chunk_type = d.get("chunk_type", "task_state")
+        _sm_content = (d.get("content") or "") + " " + (d.get("summary") or "")
+        apply_source_monitoring(conn, _sm_chunk_id, _sm_chunk_type,
+                                _sm_content, _sm_source_type)
+    except Exception:
+        pass  # source monitoring 失败不阻塞主流程
+
+    # iter401：Elaborative Encoding — 写入时计算加工深度，调整初始 stability
+    # 深度加工（因果/结构/对比/精细阐述）→ 更高初始 stability
+    try:
+        _dop_chunk_id = d["id"]
+        _dop_content = (d.get("content") or "") + " " + (d.get("summary") or "")
+        _dop_base_stability = d.get("stability", 1.0)
+        _dop_new_stability = apply_depth_of_processing(
+            conn, _dop_chunk_id, _dop_content, _dop_base_stability
+        )
+    except Exception:
+        _dop_new_stability = d.get("stability", 1.0)
+        pass  # depth_of_processing 写入失败不阻塞主流程
+
+    # iter402：Schema Theory — 图式先验加成（Bartlett 1932）
+    # entity_map 已建立后再查 prior schema（entity_map 由上方 entity_map 自动关联步骤填充）
+    # 先验 chunk stability 均值 × 0.2 作为 schema bonus
+    try:
+        _schema_chunk_id = d["id"]
+        _schema_project = d.get("project", "")
+        if _schema_project:
+            apply_schema_scaffolding(conn, _schema_chunk_id, _schema_project,
+                                     base_stability=_dop_new_stability)
+    except Exception:
+        pass  # schema scaffolding 失败不阻塞主流程
+
+    # iter403：Cue-Dependent Forgetting — 提取编码上下文，写入 encode_context 字段
+    # 编码时的上下文线索 = content + summary + tags + chunk_type 中提取的关键词集
+    try:
+        _cdf_content = (d.get("content") or "") + " " + (d.get("summary") or "")
+        _cdf_tags = d.get("tags", [])
+        if isinstance(_cdf_tags, str):
+            import json as _json_cdf
+            try:
+                _cdf_tags = _json_cdf.loads(_cdf_tags)
+            except Exception:
+                _cdf_tags = []
+        _cdf_chunk_type = d.get("chunk_type", "")
+        _cdf_encode_ctx = extract_encode_context(
+            _cdf_content, tags=_cdf_tags, chunk_type=_cdf_chunk_type
+        )
+        if _cdf_encode_ctx:
+            conn.execute(
+                "UPDATE memory_chunks SET encode_context=? WHERE id=?",
+                (_cdf_encode_ctx, d["id"])
+            )
+    except Exception:
+        pass  # encode_context 写入失败不阻塞主流程
+
+    # iter404：Semantic Priming — 检索后启动相关 entity
+    # 当 chunk 被插入时，它的 entity 被 primed（以支持后续 spreading）
+    # 这里只在 insert_chunk 时做轻量 priming（full priming 在检索时触发）
+    try:
+        _pr_content = (d.get("content") or "") + " " + (d.get("summary") or "")
+        _pr_ctx = extract_encode_context(_pr_content, chunk_type=d.get("chunk_type", ""))
+        if _pr_ctx and d.get("project"):
+            prime_entities(conn, _pr_ctx.split(","), d["project"], prime_strength=0.3)
+    except Exception:
+        pass
+
+
+# ── iter403：Cue-Dependent Forgetting — Context-Sensitive Retrieval（Tulving 1974）──
+#
+# 认知科学依据：
+#   Tulving & Thomson (1973) Encoding Specificity Principle：
+#     编码时的上下文（cues）与检索时的上下文（retrieval cues）重叠度越高，
+#     检索成功率越高。这是记忆最重要的规律之一。
+#   Godden & Baddeley (1975) Context-Dependent Memory：
+#     水下学的词在水下测试效果最好（环境上下文匹配），
+#     陆上学的词在陆上测试效果最好。
+#   Estes (1955) Stimulus Fluctuation Model：
+#     记忆提取受"编码时 context"与"检索时 context"的重叠度（θ）决定。
+#
+# OS 类比：Linux NUMA-aware memory allocation —
+#   进程倾向于从本地 NUMA node（编码时 context = home node）分配内存；
+#   当进程的运行 node（检索时 context）越接近 home node，
+#   内存访问延迟越低（命中率越高）。
+#   context_overlap ≈ NUMA distance 的倒数：overlap = 1 → local node（最优）。
+#
+# 实现：
+#   extract_encode_context(text, tags, chunk_type) → str（逗号分隔关键词）
+#     写入时从 content/summary/tags 提取关键词集，存入 encode_context 字段。
+#   compute_context_overlap(encode_ctx, retrieve_ctx) → float [0.0, 1.0]
+#     Jaccard 相似度：|A∩B| / |A∪B|。
+#   context_cue_weight(overlap) → float [0.85, 1.20]
+#     overlap → 检索分权重：高重叠 → 提升检索优先级（+20%），低重叠 → 轻微降权。
+#   apply_context_cue_boost(chunk, retrieve_context) → float
+#     对 fts_search/retriever 返回的 chunk score 应用 context cue weight。
+
+import re as _re_cdf
+
+# 停用词（中英文，过滤掉无语义的功能词）
+_CDF_STOPWORDS = frozenset({
+    # 英文
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "to", "of", "in", "on",
+    "at", "by", "for", "with", "from", "and", "or", "but", "not", "it",
+    "this", "that", "these", "those", "i", "we", "you", "he", "she", "they",
+    # 中文虚词/功能词
+    "的", "了", "在", "是", "有", "和", "也", "不", "这", "那", "但", "而",
+    "都", "就", "以", "为", "于", "中", "上", "下", "个", "我", "你", "他",
+})
+
+_CDF_TOKEN_RE = _re_cdf.compile(r'[a-zA-Z][a-zA-Z0-9_\-]*|[\u4e00-\u9fff]{2,}')
+
+
+def extract_encode_context(
+    text: str,
+    tags: list = None,
+    chunk_type: str = "",
+    max_tokens: int = 50,
+) -> str:
+    """
+    iter403：从 content/summary/tags/chunk_type 提取编码上下文关键词。
+
+    OS 类比：NUMA node affinity setup — 进程创建时记录 preferred node（home node），
+      之后分配内存时优先从该 node 取。
+
+    Returns:
+      逗号分隔的关键词字符串（小写，去停用词，最多 max_tokens 个）
+    """
+    if not text:
+        return ""
+    # 提取 tokens
+    tokens = set()
+    for tok in _CDF_TOKEN_RE.findall(text.lower()):
+        if tok not in _CDF_STOPWORDS and len(tok) >= 2:
+            tokens.add(tok)
+    # 加入 tags（标签是高权重上下文信号）
+    if tags:
+        for tag in tags:
+            if isinstance(tag, str):
+                t = tag.lower().strip()
+                if t and t not in _CDF_STOPWORDS:
+                    tokens.add(t)
+    # 加入 chunk_type（类型本身也是 context signal）
+    if chunk_type:
+        tokens.add(chunk_type.lower())
+    # 限制数量（取前 max_tokens，按字母序稳定）
+    sorted_tokens = sorted(tokens)[:max_tokens]
+    return ",".join(sorted_tokens)
+
+
+def compute_context_overlap(
+    encode_context: str,
+    retrieve_context: str,
+) -> float:
+    """
+    iter403：计算编码时上下文与检索时上下文的 Jaccard 重叠度。
+
+    OS 类比：NUMA distance 计算 —
+      两个 node 之间的距离越小，内存访问越快。
+      overlap = 1 - normalized_distance：1.0 = 同一 node（最优）。
+
+    Returns:
+      float ∈ [0.0, 1.0]，0.0 = 无重叠，1.0 = 完全相同
+    """
+    if not encode_context or not retrieve_context:
+        return 0.0
+    try:
+        enc_set = set(t.strip() for t in encode_context.split(",") if t.strip())
+        ret_set = set(t.strip() for t in retrieve_context.split(",") if t.strip())
+        if not enc_set or not ret_set:
+            return 0.0
+        intersection = len(enc_set & ret_set)
+        union = len(enc_set | ret_set)
+        return round(intersection / union, 4) if union > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
+def context_cue_weight(overlap: float) -> float:
+    """
+    iter403：将 context overlap 映射到检索分权重。
+
+    分段函数（OS 类比：NUMA access latency tiers）：
+      - overlap >= 0.50 → weight ∈ [1.10, 1.20]（高上下文匹配，类比 local node，延迟最低）
+      - overlap ∈ [0.20, 0.50) → weight = 1.0（中等匹配，不调整，类比远端 node 但可访问）
+      - overlap < 0.20 → weight ∈ [0.85, 1.0)（低匹配，轻微降权，类比跨 NUMA 域）
+
+    设计原则：
+      - 高匹配给正向激励（最多 +20%），强调上下文相关性
+      - 低匹配给轻微惩罚（最多 -15%），避免跨 context 污染
+      - 中间区域中性（避免噪声波动影响检索）
+
+    Returns:
+      float ∈ [0.85, 1.20]
+    """
+    try:
+        r = max(0.0, min(1.0, float(overlap) if overlap is not None else 0.0))
+    except (TypeError, ValueError):
+        r = 0.0
+
+    if r >= 0.50:
+        # 高重叠：linear 插值 [1.10, 1.20]
+        weight = 1.10 + (r - 0.50) / 0.50 * 0.10
+    elif r >= 0.20:
+        # 中等：不调整
+        weight = 1.0
+    else:
+        # 低重叠：linear 插值 [0.85, 1.0)
+        weight = 0.85 + r / 0.20 * 0.15
+
+    return round(min(1.20, max(0.85, weight)), 4)
+
+
+def apply_context_cue_boost(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    retrieve_context: str,
+    base_score: float = 1.0,
+) -> float:
+    """
+    iter403：查询 chunk 的 encode_context，计算与 retrieve_context 的 overlap，
+    返回 context_cue_weight 调整后的 score。
+
+    OS 类比：NUMA-aware scheduler load balancing —
+      检索时调度器偏向从与查询 context 最近的 NUMA node 上的 chunk 取结果。
+
+    Returns:
+      float：调整后的 score（base_score × context_cue_weight）
+    """
+    if not retrieve_context or not chunk_id:
+        return base_score
+    try:
+        row = conn.execute(
+            "SELECT encode_context FROM memory_chunks WHERE id=?", (chunk_id,)
+        ).fetchone()
+        if row is None or not row[0]:
+            return base_score
+        encode_ctx = row[0]
+        overlap = compute_context_overlap(encode_ctx, retrieve_context)
+        weight = context_cue_weight(overlap)
+        return round(base_score * weight, 4)
+    except Exception:
+        return base_score
+
+
+# ── iter404：Semantic Priming — Spreading Activation with Temporal Decay
+#             （Collins & Loftus 1975 / Meyer & Schvaneveldt 1971）────────────
+#
+# 认知科学依据：
+#   Collins & Loftus (1975) Spreading Activation Theory:
+#     语义网络中，激活从当前节点沿关联链向邻居扩散，
+#     扩散强度随网络距离衰减（activation × confidence^hops）。
+#     时间维度：启动效应持续约数十分钟（Meyer & Schvaneveldt 1971），
+#     随时间指数衰减（prime_strength × exp(-λ × t)）。
+#   Meyer & Schvaneveldt (1971) Semantic Priming:
+#     "Bread"→"Butter" 反应更快（短暂语义启动），
+#     但 "Bread"→"Doctor" 无启动（无语义关联）。
+#   Anderson (1983) ACT*:
+#     工作记忆中活跃的概念持续向关联记忆扩散激活，
+#     扩散在短暂窗口（~30分钟）内有效，之后衰减到基线。
+#
+# OS 类比：Linux page readahead（ra_state + readahead window）
+#   顺序访问 file pages 时，内核维护 readahead window；
+#   访问 page N → prefetch [N+1, N+ra_size] 进 page cache；
+#   类比：检索 chunk A → prime chunk A 的相关 entities → 后续相关 chunk 有 cache 优势。
+#   prime_half_life ≈ ra_lookahead_time：超过此时间，预取失效（evicted from cache）。
+#
+# 实现：
+#   prime_entities(conn, entity_names, project, prime_strength=1.0)
+#     写入/更新 priming_state 表（upsert，取 max(existing, new) strength）
+#   get_active_primes(conn, project, now_iso=None) → {entity_name: current_strength}
+#     读取 priming_state，按时间衰减计算当前强度（>0.05 才算 active）
+#   compute_priming_boost(conn, chunk_id, project, now_iso=None) → float [0.0, 0.30]
+#     通过 entity_map 找到 chunk 关联 entity，查询当前 prime 强度，返回 boost
+#   clear_stale_primes(conn, project, min_strength=0.05)
+#     清理已衰减到阈值以下的 priming 条目（GC）
+
+import math as _math_priming
+
+_PRIME_HALF_LIFE_MINUTES: float = 30.0   # 启动效应半衰期（分钟）
+_PRIME_MAX_BOOST: float = 0.30           # 最大启动加成
+_PRIME_MIN_STRENGTH: float = 0.05        # 低于此强度视为已失效
+
+
+def prime_entities(
+    conn: sqlite3.Connection,
+    entity_names: list,
+    project: str,
+    prime_strength: float = 1.0,
+    now_iso: str = None,
+) -> int:
+    """
+    iter404：将一组 entity 写入 priming_state（启动它们）。
+
+    OS 类比：readahead_cache_miss_trigger() — 缺页触发预取，将邻居 pages 标记为 readahead。
+
+    Returns:
+      int：实际写入/更新的 entity 数量
+    """
+    if not entity_names or not project:
+        return 0
+    if now_iso is None:
+        now_iso = datetime.now(timezone.utc).isoformat()
+    prime_strength = max(0.0, min(1.0, float(prime_strength)))
+    count = 0
+    try:
+        for ent in entity_names:
+            if not ent or not ent.strip():
+                continue
+            ent = ent.strip()
+            # 若已有 prime 且更强，保留更强的（取 max）
+            existing = conn.execute(
+                "SELECT prime_strength, primed_at FROM priming_state "
+                "WHERE entity_name=? AND project=?",
+                (ent, project)
+            ).fetchone()
+            if existing:
+                # 计算 existing 的当前有效强度（已衰减）
+                _ex_strength = existing[0]
+                try:
+                    _ex_ts = datetime.fromisoformat(existing[1].replace("Z", "+00:00")).timestamp()
+                    _now_ts = datetime.fromisoformat(now_iso.replace("Z", "+00:00")).timestamp()
+                    _elapsed_min = (_now_ts - _ex_ts) / 60.0
+                    _lambda = _math_priming.log(2) / _PRIME_HALF_LIFE_MINUTES
+                    _current = _ex_strength * _math_priming.exp(-_lambda * _elapsed_min)
+                except Exception:
+                    _current = 0.0
+                if prime_strength > _current:
+                    conn.execute(
+                        "UPDATE priming_state SET prime_strength=?, primed_at=? "
+                        "WHERE entity_name=? AND project=?",
+                        (prime_strength, now_iso, ent, project)
+                    )
+            else:
+                conn.execute(
+                    "INSERT INTO priming_state (entity_name, project, primed_at, prime_strength) "
+                    "VALUES (?, ?, ?, ?)",
+                    (ent, project, now_iso, prime_strength)
+                )
+            count += 1
+    except Exception:
+        pass
+    return count
+
+
+def get_active_primes(
+    conn: sqlite3.Connection,
+    project: str,
+    now_iso: str = None,
+    min_strength: float = _PRIME_MIN_STRENGTH,
+) -> dict:
+    """
+    iter404：返回 project 中当前活跃的 entity → current_prime_strength 映射。
+
+    OS 类比：readahead_state.ra_pages — 返回当前 readahead window 中仍有效的 pages。
+
+    Returns:
+      {entity_name: current_strength}，只包含 current_strength > min_strength 的条目
+    """
+    if not project:
+        return {}
+    if now_iso is None:
+        now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        _now_ts = datetime.fromisoformat(now_iso.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return {}
+    _lambda = _math_priming.log(2) / _PRIME_HALF_LIFE_MINUTES
+    result = {}
+    try:
+        rows = conn.execute(
+            "SELECT entity_name, prime_strength, primed_at FROM priming_state WHERE project=?",
+            (project,)
+        ).fetchall()
+        for ent, strength, primed_at in rows:
+            if not ent or not strength:
+                continue
+            try:
+                _primed_ts = datetime.fromisoformat(primed_at.replace("Z", "+00:00")).timestamp()
+                _elapsed_min = (_now_ts - _primed_ts) / 60.0
+                current = float(strength) * _math_priming.exp(-_lambda * _elapsed_min)
+            except Exception:
+                current = 0.0
+            if current > min_strength:
+                result[ent] = round(current, 4)
+    except Exception:
+        pass
+    return result
+
+
+def compute_priming_boost(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    project: str,
+    now_iso: str = None,
+) -> float:
+    """
+    iter404：计算 chunk 当前受到的语义启动加成（semantic priming boost）。
+
+    算法：
+      1. 通过 encode_context 找到 chunk 的 entity/keyword 集合
+      2. 与 active primes 取交集
+      3. boost = avg(matching prime strengths) × _PRIME_MAX_BOOST
+
+    OS 类比：readahead_cache_hit() — 访问的 page 在 readahead window 内 → cache hit，
+      节省一次 disk I/O（类比：primed entity match → 检索 score 提升）。
+
+    Returns:
+      float ∈ [0.0, _PRIME_MAX_BOOST]
+    """
+    if not chunk_id or not project:
+        return 0.0
+    try:
+        # 获取当前活跃 primes
+        active_primes = get_active_primes(conn, project, now_iso=now_iso)
+        if not active_primes:
+            return 0.0
+
+        # 获取 chunk 的 encode_context（关键词集合）
+        row = conn.execute(
+            "SELECT encode_context FROM memory_chunks WHERE id=?", (chunk_id,)
+        ).fetchone()
+        if row is None or not row[0]:
+            return 0.0
+
+        chunk_tokens = set(t.strip() for t in row[0].split(",") if t.strip())
+        if not chunk_tokens:
+            return 0.0
+
+        # 匹配 prime entities 与 chunk tokens（entity name 子串匹配或精确匹配）
+        matching_strengths = []
+        for prime_ent, strength in active_primes.items():
+            prime_lower = prime_ent.lower()
+            # 精确匹配 OR 子串匹配（entity "redis" 匹配 token "redis-cluster"）
+            if prime_lower in chunk_tokens or any(
+                prime_lower in tok or tok in prime_lower
+                for tok in chunk_tokens
+                if len(tok) >= 3
+            ):
+                matching_strengths.append(strength)
+
+        if not matching_strengths:
+            return 0.0
+
+        avg_strength = sum(matching_strengths) / len(matching_strengths)
+        boost = round(avg_strength * _PRIME_MAX_BOOST, 4)
+        return min(_PRIME_MAX_BOOST, max(0.0, boost))
+    except Exception:
+        return 0.0
+
+
+def clear_stale_primes(
+    conn: sqlite3.Connection,
+    project: str = None,
+    min_strength: float = _PRIME_MIN_STRENGTH,
+    now_iso: str = None,
+) -> int:
+    """
+    iter404：清理已衰减到阈值以下的 priming 条目（GC）。
+
+    OS 类比：invalidate_readahead_pages() — 清理 readahead window 中已过期的预取 pages。
+
+    Returns:
+      int：删除的条目数
+    """
+    if now_iso is None:
+        now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        _now_ts = datetime.fromisoformat(now_iso.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0
+    _lambda = _math_priming.log(2) / _PRIME_HALF_LIFE_MINUTES
+    # 计算在 min_strength 时的最大有效时间（分钟）
+    # min_strength = 1.0 × exp(-λ × t_max) → t_max = -ln(min_strength) / λ
+    try:
+        t_max_min = -_math_priming.log(min_strength) / _lambda  # minutes
+        cutoff_ts = _now_ts - t_max_min * 60
+        cutoff_iso = datetime.fromtimestamp(cutoff_ts, tz=timezone.utc).isoformat()
+    except Exception:
+        return 0
+
+    try:
+        where = "WHERE primed_at < ?"
+        params = [cutoff_iso]
+        if project is not None:
+            where += " AND project=?"
+            params.append(project)
+        cursor = conn.execute(f"DELETE FROM priming_state {where}", params)
+        return cursor.rowcount
+    except Exception:
+        return 0
+
+
+# ── iter405：Retroactive Interference (RI) — Recency Penalty for Stale Chunks
+#             （Underwood 1957 / McGeoch & Irion 1952）──────────────────────────
+#
+# 认知科学依据：
+#   Underwood (1957) Proactive Inhibition and Forgetting:
+#     在学习 List B 之后，回忆 List A 的成功率下降（retroactive interference）。
+#     新记忆和旧记忆在同一语义领域竞争检索路径，新的倾向于"覆盖"旧的。
+#   McGeoch & Irion (1952) The Psychology of Human Learning:
+#     干扰效应强度 × 新旧材料的相似度；相似度越高，干扰越强。
+#   Anderson & Neely (1996) Interference and Inhibition:
+#     抑制（inhibition）是主动过程，不只是竞争失败的被动结果。
+#
+# OS 类比：Linux MGLRU generation demotion —
+#   进入系统的新 page 从 youngest generation 开始；
+#   老一代（older generation）的 page 在 aging scan 中随新 page 的涌入逐渐降代；
+#   当内存紧张时，老一代 page 被优先驱逐（recency bias）。
+#   chunk age 越大、同主题新 chunk 越多 → recency_penalty 越大 → 检索分下降。
+#
+# 实现：
+#   compute_recency_penalty(chunk_age_days, newer_same_topic_count, similarity) → float [0.0, 0.15]
+#     - chunk_age_days：chunk 的年龄（天数）
+#     - newer_same_topic_count：同主题（encode_context 重叠）且更新的 chunk 数量
+#     - similarity：encode_context Jaccard 与最近同主题 chunk 的平均重叠
+#     返回检索分罚分（0.0 = 无干扰，0.15 = 最大干扰）
+#
+#   get_newer_same_topic_count(conn, chunk_id, project, overlap_threshold=0.30) → int
+#     查找同 project 中更新、且 encode_context 与当前 chunk 高度重叠的 chunk 数量
+
+_RI_MAX_PENALTY: float = 0.15     # 最大干扰罚分（降低检索分）
+_RI_AGE_THRESHOLD_DAYS: float = 7.0  # 7 天以上的 chunk 才可能受 RI 影响
+_RI_COUNT_SATURATION: int = 5     # 5 个以上新 chunk 后干扰饱和
+
+
+def compute_recency_penalty(
+    chunk_age_days: float,
+    newer_same_topic_count: int,
+    similarity: float = 0.5,
+) -> float:
+    """
+    iter405：计算旧 chunk 因新内容涌入而受到的 retroactive interference 惩罚。
+
+    公式：penalty = min(_RI_MAX_PENALTY,
+                        age_factor × count_factor × similarity_factor)
+
+      age_factor：年龄越大 → 越容易被干扰（line 0 to 1 over 30 days）
+        age_factor = min(1.0, (age - threshold) / 30.0)  if age > threshold else 0.0
+      count_factor：新 chunk 越多 → 干扰越强（saturate at _RI_COUNT_SATURATION）
+        count_factor = min(1.0, newer_count / _RI_COUNT_SATURATION)
+      similarity_factor：相似度越高 → 干扰越强
+        similarity_factor = similarity
+
+    设计：只有当 age > 7天、有 >= 1 个新 chunk 存在、且有一定相似度时才产生惩罚。
+
+    OS 类比：MGLRU aging pressure = generation_age × page_count × access_recency
+
+    Returns:
+      float ∈ [0.0, _RI_MAX_PENALTY]
+    """
+    try:
+        age = max(0.0, float(chunk_age_days))
+        count = max(0, int(newer_same_topic_count))
+        sim = max(0.0, min(1.0, float(similarity)))
+    except (TypeError, ValueError):
+        return 0.0
+
+    if age <= _RI_AGE_THRESHOLD_DAYS or count == 0 or sim < 0.10:
+        return 0.0
+
+    age_factor = min(1.0, (age - _RI_AGE_THRESHOLD_DAYS) / 30.0)
+    count_factor = min(1.0, count / _RI_COUNT_SATURATION)
+    penalty = age_factor * count_factor * sim * _RI_MAX_PENALTY
+    return round(min(_RI_MAX_PENALTY, max(0.0, penalty)), 4)
+
+
+def get_newer_same_topic_count(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    project: str,
+    overlap_threshold: float = 0.25,
+    now_iso: str = None,
+) -> tuple:
+    """
+    iter405：查找同 project 中比当前 chunk 更新、且 encode_context 重叠度 >= threshold 的 chunk 数量。
+
+    OS 类比：mglru_scan_newer_pages() — 统计 younger generation 中的相关 pages 数量。
+
+    Returns:
+      (newer_count: int, avg_overlap: float)
+    """
+    if not chunk_id or not project:
+        return 0, 0.0
+    try:
+        row = conn.execute(
+            "SELECT created_at, encode_context FROM memory_chunks WHERE id=?",
+            (chunk_id,)
+        ).fetchone()
+        if row is None or not row[0]:
+            return 0, 0.0
+        chunk_created_at, chunk_enc_ctx = row[0], row[1] or ""
+        if not chunk_enc_ctx:
+            return 0, 0.0
+
+        chunk_tokens = set(t.strip() for t in chunk_enc_ctx.split(",") if t.strip())
+        if not chunk_tokens:
+            return 0, 0.0
+
+        # 查找更新的 chunk（created_at > chunk_created_at）
+        newer_rows = conn.execute(
+            "SELECT encode_context FROM memory_chunks "
+            "WHERE project=? AND id != ? AND created_at > ? AND encode_context IS NOT NULL",
+            (project, chunk_id, chunk_created_at)
+        ).fetchall()
+
+        if not newer_rows:
+            return 0, 0.0
+
+        overlaps = []
+        for (enc_ctx,) in newer_rows:
+            if not enc_ctx:
+                continue
+            newer_tokens = set(t.strip() for t in enc_ctx.split(",") if t.strip())
+            if not newer_tokens:
+                continue
+            union = len(chunk_tokens | newer_tokens)
+            if union > 0:
+                jaccard = len(chunk_tokens & newer_tokens) / union
+                if jaccard >= overlap_threshold:
+                    overlaps.append(jaccard)
+
+        count = len(overlaps)
+        avg_overlap = sum(overlaps) / count if count > 0 else 0.0
+        return count, round(avg_overlap, 4)
+    except Exception:
+        return 0, 0.0
+
 
 # ── 迭代100：IPC 共享内存 API（OS 类比：shmget/shmat/shmdt + MESI 协议）────────
 
@@ -1733,6 +2569,12 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
     if now_iso is None:
         now_iso = datetime.now(timezone.utc).isoformat()
     placeholders = ",".join("?" * len(chunk_ids))
+    # iter389: Read last_accessed BEFORE update (needed for reconsolidation gap calc)
+    _pre_access_rows = conn.execute(
+        f"SELECT id, last_accessed FROM memory_chunks WHERE id IN ({placeholders})",
+        chunk_ids,
+    ).fetchall()
+    _pre_access_map = {row[0]: row[1] for row in _pre_access_rows}
     conn.execute(
         f"UPDATE memory_chunks SET last_accessed=?, access_count=COALESCE(access_count,0)+1 "
         f"WHERE id IN ({placeholders})",
@@ -1744,22 +2586,71 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
     #   quality=5 → ×1.2（最大增益），quality=3 → ×1.0（中性），quality<3 → 降低 stability
     #   旧 ×2.0 = 固定 quality=13 的极端假设，导致 stability 过快饱和
     #
-    # memory-os 召回质量推断（无显式 quality 时默认 quality=4，即"良好召回"）：
-    #   quality=4 → S_new = S_old × 1.1（轻微加固），优于旧 ×2.0 的激进增长
-    #   调用方可通过 recall_quality 参数显式指定（retriever 将在未来版本传入）
+    # iter389: Reconsolidation Window — Walker & Stickgold (2004) 再巩固窗口
+    #   gap < 1hr   → quality=3（短时工作记忆刷新，无长时巩固效果）
+    #   1hr ≤ gap < 24hr → quality=4（中等间隔，轻微加固）
+    #   gap ≥ 24hr  → quality=5（真正的间隔回忆，最大巩固效果）
+    #   显式 recall_quality 参数优先（调用方已推断质量时不被覆盖）
     #
-    # OS 类比：CPU TLB 击中后 PTE Accessed bit 置位
-    #   短间隔重复（连续访问）= 较小 quality，长间隔仍命中 = 较高 quality
-    _rq = recall_quality if (recall_quality is not None) else 4
-    _rq = max(0, min(5, _rq))  # clamp to [0, 5]
-    _sm2_factor = 1.0 + 0.1 * (_rq - 3)  # quality=3→×1.0, quality=5→×1.2, quality=0→×0.7
-    _sm2_factor = max(0.7, _sm2_factor)   # 下限：即使 quality=0 也不跌破 0.7
-    conn.execute(
-        f"UPDATE memory_chunks "
-        f"SET stability=MIN(365.0, COALESCE(stability,1.0)*?) "
-        f"WHERE id IN ({placeholders})",
-        [_sm2_factor] + chunk_ids,
-    )
+    # OS 类比：Linux MGLRU page aging —
+    #   短间隔访问（< aging_interval）不晋升 generation；跨 aging 访问 → generation 晋升
+    # iter389: Reconsolidation Window — dynamic SM-2 quality inference
+    if recall_quality is not None:
+        # explicit quality override — skip reconsolidation window
+        _rq = max(0, min(5, recall_quality))
+        _sm2_factor = max(0.7, 1.0 + 0.1 * (_rq - 3))
+        conn.execute(
+            f"UPDATE memory_chunks "
+            f"SET stability=MIN(365.0, COALESCE(stability,1.0)*?) "
+            f"WHERE id IN ({placeholders})",
+            [_sm2_factor] + chunk_ids,
+        )
+    else:
+        import config as _config
+        _recon_enabled = _config.get("recon.enabled")
+        if _recon_enabled:
+            # 动态计算：使用 pre-update last_accessed 推断 quality（避免 N+1 重查）
+            _short_gap_secs = _config.get("recon.short_gap_hours") * 3600.0
+            _medium_gap_secs = _config.get("recon.medium_gap_hours") * 3600.0
+            _long_q = _config.get("recon.long_gap_quality")
+            _now_ts = datetime.fromisoformat(now_iso.replace("Z", "+00:00")).timestamp()
+            # 构建 per-chunk quality map（使用 pre-update last_accessed），默认 quality=4
+            _quality_map = {cid: 4 for cid in chunk_ids}
+            for cid, la in _pre_access_map.items():
+                if la:
+                    try:
+                        _la_ts = datetime.fromisoformat(la.replace("Z", "+00:00")).timestamp()
+                        _gap = _now_ts - _la_ts
+                        if _gap < _short_gap_secs:
+                            _quality_map[cid] = 3
+                        elif _gap < _medium_gap_secs:
+                            _quality_map[cid] = 4
+                        else:
+                            _quality_map[cid] = _long_q
+                    except Exception:
+                        pass
+            # 按 quality 分组批量更新（避免 N 次单独 SQL）
+            from collections import defaultdict as _defaultdict
+            _by_quality = _defaultdict(list)
+            for cid in chunk_ids:
+                _by_quality[_quality_map.get(cid, 4)].append(cid)
+            for _q, _cids in _by_quality.items():
+                _sm2_f = max(0.7, 1.0 + 0.1 * (_q - 3))
+                _ph = ",".join("?" * len(_cids))
+                conn.execute(
+                    f"UPDATE memory_chunks SET stability=MIN(365.0,COALESCE(stability,1.0)*?) "
+                    f"WHERE id IN ({_ph})",
+                    [_sm2_f] + _cids,
+                )
+        else:
+            # fallback: fixed quality=4
+            _sm2_factor = 1.1  # quality=4 → ×1.1
+            conn.execute(
+                f"UPDATE memory_chunks "
+                f"SET stability=MIN(365.0, COALESCE(stability,1.0)*?) "
+                f"WHERE id IN ({placeholders})",
+                [_sm2_factor] + chunk_ids,
+            )
     # iter106: Auto-Verification — access_count >= 3 且 pending → verified
     # 逻辑：多次被实际召回说明有效，自动升级 verification_status
     # OS 类比：ECC 多次读取一致 → 标记页面为 clean
@@ -1771,6 +2662,22 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
         f"  AND COALESCE(access_count,0) >= ?",
         chunk_ids + [AUTO_VERIFY_THRESHOLD],
     )
+
+    # iter404: Semantic Priming — 访问 chunk 时，prime 其 encode_context 中的实体
+    # OS 类比：readahead_trigger() — 访问 page N，将相邻 pages 标记进 readahead window
+    try:
+        ec_rows = conn.execute(
+            f"SELECT id, encode_context, project FROM memory_chunks "
+            f"WHERE id IN ({placeholders}) AND encode_context IS NOT NULL AND encode_context != ''",
+            chunk_ids,
+        ).fetchall()
+        for _cid, _ec, _proj in ec_rows:
+            if _ec and _proj:
+                _tokens = [t.strip() for t in _ec.split(",") if t.strip()]
+                if _tokens:
+                    prime_entities(conn, _tokens, _proj, prime_strength=0.8, now_iso=now_iso)
+    except Exception:
+        pass
 
 def insert_trace(conn: sqlite3.Connection, trace_dict: dict) -> None:
     """写入 recall_traces 记录。迭代65：新增 ftrace_json 阶段级追踪。"""
@@ -1871,6 +2778,125 @@ def already_exists(conn: sqlite3.Connection, summary: str, chunk_type: str = Non
         ).fetchone()
     return row is not None
 
+
+def detect_and_invalidate_conflicts(
+    conn: sqlite3.Connection,
+    new_summary: str,
+    chunk_type: str,
+    project: str,
+) -> int:
+    """
+    iter371: Memory Conflict Detection — MESI 缓存一致性协议类比
+
+    认知科学背景：
+      前向干扰（Retroactive Interference, McGeoch & McDonald 1931）—
+      新记忆的写入会干扰已有的旧记忆，使旧记忆的提取可靠性下降。
+      例如：旧知识"使用 X 方案"，新知识"放弃 X 采用 Y"—— 旧知识应降权。
+
+    OS 类比：MESI 缓存一致性协议（Intel 1984）—
+      当 CPU 核心修改缓存行（M state），其他核心持有该行的副本
+      从 Shared(S) 降级为 Invalid(I)，下次访问触发 cache miss 重新从主存加载。
+      这里：新写入 chunk 触发对语义矛盾旧 chunk 的 Invalid 降权。
+
+    策略：
+      1. 只对 decision/reasoning_chain 类型触发（其他类型不存在明确语义矛盾）
+      2. 从 new_summary 中提取"被否定实体"：放弃/不选/废弃/replaced by/not using 后的词
+      3. FTS5 搜索旧 chunk 中包含这些关键词的记录（同 project + 同 chunk_type）
+      4. 对语义矛盾的旧 chunk：importance *= 0.8，oom_adj += 100（降权但不删除）
+      5. 返回失效的 chunk 数
+
+    示例：
+      new: "放弃 SQLite 改用 PostgreSQL"
+      → 搜索含 "SQLite" 的旧 decision chunk
+      → 找到 "选择 SQLite 因为简单" → importance *= 0.8, oom_adj += 100
+    """
+    if chunk_type not in ("decision", "reasoning_chain"):
+        return 0
+    if not new_summary or len(new_summary) < 5:
+        return 0
+
+    import re as _re
+
+    # 提取被否定/替换的实体关键词
+    NEGATION_PATTERNS = [
+        r'(?:放弃|不选|不用|废弃|替换|不再用|弃用|移除|删除)\s*([\w\u4e00-\u9fff_\-.]{2,20})',
+        r'(?:replaced?|abandoned?|rejected?|removed?|deprecated?)\s+([\w_\-.]{2,20})',
+        r'(?:不选择|不采用|不推荐)\s*([\w\u4e00-\u9fff_\-.]{2,20})',
+        r'而非\s*([\w\u4e00-\u9fff_\-.]{2,20})',
+        r'not\s+using\s+([\w_\-.]{2,20})',
+        r'instead\s+of\s+([\w_\-.]{2,20})',
+    ]
+
+    negated_entities = []
+    for pat in NEGATION_PATTERNS:
+        for m in _re.finditer(pat, new_summary, _re.IGNORECASE | _re.UNICODE):
+            entity = m.group(1).strip()
+            if len(entity) >= 2:
+                negated_entities.append(entity)
+
+    if not negated_entities:
+        return 0
+
+    invalidated = 0
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    for entity in negated_entities[:3]:  # 最多处理3个实体（避免过度失效）
+        try:
+            # FTS5 搜索包含该实体的旧 chunk（同 project + 同类型）
+            fts_query = entity.replace('"', '""')
+            rows = conn.execute(
+                """SELECT mc.id, mc.importance, mc.oom_adj, mc.summary
+                   FROM memory_chunks mc
+                   JOIN memory_chunks_fts fts ON mc.id = fts.rowid
+                   WHERE fts.summary MATCH ?
+                     AND mc.project = ?
+                     AND mc.chunk_type = ?
+                     AND mc.summary != ?
+                   LIMIT 5""",
+                (f'"{fts_query}"', project, chunk_type, new_summary)
+            ).fetchall()
+        except Exception:
+            # FTS5 可能不可用，降级到 LIKE 查询
+            try:
+                rows = conn.execute(
+                    """SELECT id, importance, oom_adj, summary
+                       FROM memory_chunks
+                       WHERE summary LIKE ?
+                         AND project = ?
+                         AND chunk_type = ?
+                         AND summary != ?
+                       LIMIT 5""",
+                    (f"%{entity}%", project, chunk_type, new_summary)
+                ).fetchall()
+            except Exception:
+                rows = []
+
+        for row in rows:
+            cid, imp, oom, old_summary = row
+            # 验证旧 chunk 与新 chunk 确实语义矛盾：旧 chunk 应该是"推荐"该实体的
+            # 避免把"放弃 X"之类的旧 excluded_path chunk 也降权
+            AFFIRMATION_SIGNALS = _re.compile(
+                r'(?:选择|采用|推荐|使用|用|基于|保留|保持|'
+                r'decided?|chosen?|using|adopted?|recommended?)',
+                _re.IGNORECASE
+            )
+            if not AFFIRMATION_SIGNALS.search(old_summary):
+                continue
+
+            new_imp = round(max(imp * 0.8, 0.1), 4)
+            new_oom = min((oom or 0) + 100, 800)
+            try:
+                conn.execute(
+                    "UPDATE memory_chunks SET importance=?, oom_adj=?, updated_at=? WHERE id=?",
+                    (new_imp, new_oom, now_iso, cid)
+                )
+                invalidated += 1
+            except Exception:
+                pass
+
+    return invalidated
+
+
 def merge_similar(conn: sqlite3.Connection, summary: str, chunk_type: str,
                   importance: float, project: str = None) -> bool:
     """
@@ -1900,6 +2926,150 @@ def merge_similar(conn: sqlite3.Connection, summary: str, chunk_type: str,
         (importance, now_iso, now_iso, new_content, similar_id),
     )
     return True
+
+def coalesce_small_chunks(
+    conn: sqlite3.Connection,
+    project: str,
+    min_group: int = 3,
+    max_summary_len: int = 60,
+    chunk_type: str = "conversation_summary",
+    topic_prefix_len: int = 4,
+) -> int:
+    """
+    iter374: Chunk Coalescing — Slab Allocator 合并碎片化小 chunk。
+
+    人的记忆类比：Chunking (Miller 1956) — 人类将相关小记忆片段合并为有意义的组块，
+      降低工作记忆负担，提升整体记忆容量。
+    OS 类比：Linux Slab Allocator (Bonwick 1994) — 相同大小的对象归入同一 slab，
+      避免碎片化，提高内存利用率。
+      memory_chunks 中 conversation_summary 类型往往因为短会话产生大量碎片：
+        chunk_1: "用户讨论了端口配置"  (imp=0.5)
+        chunk_2: "用户询问了端口号"    (imp=0.5)
+        chunk_3: "用户确认了3000端口" (imp=0.5)
+      → 合并为一个高质量复合 chunk（max importance，content = 所有 summary 拼接）。
+
+    触发条件（同时满足）：
+      1. chunk_type 为 conversation_summary（可配置）
+      2. summary 长度 <= max_summary_len（小 chunk 特征）
+      3. summary 前 topic_prefix_len 字相同（同一主题组）
+      4. 同组 chunk 数量 >= min_group
+
+    合并策略：
+      - 保留最高 importance 的 chunk（anchor）
+      - anchor.content = 所有 chunk summary 拼接
+      - anchor.importance = max(all importance)
+      - 删除其余 chunk
+      - 递增 chunk_version（触发 TLB 失效）
+
+    Returns: 合并产生的 composite chunk 数量（即触发的合并组数）
+    """
+    try:
+        # 查找所有符合条件的小 chunk（summary 短 + 指定类型 + 同项目）
+        rows = conn.execute(
+            """SELECT id, summary, importance, content, created_at
+               FROM memory_chunks
+               WHERE project = ? AND chunk_type = ?
+                 AND LENGTH(summary) <= ?
+               ORDER BY summary, created_at""",
+            (project, chunk_type, max_summary_len),
+        ).fetchall()
+
+        if not rows:
+            return 0
+
+        # 按 topic_prefix 分组（前 N 字作为主题键）
+        groups: dict = {}
+        for row_id, summary, importance, content, created_at in rows:
+            prefix = (summary or "")[:topic_prefix_len].strip()
+            if not prefix:
+                continue
+            groups.setdefault(prefix, []).append({
+                "id": row_id,
+                "summary": summary,
+                "importance": importance,
+                "content": content or "",
+                "created_at": created_at,
+            })
+
+        coalesced = 0
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        for prefix, members in groups.items():
+            if len(members) < min_group:
+                continue  # 不足 min_group，不合并
+
+            # 按 importance 降序选 anchor（最高 importance 的 chunk 保留）
+            members_sorted = sorted(members, key=lambda x: x["importance"], reverse=True)
+            anchor = members_sorted[0]
+            rest = members_sorted[1:]
+
+            # 构建复合 content = 所有不重复 summary 拼接
+            all_summaries = [anchor["summary"]] + [m["summary"] for m in rest]
+            seen: set = set()
+            unique_summaries = []
+            for s in all_summaries:
+                s_strip = s.strip()
+                if s_strip and s_strip not in seen:
+                    seen.add(s_strip)
+                    unique_summaries.append(s_strip)
+            composite_content = "\n".join(unique_summaries)[:2000]
+
+            # 更新 anchor
+            max_imp = anchor["importance"]
+            conn.execute(
+                """UPDATE memory_chunks
+                   SET content=?, importance=?, updated_at=?
+                   WHERE id=?""",
+                (composite_content, max_imp, now_iso, anchor["id"]),
+            )
+
+            # 删除其余（包括 FTS5 同步）
+            rest_ids = [m["id"] for m in rest]
+            if rest_ids:
+                placeholders = ",".join("?" * len(rest_ids))
+                # 获取 rowids for FTS5 清理
+                rowids = [r[0] for r in conn.execute(
+                    f"SELECT rowid FROM memory_chunks WHERE id IN ({placeholders})",
+                    rest_ids,
+                ).fetchall()]
+                conn.execute(
+                    f"DELETE FROM memory_chunks WHERE id IN ({placeholders})",
+                    rest_ids,
+                )
+                for rowid in rowids:
+                    try:
+                        conn.execute(
+                            "DELETE FROM memory_chunks_fts WHERE rowid_ref=?",
+                            (str(rowid),),
+                        )
+                    except Exception:
+                        pass
+
+            coalesced += 1
+
+        if coalesced > 0:
+            # 递增 chunk_version，触发 TLB 失效
+            try:
+                _cv_path = os.path.join(
+                    os.environ.get("MEMORY_OS_DIR",
+                                   os.path.join(os.path.expanduser("~"), ".claude", "memory-os")),
+                    ".chunk_version",
+                )
+                try:
+                    with open(_cv_path, encoding="utf-8") as _f:
+                        _cv = int(_f.read().strip())
+                except Exception:
+                    _cv = 0
+                with open(_cv_path, "w", encoding="utf-8") as _f:
+                    _f.write(str(_cv + 1))
+            except Exception:
+                pass
+
+        return coalesced
+
+    except Exception:
+        return 0
+
 
 def delete_chunks(conn: sqlite3.Connection, chunk_ids: list) -> int:
     """
@@ -2397,6 +3567,9 @@ def spreading_activate(
     max_hops: int = 2,
     existing_ids: set = None,
     max_activation_bonus: float = 0.4,
+    edge_half_life_days: float = 90.0,
+    distance_decay_enabled: bool = None,
+    distance_decay_factor: float = None,
 ) -> dict:
     """
     迭代310：从 FTS5 命中的 chunk 出发，沿 entity_edges 扩散激活邻居 chunk。
@@ -2406,8 +3579,28 @@ def spreading_activate(
       2. 对每个 entity，查询 entity_edges 一跳邻居（带 confidence）
       3. 对一跳邻居的 entity，再查二跳邻居（max_hops 控制深度）
       4. 将邻居 entity 映射回 chunk_id（通过 entity_map）
-      5. 计算激活分：confidence × decay^跳数，上限 max_activation_bonus
+      5. 计算激活分：effective_confidence × decay^跳数，上限 max_activation_bonus
       6. 跳过 existing_ids 中已有的 chunk
+
+    iter387: Temporal Edge Decay — 关联强度时间衰减
+      认知科学：Collins & Loftus (1975) Spreading Activation Model —
+        关联强度随时间衰减（忘却导致联想路径弱化），频繁激活的路径强化（LTP）。
+      OS 类比：ARP Cache TTL — 过期条目 confidence 降低，直到 GC 或刷新。
+      effective_confidence = confidence × exp(-λ × days_since_created)
+        λ = ln(2) / edge_half_life_days（默认 90 天半衰期）
+        90 天后 confidence 折半，365 天后折至约 7%，防止旧关联路径持续污染激活。
+      edge_half_life_days=0 表示禁用时间衰减（保持原行为）。
+
+    iter393: Semantic Distance Decay — 语义距离衰减
+      认知科学：Collins & Loftus (1975) — 激活从锚点沿语义图扩散时，随距离衰减：
+        "cat" → "animal"（1跳，强激活）→ "mammal"（2跳，弱激活）
+        距离越远语义相关性越低，激活量应按距离梯度衰减而非等权传播。
+      OS 类比：NUMA 局部性 — 同节点访问快，跨 2 节点延迟呈指数增长（不是线性）。
+      实现：每跳额外乘以 distance_decay_factor（独立于 edge confidence 的 decay），
+        hop=1 时：score × distance_decay_factor^1
+        hop=2 时：score × distance_decay_factor^2
+        (distance_decay_factor < 1.0，典型值 0.6，2 跳约为 0.36)
+      distance_decay_enabled=False 时退化到旧行为（只有 confidence-weighted decay）。
 
     Returns:
       {chunk_id: activation_score} — 仅包含新增的邻居 chunk
@@ -2442,9 +3635,54 @@ def spreading_activate(
     visited_entities = set(frontier.keys())
     activation: dict = {}  # chunk_id → best_activation_score
 
+    # iter387: Temporal Edge Decay 参数
+    import math as _math
+    _edge_decay_enabled = edge_half_life_days > 0
+    if _edge_decay_enabled:
+        _edge_lambda = _math.log(2) / edge_half_life_days  # λ = ln(2)/T½
+    from datetime import datetime as _dt, timezone as _tz
+    _now_ts = _dt.now(_tz.utc).timestamp()
+
+    # iter393: Semantic Distance Decay 参数
+    # 从 sysctl 读取（调用者可通过参数覆盖，不传则从 config 读）
+    if distance_decay_enabled is None:
+        try:
+            from config import get as _cget393
+            distance_decay_enabled = _cget393("retriever.sa_distance_decay_enabled")
+        except Exception:
+            distance_decay_enabled = True
+    if distance_decay_factor is None:
+        try:
+            from config import get as _cget393f
+            distance_decay_factor = float(_cget393f("retriever.sa_distance_decay_factor") or 0.6)
+        except Exception:
+            distance_decay_factor = 0.6
+
+    def _effective_confidence(conf: float, created_at_str: str) -> float:
+        """iter387: 计算时间衰减后的有效 confidence。"""
+        if not _edge_decay_enabled or not created_at_str:
+            return conf
+        try:
+            # 解析 created_at（ISO 8601，可能含 +00:00 或无时区）
+            ca = created_at_str.replace("Z", "+00:00")
+            created_ts = _dt.fromisoformat(ca).timestamp()
+            days_old = (_now_ts - created_ts) / 86400.0
+            if days_old <= 0:
+                return conf
+            # exponential decay: conf × e^(-λ×days)
+            decayed = conf * _math.exp(-_edge_lambda * days_old)
+            return max(decayed, 0.01)  # 最低 0.01，防止完全失活
+        except Exception:
+            return conf
+
     for hop in range(1, max_hops + 1):
         if decay ** hop < 0.05:  # 激活衰减至 5% 以下时停止
             break
+
+        # iter393: 语义距离衰减系数（distance_decay_factor ^ hop）
+        # hop=1: 0.6^1=0.60, hop=2: 0.6^2=0.36
+        # OS 类比：NUMA 访问延迟 — 每跨一个 NUMA node，延迟约乘以 1.5-3×
+        _dist_decay = (distance_decay_factor ** hop) if distance_decay_enabled else 1.0
 
         next_frontier = {}
         for entity, parent_score in frontier.items():
@@ -2452,7 +3690,7 @@ def spreading_activate(
             try:
                 edges = conn.execute(
                     f"SELECT CASE WHEN from_entity=? THEN to_entity ELSE from_entity END as neighbor, "
-                    f"confidence FROM entity_edges "
+                    f"confidence, created_at FROM entity_edges "
                     f"WHERE (from_entity=? OR to_entity=?) {proj_filter} "
                     f"ORDER BY confidence DESC LIMIT 20",
                     [entity, entity, entity] + ([project] if project else []),
@@ -2460,11 +3698,15 @@ def spreading_activate(
             except Exception:
                 continue
 
-            for neighbor, confidence in edges:
+            for neighbor, confidence, created_at in edges:
                 if neighbor in visited_entities:
                     continue
-                # 每跳只乘一次 decay（parent_score 已包含前序跳数的 decay 累积）
-                edge_score = parent_score * confidence * decay
+                # iter387: 应用时间衰减
+                eff_conf = _effective_confidence(confidence, created_at)
+                # iter393: 每跳乘以语义距离衰减（_dist_decay = factor^hop）
+                # parent_score 已包含前序跳数的 decay 累积；
+                # _dist_decay 是本跳相对 seed 的绝对距离衰减（跨越语义鸿沟的代价）
+                edge_score = parent_score * eff_conf * decay * _dist_decay
                 if edge_score < 0.05:
                     continue
                 if neighbor not in next_frontier or next_frontier[neighbor] < edge_score:
@@ -2497,6 +3739,201 @@ def spreading_activate(
         frontier = next_frontier
 
     return activation
+
+
+# ── iter380：Schema Anchoring — Bartlett (1932) Schema Theory ────────────────
+#
+# 认知科学：Bartlett (1932) Schema Theory — 人的记忆不是存储原始事实，
+#   而是将新信息嵌入已有 schema（知识结构框架）中存储。
+#   检索时，激活 schema → 框架内的所有关联知识一起浮现。
+#
+# OS 类比：Linux SLUB Allocator kmem_cache —
+#   相同类型的对象共享 kmem_cache（schema），
+#   新对象（chunk）写入时归属对应 cache；
+#   内存压力时，cache 整体作为回收单元（schema-level eviction）；
+#   cache 命中时，同 slab 的相邻对象自动预热（schema spreading）。
+#
+# 实现：
+#   anchor_chunk_schema(conn, chunk_id, summary, project)
+#     — 写入时扫描 summary 匹配预定义 schema 规则，写入 schema_anchors 绑定行
+#   schema_spread_activate(conn, hit_chunk_ids, project)
+#     — 检索时：命中 chunk → 查 schema_anchors → 激活同 schema 的其他 chunk
+
+# 预定义 Schema 规则（基于实际使用场景，按特异性排序）
+# 格式：(schema_name, [关键词正则], confidence)
+_SCHEMA_RULES = [
+    # web_service_config — 服务端口/URL/主机/协议配置（解决"忘记端口"核心问题）
+    ("web_service_config",
+     [r'\b(?:port|端口|listen|bind)\b.*?\d{2,5}',
+      r'\b\d{2,5}\s*(?:port|端口)',
+      r'(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d{2,5}',
+      r'(?:http|https|ws|grpc|tcp)://[^\s]+:\d{2,5}',
+      r'(?:前端|backend|server|service)\s*(?:端口|port)\s*[=:]\s*\d{2,5}'],
+     0.90),
+    # auth_config — 认证/授权配置
+    ("auth_config",
+     [r'\b(?:token|api.?key|secret|password|credential|auth)\b.{0,30}(?:=|:)\s*\S+',
+      r'(?:bearer|jwt|oauth|api.?key|密钥|认证|鉴权)',
+      r'\b(?:GITHUB_TOKEN|OPENAI_API_KEY|AWS_SECRET)\b'],
+     0.85),
+    # performance_constraint — 性能约束/指标
+    ("performance_constraint",
+     [r'\d+(?:\.\d+)?\s*(?:ms|μs|us|s)\b.*(?:latency|延迟|timeout|超时)',
+      r'(?:p99|p95|p50|avg)\s*[=<>:]\s*\d+\s*ms',
+      r'(?:throughput|qps|rps|tps)\s*[=<>:]\s*\d+',
+      r'(?:性能|延迟|吞吐).{0,20}(?:上限|限制|要求|不超过)'],
+     0.80),
+    # dependency_config — 依赖版本/包管理
+    ("dependency_config",
+     [r'(?:requirements|package\.json|pyproject|Cargo\.toml)',
+      r'\b(?:pip install|npm install|cargo add|go get)\b',
+      r'[a-z][a-z0-9_-]+==\d+\.\d+',
+      r'"[a-z][a-z0-9_-]+":\s*"\d+\.\d+'],
+     0.75),
+    # error_pattern — 错误/异常/崩溃模式
+    ("error_pattern",
+     [r'(?:错误|error|exception|crash|bug|失败|failure)\s*[:：]\s*.{5,}',
+      r'(?:fix|修复|resolved|fixed)\s*.{5,}(?:bug|error|crash|issue)',
+      r'(?:AttributeError|KeyError|TypeError|RuntimeError|ValueError)',
+      r'(?:segment fault|segfault|oom killer|memory leak)'],
+     0.80),
+    # design_decision — 架构/设计决策
+    ("design_decision",
+     [r'(?:选择|决定|采用|放弃|不用)\s*.{3,30}\s*(?:因为|原因|而非)',
+      r'(?:设计决策|architectural decision|trade.?off)',
+      r'(?:替代方案|alternative)\s*.{3,}被?放弃',
+      r'(?:不推荐|deprecated|不使用)\s*.{5,}'],
+     0.75),
+    # database_config — 数据库/存储配置
+    ("database_config",
+     [r'(?:sqlite|postgres|mysql|redis|mongodb)\s*(?::|\s+at\s+)\s*\S+',
+      r'(?:db|database|数据库)\s*(?:path|路径|host|port)\s*[=:]\s*\S+',
+      r'(?:store\.db|\.db|\.sqlite)'],
+     0.80),
+]
+
+# 预编译正则（模块级，避免每次调用重新编译）
+_COMPILED_SCHEMA_RULES = [
+    (name, [re.compile(p, re.IGNORECASE) for p in patterns], conf)
+    for name, patterns, conf in _SCHEMA_RULES
+]
+
+
+def anchor_chunk_schema(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    summary: str,
+    project: str,
+) -> int:
+    """
+    iter380：写入 chunk 时，扫描 summary 匹配 schema 规则，写入 schema_anchors 绑定行。
+
+    算法：
+      1. 遍历 _COMPILED_SCHEMA_RULES，对 summary 做正则匹配
+      2. 任意规则命中 → INSERT OR IGNORE INTO schema_anchors
+      3. 返回写入的绑定数（0=无命中）
+
+    性能：< 1ms（纯正则，无 LLM，模块级预编译）
+    OS 类比：kmem_cache_alloc — 新对象分配时，根据 size/align 归属正确的 kmem_cache
+    """
+    if not summary or not chunk_id:
+        return 0
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    written = 0
+
+    for schema_name, compiled_patterns, confidence in _COMPILED_SCHEMA_RULES:
+        for pat in compiled_patterns:
+            if pat.search(summary):
+                try:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO schema_anchors "
+                        "(chunk_id, schema_name, project, confidence, created_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (chunk_id, schema_name, project, confidence, now_iso),
+                    )
+                    written += 1
+                except Exception:
+                    pass
+                break  # 同一 schema 内，第一个命中即可，不重复插入
+
+    return written
+
+
+def schema_spread_activate(
+    conn: sqlite3.Connection,
+    hit_chunk_ids: list,
+    project: str,
+    max_per_schema: int = 3,
+    activation_score: float = 0.25,
+    existing_ids: set = None,
+) -> dict:
+    """
+    iter380：从 FTS5 命中的 chunk 出发，通过 schema_anchors 激活同 schema 的其他 chunk。
+
+    算法：
+      1. 查 hit_chunk_ids 所属的所有 schema（schema_anchors）
+      2. 对每个 schema，查询同 project 下同 schema 的其他 chunk（排除已有的）
+      3. 按 importance DESC 排序，每个 schema 最多取 max_per_schema 个
+      4. 返回 {chunk_id: activation_score}
+
+    与 spreading_activate 的区别：
+      spreading_activate 沿 entity_edges 图扩散（Collins & Loftus 1975）
+      schema_spread_activate 沿 schema 框架激活（Bartlett 1932）—— 更高层次的语义聚合
+
+    OS 类比：SLUB allocator partial list — kmem_cache 命中后，
+      同 slab 的 partial list 中的对象自动成为候选（schema-level prefetch）
+    """
+    if not hit_chunk_ids:
+        return {}
+    if existing_ids is None:
+        existing_ids = set()
+
+    all_excluded = set(hit_chunk_ids) | existing_ids
+
+    # Step 1: 找到命中 chunk 所属的 schema
+    ph = ",".join("?" * len(hit_chunk_ids))
+    try:
+        schema_rows = conn.execute(
+            f"SELECT DISTINCT schema_name FROM schema_anchors "
+            f"WHERE chunk_id IN ({ph}) AND project=?",
+            list(hit_chunk_ids) + [project],
+        ).fetchall()
+    except Exception:
+        return {}
+
+    if not schema_rows:
+        return {}
+
+    schema_names = [r[0] for r in schema_rows]
+    result: dict = {}
+
+    # Step 2: 对每个 schema，激活同 schema 的其他 chunk
+    for schema_name in schema_names:
+        try:
+            related = conn.execute(
+                "SELECT sa.chunk_id, mc.importance "
+                "FROM schema_anchors sa "
+                "JOIN memory_chunks mc ON mc.id = sa.chunk_id "
+                "WHERE sa.schema_name=? AND sa.project=? "
+                "ORDER BY mc.importance DESC "
+                "LIMIT ?",
+                (schema_name, project, max_per_schema + len(all_excluded)),
+            ).fetchall()
+        except Exception:
+            continue
+
+        count = 0
+        for cid, importance in related:
+            if cid in all_excluded:
+                continue
+            if cid not in result or result[cid] < activation_score:
+                result[cid] = activation_score
+            count += 1
+            if count >= max_per_schema:
+                break
+
+    return result
 
 
 # ── 迭代305：Curiosity Queue API（OS 类比：kswapd 水位触发 + 任务队列）────────
@@ -2635,7 +4072,7 @@ def reconsolidate(
     max_importance: float = 0.98,
 ) -> int:
     """
-    迭代311-A：再巩固（Reconsolidation，Nader et al. 2000）
+    迭代311-A（iter395 扩展）：再巩固（Reconsolidation，Nader et al. 2000）
     每次 chunk 被召回后，根据 query 匹配深度小幅上调 importance。
 
     神经科学背景：
@@ -2643,14 +4080,27 @@ def reconsolidate(
       随后以更新的形式重新巩固（re-stabilization）。
       重复且深度匹配的召回 → importance 上升（长期增强，LTP）。
 
+    iter395 扩展 — Retrieval-Induced Reconsolidation（取回触发差异化强化）：
+      1. Emotional Multiplier (McGaugh 2000)：情绪记忆再巩固效果更强
+         emotional_weight > 0.4 → boost × (1 + emotional_weight × 0.5)
+         根据：杏仁核激活增强海马突触可塑性（LTP），高情绪词汇的记忆在
+         每次提取后更新时获得额外的 norepinephrine 加固。
+
+      2. Frequency Gradient (Roediger & Karpicke 2006 Testing Effect)：
+         首次被召回的强化效果 > 高频反复召回
+         access_count ≤ 3 → boost × 1.5（测试效果最强窗口）
+         access_count > 10 → boost × 0.7（已高度巩固，边际效益递减）
+         根据：间隔效应研究表明首次成功检索带来最大的记忆固化增益。
+
+      3. Co-Retrieval Association Strengthening（同次召回关联强化）：
+         同一次检索中被一起召回的 chunk 对，其 entity_edge confidence += 0.02
+         根据：Hebb (1949) "neurons that fire together, wire together"
+         类比：CPU 的 hardware prefetcher 学习 memory access pattern —
+         常一起命中的 cache line 对被记入 stride predictor。
+
     OS 类比：Linux ARC（Adaptive Replacement Cache）— 被反复命中的页面
       从 T1（最近访问）晋升到 T2（频繁访问），淘汰优先级降低。
-
-    算法：
-      1. 用 query 词集与 chunk summary 计算 Jaccard 重叠度
-      2. boost = base_boost × overlap_ratio（匹配越深，强化越多）
-      3. importance = min(importance + boost, max_importance)
-      4. 更新 updated_at 标记再巩固时间
+      iter395 新增：T2 晋升的强度按页面的"热度梯度"差异化。
 
     Returns:
       更新的 chunk 数量
@@ -2676,17 +4126,30 @@ def reconsolidate(
 
     try:
         rows = conn.execute(
-            f"SELECT id, summary, importance FROM memory_chunks "
+            f"SELECT id, summary, importance, "
+            f"COALESCE(emotional_weight, 0.0), COALESCE(access_count, 0) "
+            f"FROM memory_chunks "
             f"WHERE id IN ({ph}) {proj_filter}",
             params,
         ).fetchall()
     except Exception:
-        return 0
+        # fallback: older schema without emotional_weight
+        try:
+            rows = conn.execute(
+                f"SELECT id, summary, importance, 0.0, COALESCE(access_count, 0) "
+                f"FROM memory_chunks "
+                f"WHERE id IN ({ph}) {proj_filter}",
+                params,
+            ).fetchall()
+        except Exception:
+            return 0
 
     now_iso = datetime.now(timezone.utc).isoformat()
     updated = 0
     for row in rows:
-        cid, summary, importance = row[0], row[1] or "", row[2] or 0.5
+        cid, summary, importance, emotional_weight, access_count = (
+            row[0], row[1] or "", row[2] or 0.5, float(row[3] or 0.0), int(row[4] or 0)
+        )
         # 计算 summary 词集与 query 的 Jaccard 重叠
         s_words: set = set()
         for m in _re.finditer(r'[a-zA-Z\u4e00-\u9fff][a-zA-Z0-9\u4e00-\u9fff]{1,}', summary.lower()):
@@ -2702,6 +4165,23 @@ def reconsolidate(
 
         # 至少给最低 boost（被召回本身就是强化信号）
         actual_boost = boost * (0.3 + 0.7 * overlap_ratio)
+
+        # iter395-1: Emotional Multiplier — 情绪记忆再巩固效果更强
+        # emotional_weight > 0.4 → boost 乘以 (1 + ew × 0.5)
+        # 最大乘数 1.5（ew=1.0 → ×1.5）
+        if emotional_weight > 0.4:
+            _em_multiplier = 1.0 + emotional_weight * 0.5
+            actual_boost *= _em_multiplier
+
+        # iter395-2: Frequency Gradient — 首次召回效果最强，高频边际递减
+        # access_count ≤ 3  → ×1.5（测试效果最强窗口，Roediger 2006）
+        # 4 ≤ count ≤ 10   → ×1.0（正常强化）
+        # count > 10        → ×0.7（已高度巩固，边际递减）
+        if access_count <= 3:
+            actual_boost *= 1.5
+        elif access_count > 10:
+            actual_boost *= 0.7
+
         new_importance = min(importance + actual_boost, max_importance)
 
         if new_importance > importance + 0.001:  # 避免浮点噪音触发无意义写入
@@ -2714,7 +4194,126 @@ def reconsolidate(
             except Exception:
                 pass
 
+    # iter395-3: Co-Retrieval Association Strengthening（Hebb 1949）
+    # 同一次检索中被一起召回的 chunk 对，增强其 entity_edge confidence
+    # 只在至少 2 个 chunk 被召回时触发
+    if len(recalled_chunk_ids) >= 2:
+        try:
+            # 批量提升同次召回 chunk 之间的 entity_edge confidence
+            # 找到 recalled chunk 中涉及的 entity_edges（from/to 均在召回集中的边）
+            ph2 = ",".join("?" * len(recalled_chunk_ids))
+            # 通过 entity_map 找到 recalled_chunk 对应的 entity
+            recall_entities = conn.execute(
+                f"SELECT entity_name FROM entity_map "
+                f"WHERE chunk_id IN ({ph2})" + (" AND project=?" if project else ""),
+                recalled_chunk_ids + ([project] if project else []),
+            ).fetchall()
+            recall_entity_set = {r[0] for r in recall_entities}
+            if len(recall_entity_set) >= 2:
+                # 提升这些 entity 之间的边 confidence（co-firing → strengthen links）
+                _ent_ph = ",".join("?" * len(recall_entity_set))
+                _ent_list = list(recall_entity_set)
+                conn.execute(
+                    f"UPDATE entity_edges "
+                    f"SET confidence = MIN(0.99, confidence + 0.02) "
+                    f"WHERE from_entity IN ({_ent_ph}) AND to_entity IN ({_ent_ph})",
+                    _ent_list + _ent_list,
+                )
+        except Exception:
+            pass  # entity_map/entity_edges 失败不阻塞主流程
+
     return updated
+
+
+def find_spaced_review_candidates(
+    conn: sqlite3.Connection,
+    project: str,
+    top_n: int = 5,
+    min_importance: float = 0.70,
+) -> list:
+    """
+    iter383：间隔效应主动复习候选 — Spacing Effect Scheduler
+
+    认知科学依据：Ebbinghaus (1885) Spacing Effect + SuperMemo SM-2。
+      知识点的记忆强度随时间指数衰减（遗忘曲线），最优复习时机在强度降至
+      阈值之前。"间隔复习"比"集中复习"更能建立长期记忆（Cepeda et al. 2006）。
+      公式：next_review_at = last_accessed + stability × 86400 秒
+      如果 now > next_review_at → chunk 进入"即将遗忘窗口"，应主动复习。
+
+    OS 类比：Linux pdflush（内核 2.5 引入）— 不等到内存压力才 writeback，
+      而是根据 dirty_expire_interval 定期扫描并主动刷出 dirty pages。
+      这里等价：不等用户查询才检索，而是在 session 开始时主动推送"即将遗忘"的知识。
+
+    候选条件（AND）：
+      1. importance >= min_importance（重要知识，值得主动复习）
+      2. access_count >= 1（曾被访问过，有访问历史的才有"遗忘"概念）
+      3. now - last_accessed > stability × 86400（超过稳定窗口，进入遗忘区间）
+      4. chunk_type IN ('decision','design_constraint','reasoning_chain','procedure')
+      5. 未被 supersede（不在 knowledge_versions.old_chunk_id 中）
+
+    排序（优先级）：
+      urgency = importance / (days_since_last_access / stability)
+      urgency 越低 → 越过期，越优先复习
+
+    Returns:
+      list of dict: [{id, summary, chunk_type, importance, last_accessed, stability, urgency}]
+    """
+    import datetime as _dt
+    now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT mc.id, mc.summary, mc.chunk_type, mc.importance,
+                   mc.last_accessed, COALESCE(mc.stability, 1.0) AS stability
+            FROM memory_chunks mc
+            WHERE mc.project = ?
+              AND COALESCE(mc.importance, 0) >= ?
+              AND COALESCE(mc.access_count, 0) >= 1
+              AND mc.chunk_type IN ('decision','design_constraint','reasoning_chain','procedure')
+              AND mc.last_accessed IS NOT NULL
+              AND (julianday(?) - julianday(mc.last_accessed)) * 86400
+                  > COALESCE(mc.stability, 1.0) * 86400
+              AND mc.id NOT IN (
+                SELECT old_chunk_id FROM knowledge_versions WHERE project=?
+              )
+            ORDER BY mc.importance DESC
+            LIMIT 50
+            """,
+            (project, min_importance, now_iso, project),
+        ).fetchall()
+    except Exception:
+        return []
+
+    candidates = []
+    for row in rows:
+        cid, summary, ctype, importance, last_accessed, stability = row
+        try:
+            _la = _dt.datetime.fromisoformat(last_accessed.replace("Z", "+00:00"))
+            _now = _dt.datetime.now(_dt.timezone.utc)
+            days_since = (_now - _la.replace(tzinfo=_dt.timezone.utc) if _la.tzinfo is None
+                          else _now - _la).total_seconds() / 86400
+        except Exception:
+            days_since = 9999.0
+
+        if days_since <= 0 or stability <= 0:
+            continue
+        urgency = importance / (days_since / stability)  # 小 → 更迫切
+
+        candidates.append({
+            "id": cid,
+            "summary": summary or "",
+            "chunk_type": ctype or "",
+            "importance": importance or 0.7,
+            "last_accessed": last_accessed,
+            "stability": stability,
+            "urgency": round(urgency, 4),
+            "days_overdue": round(days_since - stability, 2),
+        })
+
+    # 按 urgency 升序（urgency 小 = 更迫切），取 top_n
+    candidates.sort(key=lambda x: x["urgency"])
+    return candidates[:top_n]
 
 
 def suppress_unused(
@@ -2920,17 +4519,29 @@ def sleep_consolidate(
     except Exception:
         pass
 
-    # ── 子操作 3：长期未访问 chunk stability × decay ──────────────────────────
+    # ── 子操作 3：长期未访问 chunk stability × decay（iter400：per-type 个体化衰减）──
+    # iter400：以 chunk_type 个体化衰减率替代统一的 stability_decay 参数。
+    # 认知科学依据：程序性记忆（design_constraint/procedure）衰减慢；
+    #   工作记忆/情节记忆（task_state/prompt_context）衰减快。
+    # OS 类比：Linux cgroup memory.reclaim_ratio — per-group 内存回收压力。
     try:
         cutoff_stale = (now - _td(days=stale_days)).isoformat()
-        conn.execute(
-            f"UPDATE memory_chunks SET stability=MAX(0.1, stability * ?), updated_at=? "
-            f"WHERE last_accessed < ? AND access_count < 2 {proj_filter}",
-            [stability_decay, now_iso, cutoff_stale] + proj_params,
-        )
-        result["decayed"] = conn.execute("SELECT changes()").fetchone()[0]
+        # iter400: per-type 衰减（覆盖全局 stability_decay 参数）
+        _decayed = decay_stability_by_type(conn, project, stale_days=stale_days,
+                                           now_iso=now_iso)
+        result["decayed"] = _decayed
     except Exception:
-        pass
+        # fallback: 使用全局统一衰减率（兼容旧 schema）
+        try:
+            cutoff_stale = (now - _td(days=stale_days)).isoformat()
+            conn.execute(
+                f"UPDATE memory_chunks SET stability=MAX(0.1, stability * ?), updated_at=? "
+                f"WHERE last_accessed < ? AND access_count < 2 {proj_filter}",
+                [stability_decay, now_iso, cutoff_stale] + proj_params,
+            )
+            result["decayed"] = conn.execute("SELECT changes()").fetchone()[0]
+        except Exception:
+            pass
 
     # ── 子操作 4（迭代319）：情节 chunk 巩固扫描 ──────────────────────────────
     # OS 类比：khugepaged 在 kswapd 回收后，再扫描高频访问小页面尝试合并
@@ -2938,6 +4549,7 @@ def sleep_consolidate(
         ep_result = episodic_decay_scan(conn, project, stale_days=stale_days)
         result["episodic_decayed"] = ep_result.get("decayed", 0)
         result["episodic_promoted"] = ep_result.get("promoted", 0)
+        result["episodic_inplace_promoted"] = ep_result.get("inplace_promoted", 0)  # iter379
         result["new_semantic_ids"] = ep_result.get("new_semantic_ids", [])
     except Exception:
         pass
@@ -3337,36 +4949,665 @@ def apply_emotional_salience(
 ) -> float:
     """
     迭代320：根据情感显著性调整 chunk 的 importance 并写回 DB。
+    iter399：同时写入 emotional_weight（0.0~1.0），供 retriever 情绪增强使用。
 
     算法：
       delta = compute_emotional_salience(text)
+      emotional_weight = clamp(delta / 0.25, 0.0, 1.0)  # 正向 delta 归一化为权重
       if |delta| < 0.01 → 不写 DB（避免无意义更新）
       new_importance = clamp(base_importance + delta, 0.05, 0.98)
-      写入 memory_chunks.importance
+      写入 memory_chunks.importance + emotional_weight
 
     OS 类比：Linux OOM Killer oom_score_adj 写入 —
       fork() 时继承父进程的 oom_score_adj，每个进程可自主调整；
       这里 importance 由 extractor 初始评估，情感显著性在写入后再调整。
+      iter399 OS 类比：Linux mempolicy MPOL_PREFERRED_MANY —
+        写入时标注页面的"情感节点亲和性"（emotional_weight），
+        检索时 retriever 用此权重决定 boost 量（类比 NUMA locality hint）。
 
     Returns:
       new_importance（调整后；若无调整则返回 base_importance）
     """
     delta = compute_emotional_salience(text)
+
+    # iter399: emotional_weight — 正向情绪强度归一化到 [0.0, 1.0]
+    # 负向 delta（已废弃/已解决）不产生情绪权重（只影响 importance 降权）
+    emotional_weight = round(max(0.0, min(1.0, delta / 0.25)), 4) if delta > 0 else 0.0
+
     if abs(delta) < 0.01:
+        # delta 微弱 — 仍写入 emotional_weight=0（明确表示无情绪显著性）
+        # 但只在字段为 NULL 时才写（避免覆盖已有有效值）
+        try:
+            conn.execute(
+                "UPDATE memory_chunks SET emotional_weight=? WHERE id=? AND (emotional_weight IS NULL OR emotional_weight=0)",
+                (0.0, chunk_id),
+            )
+        except Exception:
+            pass
         return base_importance
 
     new_importance = max(0.05, min(0.98, base_importance + delta))
     if abs(new_importance - base_importance) < 0.001:
-        return base_importance
+        new_importance = base_importance
 
     try:
         conn.execute(
-            "UPDATE memory_chunks SET importance=?, updated_at=? WHERE id=?",
-            (round(new_importance, 4), datetime.now(timezone.utc).isoformat(), chunk_id),
+            "UPDATE memory_chunks SET importance=?, emotional_weight=?, updated_at=? WHERE id=?",
+            (round(new_importance, 4), emotional_weight,
+             datetime.now(timezone.utc).isoformat(), chunk_id),
         )
     except Exception:
         pass
     return new_importance
+
+
+# ── iter396：Source Monitoring — 信源监控加权（Johnson 1993）─────────────────
+#
+# 认知科学依据：
+#   Johnson & Raye (1981) Reality Monitoring：
+#     人类具备区分「内部生成」与「外部感知」记忆的元认知能力。
+#     来自外部直接感知的记忆比内部推断的记忆更可靠，但并非绝对；
+#     人容易把听说的事情记成"亲眼所见"（来源错误归因，source misattribution）。
+#   Johnson (1993) MEM (Multiple Entry Model)：
+#     记忆系统维护「来源标签」（source tag），帮助区分自我生成 vs 外部输入。
+#     来源可信度（source credibility）影响信息的检索优先级和记忆强化程度。
+#   Zaragoza & Mitchell (1996)：
+#     高可信度来源的信息比低可信度来源更容易被记住和相信。
+#
+# OS 类比：Linux LSM（Linux Security Modules）
+#   每次 file open / exec / socket 操作前，LSM hook 查询来源的 security context
+#   （SELinux label / AppArmor profile），根据来源授予不同的访问权限。
+#   这里：每次 chunk 写入时打上 source_type 标签，检索时据此调整 score。
+#
+# 实现：
+#   1. compute_source_reliability(chunk_type, source_type, content) → float
+#      根据 chunk_type + source_type 的组合估算可信度
+#   2. source_monitor_weight(source_reliability) → float
+#      将可信度转换为检索分数调整因子（range: 0.8 ~ 1.2）
+#   3. apply_source_monitoring(conn, chunk_id, chunk_type, source_type, content)
+#      写入 source_type + source_reliability 到 DB
+
+# ─ 来源可信度基线表：chunk_type × source_type → base_reliability ─
+_SOURCE_RELIABILITY_TABLE: dict = {
+    # (chunk_type, source_type) → base reliability
+    # direct = 用户直接陈述/观察
+    ("design_constraint", "direct"):    0.95,
+    ("decision",          "direct"):    0.90,
+    ("task_state",        "direct"):    0.85,
+    ("reasoning_chain",   "direct"):    0.80,
+    ("procedure",         "direct"):    0.85,
+    # tool_output = 代码/命令执行结果（机器生成，高重复性）
+    ("design_constraint", "tool_output"): 0.88,
+    ("decision",          "tool_output"): 0.85,
+    ("task_state",        "tool_output"): 0.82,
+    ("reasoning_chain",   "tool_output"): 0.78,
+    ("procedure",         "tool_output"): 0.80,
+    # inferred = 从多条信息推断（中等可信度）
+    ("design_constraint", "inferred"):  0.72,
+    ("decision",          "inferred"):  0.68,
+    ("task_state",        "inferred"):  0.65,
+    ("reasoning_chain",   "inferred"):  0.70,
+    ("procedure",         "inferred"):  0.65,
+    # hearsay = 间接转述/转述他人说法（最低可信度）
+    ("design_constraint", "hearsay"):   0.50,
+    ("decision",          "hearsay"):   0.45,
+    ("task_state",        "hearsay"):   0.40,
+    ("reasoning_chain",   "hearsay"):   0.48,
+    ("procedure",         "hearsay"):   0.42,
+}
+
+# 各 source_type 的默认可信度（chunk_type 无明确映射时）
+_SOURCE_TYPE_DEFAULT: dict = {
+    "direct":      0.85,
+    "tool_output": 0.80,
+    "inferred":    0.68,
+    "hearsay":     0.45,
+    "unknown":     0.70,
+}
+
+# 关键词信号 → 推断 source_type（用于自动标注）
+# 优先级：hearsay > inferred > tool_output > direct（越 uncertain 越优先检出）
+import re as _re_sm
+
+_SOURCE_HEARSAY_RE = _re_sm.compile(
+    r"据说|听说|有人说|用户说|他说|她说|they said|I heard|reportedly|allegedly|"
+    r"someone mentioned|it is said",
+    _re_sm.IGNORECASE,
+)
+_SOURCE_INFERRED_RE = _re_sm.compile(
+    r"推测|可能|应该|估计|推断|大概|based on|likely|probably|presumably|"
+    r"it seems|appears to|suggests that",
+    _re_sm.IGNORECASE,
+)
+_SOURCE_TOOL_OUTPUT_RE = _re_sm.compile(
+    r"```|输出:|output:|result:|error:|traceback|exception|running|executed|"
+    r"\$ |>>> |test passed|test failed|pytest|assert|build|compile",
+    _re_sm.IGNORECASE,
+)
+
+
+def infer_source_type(text: str) -> str:
+    """
+    iter396：从文本内容自动推断 source_type。
+
+    按优先级扫描关键词：
+      hearsay → inferred → tool_output → direct（默认）
+
+    OS 类比：Linux file magic 检测 — `file` 命令扫描文件头字节推断文件类型，
+      而非依赖用户提供的文件名后缀。
+    """
+    if not text:
+        return "unknown"
+    if _SOURCE_HEARSAY_RE.search(text):
+        return "hearsay"
+    if _SOURCE_INFERRED_RE.search(text):
+        return "inferred"
+    if _SOURCE_TOOL_OUTPUT_RE.search(text):
+        return "tool_output"
+    return "direct"
+
+
+def compute_source_reliability(
+    chunk_type: str,
+    source_type: str,
+    content: str = "",
+) -> float:
+    """
+    iter396：计算 chunk 的来源可信度（source_reliability）。
+
+    算法：
+      1. 从 _SOURCE_RELIABILITY_TABLE 查找 (chunk_type, source_type) 基线值
+      2. 若无明确映射，使用 _SOURCE_TYPE_DEFAULT[source_type]
+      3. 若 content 包含 uncertainty 词语（可能/估计/应该），适当降低（−0.05）
+      4. 若 content 包含 certainty 词语（确认/已验证/verified），适当提高（+0.05）
+      5. clamp 到 [0.2, 1.0]
+
+    Returns:
+      float ∈ [0.2, 1.0]，越高表示来源越可靠
+    """
+    if not source_type or source_type not in _SOURCE_TYPE_DEFAULT:
+        source_type = "unknown"
+    base = _SOURCE_RELIABILITY_TABLE.get(
+        (chunk_type, source_type),
+        _SOURCE_TYPE_DEFAULT.get(source_type, 0.70),
+    )
+    # 内容微调：不确定性词 → −0.05；确认词 → +0.05
+    adjustment = 0.0
+    if content:
+        _uncertainty_re = _re_sm.compile(
+            r'可能|估计|大概|不确定|probably|might|may be|uncertain|unclear',
+            _re_sm.IGNORECASE,
+        )
+        _certainty_re = _re_sm.compile(
+            r'确认|已验证|confirmed|verified|definitely|proven|tested',
+            _re_sm.IGNORECASE,
+        )
+        if _uncertainty_re.search(content):
+            adjustment -= 0.05
+        if _certainty_re.search(content):
+            adjustment += 0.05
+    return round(max(0.2, min(1.0, base + adjustment)), 4)
+
+
+def source_monitor_weight(source_reliability: float) -> float:
+    """
+    iter396：将 source_reliability 转换为检索分数调整因子。
+
+    映射规则（线性区间）：
+      reliability ≥ 0.85 → weight ∈ [1.00, 1.15]（高可信来源，微幅提升）
+      0.60 ≤ reliability < 0.85 → weight ≈ 1.00（中等可信，不调整）
+      reliability < 0.60 → weight ∈ [0.80, 1.00]（低可信来源，适度降权）
+
+    设计原则：
+      1. 调整幅度适中（max ±0.15），避免来源完全主导语义相关性
+      2. 中间区间（0.60~0.85）不调整，防止噪音误判影响召回
+      3. 对应 OS 类比：SELinux label 决定的访问权限不是二元的，
+         而是 capability 粒度的（只有明确高风险的 context 才被限制）
+
+    Returns:
+      float ∈ [0.80, 1.15]
+    """
+    r = max(0.0, min(1.0, float(source_reliability) if source_reliability is not None else 0.70))
+    if r >= 0.85:
+        # 高可信度：线性插值 0.85→1.00，1.0→1.15
+        return round(1.00 + (r - 0.85) / (1.0 - 0.85) * 0.15, 4)
+    elif r >= 0.60:
+        # 中等可信度：不调整
+        return 1.00
+    else:
+        # 低可信度：线性插值 0.0→0.80，0.60→1.00
+        return round(0.80 + r / 0.60 * 0.20, 4)
+
+
+def apply_source_monitoring(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    chunk_type: str,
+    content: str,
+    source_type: str = None,
+) -> tuple:
+    """
+    iter396：推断 source_type，计算 source_reliability，并写入 DB。
+
+    OS 类比：LSM security_inode_create hook —
+      文件创建时检查 security context，打上 SELinux label（inode security blob）。
+      这里 chunk 创建时打上 source_type 标签。
+
+    Returns:
+      (source_type: str, source_reliability: float)
+    """
+    if source_type is None or source_type == "unknown":
+        source_type = infer_source_type(content or "")
+    reliability = compute_source_reliability(chunk_type or "task_state",
+                                             source_type, content or "")
+    try:
+        conn.execute(
+            "UPDATE memory_chunks SET source_type=?, source_reliability=? WHERE id=?",
+            (source_type, reliability, chunk_id),
+        )
+    except Exception:
+        pass
+    return (source_type, reliability)
+
+
+# ── iter400：Forgetting Curve Individualization per chunk_type ──────────────
+#
+# 认知科学依据：
+#   Squire (1992) Memory and Brain：程序性记忆（技能）比陈述性情节记忆衰减慢。
+#   Tulving (1972)：语义记忆（概念/约束）比情节记忆（具体事件）持久。
+#   Ebbinghaus (1885)：同一遗忘曲线对不同类型知识的参数不同。
+#   Anderson et al. (1999) ACT-R：基础激活随时间衰减，衰减速率因记忆强度和类型而异。
+#
+# OS 类比：Linux cgroup memory.reclaim_ratio（per-cgroup）vs vm.swappiness（全局）
+#   全局统一 stability_decay=0.92 相当于 vm.swappiness，对所有 chunk 一视同仁。
+#   per-type 衰减率相当于 per-cgroup reclaim_ratio，允许不同类型 chunk 有不同的内存压力。
+#
+# CHUNK_TYPE_DECAY：chunk_type → stability_decay_factor
+#   值越高（接近 1.0） → 衰减越慢，记忆越持久
+#   值越低（接近 0.0） → 衰减越快，记忆越短暂
+# 设计依据：
+#   design_constraint  → 0.99 极慢衰减（系统约束是长期有效的，类比长时程增强 LTP）
+#   decision           → 0.97 慢衰减（决策记录应长期保留）
+#   reasoning_chain    → 0.94 中等衰减（推理过程较情节记忆持久，但不如决策）
+#   procedure          → 0.96 较慢衰减（操作步骤是程序性记忆，耐久）
+#   task_state         → 0.85 较快衰减（当前任务状态 = 工作记忆，任务完成后快速衰减）
+#   prompt_context     → 0.70 快速衰减（prompt 上下文高度情景化，换会话即失效）
+#   error_event        → 0.88 中等衰减（错误事件有警示价值，保留时间中等）
+#   observation        → 0.90 中等衰减（观察记录较 task_state 持久，但不如 decision）
+
+CHUNK_TYPE_DECAY: dict = {
+    "design_constraint": 0.99,
+    "decision":          0.97,
+    "procedure":         0.96,
+    "reasoning_chain":   0.94,
+    "observation":       0.90,
+    "error_event":       0.88,
+    "task_state":        0.85,
+    "prompt_context":    0.70,
+}
+
+# 未列出类型的默认衰减率（保守中值）
+_DEFAULT_TYPE_DECAY: float = 0.92
+
+
+def get_chunk_type_decay(chunk_type: str) -> float:
+    """
+    iter400：获取 chunk_type 的个体化稳定性衰减率。
+
+    Returns:
+      float ∈ (0.0, 1.0]，越高越耐久（越接近 1.0 衰减越慢）
+    """
+    return CHUNK_TYPE_DECAY.get(chunk_type or "", _DEFAULT_TYPE_DECAY)
+
+
+def decay_stability_by_type(
+    conn: sqlite3.Connection,
+    project: str = None,
+    stale_days: int = 30,
+    now_iso: str = None,
+) -> int:
+    """
+    iter400：按 chunk_type 个体化衰减 stability（Forgetting Curve Individualization）。
+
+    每种 chunk_type 使用 CHUNK_TYPE_DECAY 中的独立衰减率，
+    替代 sleep_consolidate 中的统一 stability_decay=0.92。
+
+    OS 类比：Linux cgroup per-memory-group reclaim_ratio —
+      不同 cgroup 有不同的内存回收压力参数，允许 DB/前台应用占用更多内存。
+
+    算法：
+      FOR each chunk_type IN CHUNK_TYPE_DECAY:
+          UPDATE stability × type_decay
+          WHERE last_accessed < cutoff AND access_count < 2 AND chunk_type=type_
+
+    Returns:
+      总衰减的 chunk 数
+    """
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    if now_iso is None:
+        now_iso = _dt.now(_tz.utc).isoformat()
+    cutoff = (_dt.now(_tz.utc) - _td(days=stale_days)).isoformat()
+
+    proj_filter = "AND project=?" if project else ""
+    proj_params = [project] if project else []
+
+    total_decayed = 0
+    all_types = list(CHUNK_TYPE_DECAY.keys()) + [""]  # "" = 无类型 → 使用默认
+
+    # 对每种已知类型单独更新
+    for ctype, decay in CHUNK_TYPE_DECAY.items():
+        try:
+            conn.execute(
+                f"UPDATE memory_chunks "
+                f"SET stability=MAX(0.1, stability * ?), updated_at=? "
+                f"WHERE chunk_type=? AND last_accessed < ? AND access_count < 2 {proj_filter}",
+                [decay, now_iso, ctype, cutoff] + proj_params,
+            )
+            total_decayed += conn.execute("SELECT changes()").fetchone()[0]
+        except Exception:
+            pass
+
+    # 未列出的类型使用默认衰减率
+    known_types_ph = ",".join("?" * len(CHUNK_TYPE_DECAY))
+    try:
+        conn.execute(
+            f"UPDATE memory_chunks "
+            f"SET stability=MAX(0.1, stability * ?), updated_at=? "
+            f"WHERE (chunk_type NOT IN ({known_types_ph}) OR chunk_type IS NULL) "
+            f"AND last_accessed < ? AND access_count < 2 {proj_filter}",
+            [_DEFAULT_TYPE_DECAY, now_iso] + list(CHUNK_TYPE_DECAY.keys()) + [cutoff] + proj_params,
+        )
+        total_decayed += conn.execute("SELECT changes()").fetchone()[0]
+    except Exception:
+        pass
+
+    return total_decayed
+
+
+# ── iter402：Schema Theory — Prior Knowledge Scaffolding（Bartlett 1932）────────
+#
+# 认知科学依据：
+#   Bartlett (1932) Remembering — "图式"（Schema）理论：
+#     新信息被同化到已有知识框架（图式）中，共享框架的知识相互加固。
+#     当新知识和已有高稳定性知识共享概念时，新知识的初始稳定性更高。
+#   Piaget (1952) Schema Assimilation：
+#     assimilation — 新信息被纳入现有图式（没有根本改变图式）
+#     accommodation — 现有图式被修改以适应新信息
+#     这里实现 assimilation：新 chunk 共享已有 entity → 继承部分 stability
+#   Anderson (1984) Schema Theory in Education：
+#     先验知识越丰富，新知识越容易被编码（"rich get richer"效应）。
+#
+# OS 类比：Linux Transparent Hugepage (THP) promotion
+#   当一个 2MB 对齐的内存区域中大多数 4KB 页面都存在时（prior_pages_exist），
+#   新 fault 进来的匿名页会直接被提升为 THP 的一部分，继承 THP 的 cache 亲和性。
+#   新 chunk 发现已有同主题 chunk（prior schema）→ 继承部分 stability bonus。
+#
+# 实现：
+#   compute_schema_bonus(conn, chunk_id, project) → float [0.0, 2.0]
+#     通过 entity_map 查找 chunk 关联的 entity，
+#     再通过 entity_map 找到同 project 中共享这些 entity 的已有 chunk，
+#     取这些先验 chunk 的 stability 均值 × schema_inherit_ratio（默认 0.2）。
+#   apply_schema_scaffolding(conn, chunk_id, content, project)
+#     写入 schema_bonus 到 stability
+
+import re as _re_schema
+
+_SCHEMA_INHERIT_RATIO: float = 0.2   # 继承先验 stability 的比例
+_SCHEMA_MAX_BONUS: float = 2.0       # 最大 bonus（防止极端情况）
+
+
+def compute_schema_bonus(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    project: str,
+    max_bonus: float = _SCHEMA_MAX_BONUS,
+    inherit_ratio: float = _SCHEMA_INHERIT_RATIO,
+) -> float:
+    """
+    iter402：计算新 chunk 基于先验图式（existing knowledge）的稳定性加成。
+
+    算法：
+      1. 通过 entity_map 找到 chunk_id 关联的 entity_name（写入时已设置）
+      2. 对每个 entity，通过 entity_map 找到 project 中其他 chunk 的 stability
+      3. 取所有先验 chunk stability 的均值 × inherit_ratio
+      4. 先验 chunk 越多、越稳定 → bonus 越高
+      5. clamp 到 [0.0, max_bonus]
+
+    OS 类比：THP promotion scan — 扫描已有同区域 pages 的 PFN 密度，
+      密度越高（prior_schema 越丰富）→ 新 page 晋升 THP 概率越高。
+
+    Returns:
+      float ∈ [0.0, max_bonus]
+    """
+    if not chunk_id or not project:
+        return 0.0
+    try:
+        # Step 1: 找到该 chunk 关联的 entity（entity_map 当前行 OR entity_edges）
+        entity_rows = conn.execute(
+            "SELECT entity_name FROM entity_map WHERE chunk_id=? AND project=?",
+            (chunk_id, project),
+        ).fetchall()
+
+        # entity_map PK=(entity_name, project)：若新 chunk 刚写入，entity 已指向它
+        # 所以 entity_name 已知；再通过 entity_edges 找到同 project 中
+        # 以该 entity 为 from/to 的关系涉及的 source_chunk_id（历史 chunk）
+        entity_names = [r[0] for r in entity_rows if r[0]]
+        if not entity_names:
+            return 0.0
+
+        # Step 2a: 通过 entity_edges 找到同 project 中涉及这些 entity 的 chunk
+        ent_ph = ",".join("?" * len(entity_names))
+        edge_chunk_rows = conn.execute(
+            f"SELECT DISTINCT source_chunk_id FROM entity_edges "
+            f"WHERE (from_entity IN ({ent_ph}) OR to_entity IN ({ent_ph})) "
+            f"AND project=? AND source_chunk_id IS NOT NULL AND source_chunk_id != ?",
+            entity_names + entity_names + [project, chunk_id],
+        ).fetchall()
+        edge_chunk_ids = [r[0] for r in edge_chunk_rows if r[0]]
+
+        # Step 2b: 通过 content/summary LIKE 搜索找到同 project 中含这些 entity 的 chunk
+        # entity_map PK 限制只能指向最新 chunk，所以需要直接搜内容
+        like_conditions = " OR ".join(
+            ["(mc.content LIKE ? OR mc.summary LIKE ?)"] * len(entity_names)
+        )
+        like_params = []
+        for en in entity_names:
+            like_params.extend([f"%{en}%", f"%{en}%"])
+
+        content_rows = conn.execute(
+            f"SELECT mc.id, mc.stability FROM memory_chunks mc "
+            f"WHERE mc.project=? AND mc.id != ? AND mc.stability IS NOT NULL "
+            f"AND ({like_conditions})",
+            [project, chunk_id] + like_params,
+        ).fetchall()
+        content_stabilities = {r[0]: float(r[1]) for r in content_rows if r[1] is not None}
+
+        # Step 2c: 合并 edge_chunk_ids 对应的 stability
+        if edge_chunk_ids:
+            edge_ph = ",".join("?" * len(edge_chunk_ids))
+            edge_rows = conn.execute(
+                f"SELECT stability FROM memory_chunks WHERE id IN ({edge_ph}) AND stability IS NOT NULL",
+                edge_chunk_ids,
+            ).fetchall()
+            for r in edge_rows:
+                content_stabilities[f"_edge_{len(content_stabilities)}"] = float(r[0])
+
+        if not content_stabilities:
+            return 0.0
+
+        # Step 3: 先验 chunk stability 均值 × inherit_ratio
+        prior_stabilities = list(content_stabilities.values())
+        avg_prior_stability = sum(prior_stabilities) / len(prior_stabilities)
+        bonus = avg_prior_stability * inherit_ratio
+        return round(min(max_bonus, max(0.0, bonus)), 4)
+    except Exception:
+        return 0.0
+
+
+def apply_schema_scaffolding(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    project: str,
+    base_stability: float = 1.0,
+) -> float:
+    """
+    iter402：应用图式加成 — 将 compute_schema_bonus 结果加到 stability。
+
+    OS 类比：THP promotion path — 新 page fault 落在高密度区域时，
+      内核直接 alloc_huge_page() 而不是分配独立 4KB 页。
+
+    Returns:
+      new_stability（包含 schema bonus）
+    """
+    bonus = compute_schema_bonus(conn, chunk_id, project)
+    if bonus <= 0.001:
+        return base_stability
+
+    new_stability = min(base_stability * 4.0, base_stability + bonus)
+    try:
+        conn.execute(
+            "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=?",
+            (round(new_stability, 4), datetime.now(timezone.utc).isoformat(), chunk_id),
+        )
+    except Exception:
+        pass
+    return round(new_stability, 4)
+
+
+# ── iter401：Elaborative Encoding — Depth of Processing（Craik & Lockhart 1972）──
+#
+# 认知科学依据：
+#   Craik & Lockhart (1972) Levels of Processing：
+#     记忆痕迹强度由信息被加工的"深度"决定，而非单纯的重复次数。
+#     - 浅处理（字形/音韵）：只分析物理特征 → 短暂记忆痕迹
+#     - 深处理（语义/关联）：分析意义、关联已有知识 → 持久记忆痕迹
+#   Craik & Tulving (1975)：语义判断任务（"这个词适合句子吗？"）比视觉判断
+#     产生更强的记忆，因为触发了更多的语义网络激活。
+#   Reder & Anderson (1980)：精细编码（elaborate encoding）通过增加区分性
+#     线索来增强提取能力。
+#
+# OS 类比：Linux dirty page writeback 的 write aggregation —
+#   页面在 dirty buffer 中等待时间越长，write aggregation 越充分，
+#   I/O 效率越高（类比深度加工 → 记忆更完整，更易检索）。
+#   另一类比：L1 TLB miss → L2 TLB → page table walk — 越深层的处理成本越高，
+#   但缓存命中率越持久。
+#
+# 实现：
+#   compute_depth_of_processing(text) → float [0.0, 1.0]
+#   通过以下特征估算加工深度：
+#     1. 因果推理词（because/therefore/causes/由于/因此）→ 语义深处理
+#     2. 结构化分析词（first/then/finally/第一/第二）→ 组织性加工
+#     3. 对比/比较（however/unlike/相比/但是）→ 区分性处理
+#     4. 抽象概念数量（concept density）→ 语义丰富度
+#     5. 文本长度（适度长度 = 充分展开）→ 信息密度代理
+
+import re as _re_dop
+
+_DOP_CAUSAL_RE = _re_dop.compile(
+    r'because|therefore|thus|hence|causes|leads to|results in|due to|'
+    r'since|so that|in order to|consequently|'
+    r'因为|因此|所以|由于|导致|造成|使得|故而|结果|从而',
+    _re_dop.IGNORECASE,
+)
+_DOP_STRUCTURAL_RE = _re_dop.compile(
+    r'first[,\s]|second[,\s]|third[,\s]|finally|then |next |'
+    r'step 1|step 2|step \d|phase \d|'
+    r'第一[，。、]|第二[，。、]|第三[，。、]|首先|其次|最后|然后|接下来|步骤',
+    _re_dop.IGNORECASE,
+)
+_DOP_CONTRASTIVE_RE = _re_dop.compile(
+    r'however|but |although|unlike|whereas|on the other hand|'
+    r'nevertheless|in contrast|compared to|'
+    r'但是|然而|虽然|尽管|不过|相比|相反|与此相比|对比',
+    _re_dop.IGNORECASE,
+)
+_DOP_ELABORATION_RE = _re_dop.compile(
+    r'specifically|in particular|for example|for instance|'
+    r'that is to say|in other words|namely|such as|'
+    r'具体来说|特别是|例如|比如|也就是说|换句话说|即',
+    _re_dop.IGNORECASE,
+)
+
+# 每个类别的最大贡献（防止单一维度主导）
+_DOP_MAX_PER_CATEGORY = 0.25
+
+
+def compute_depth_of_processing(text: str) -> float:
+    """
+    iter401：计算文本的加工深度（Depth of Processing, Craik & Lockhart 1972）。
+
+    四个维度各贡献最多 0.25，总分 [0.0, 1.0]：
+      1. 因果推理 (0.25)：有无因果/推理词
+      2. 结构组织 (0.25)：有无序列/结构词
+      3. 对比区分 (0.25)：有无对比/比较词
+      4. 精细阐述 (0.25)：有无例证/解释词
+
+    OS 类比：Linux perf stat 的 IPC（Instructions Per Cycle）—
+      同样的代码路径，加工深度不同导致不同的缓存热度。
+
+    Returns:
+      float ∈ [0.0, 1.0]
+    """
+    if not text or len(text.strip()) < 4:
+        return 0.0
+
+    score = 0.0
+
+    # 维度 1：因果推理
+    causal_count = len(_DOP_CAUSAL_RE.findall(text))
+    score += min(_DOP_MAX_PER_CATEGORY, causal_count * 0.12)
+
+    # 维度 2：结构组织
+    struct_count = len(_DOP_STRUCTURAL_RE.findall(text))
+    score += min(_DOP_MAX_PER_CATEGORY, struct_count * 0.10)
+
+    # 维度 3：对比区分
+    contrast_count = len(_DOP_CONTRASTIVE_RE.findall(text))
+    score += min(_DOP_MAX_PER_CATEGORY, contrast_count * 0.12)
+
+    # 维度 4：精细阐述
+    elab_count = len(_DOP_ELABORATION_RE.findall(text))
+    score += min(_DOP_MAX_PER_CATEGORY, elab_count * 0.10)
+
+    return round(min(1.0, max(0.0, score)), 4)
+
+
+def apply_depth_of_processing(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    content: str,
+    base_stability: float = 1.0,
+) -> float:
+    """
+    iter401：计算 depth_of_processing，写入 DB，并返回调整后的 stability。
+
+    深度加工 bonus：
+      depth >= 0.5 → stability += 0.5（中等深度加工）
+      depth >= 0.75 → stability += 1.5（高度加工，形成长久记忆痕迹）
+    上限：base_stability 最高 × 3.0
+
+    OS 类比：Linux CoW（Copy-on-Write）page promotion —
+      页面被多次写入且内容丰富时，从 anon page 晋升到 THP（Transparent Hugepage），
+      访问延迟从 4KB miss → 2MB TLB hit。
+
+    Returns:
+      new_stability（包含 depth bonus）
+    """
+    dop = compute_depth_of_processing(content or "")
+
+    # depth_bonus: 线性插值，dop=0 → +0, dop=1 → +2.0
+    depth_bonus = dop * 2.0
+    new_stability = min(base_stability * 3.0, base_stability + depth_bonus)
+
+    try:
+        conn.execute(
+            "UPDATE memory_chunks SET depth_of_processing=?, stability=?, updated_at=? WHERE id=?",
+            (dop, round(new_stability, 4), datetime.now(timezone.utc).isoformat(), chunk_id),
+        )
+    except Exception:
+        pass
+
+    return round(new_stability, 4)
 
 
 def promote_to_semantic(
@@ -3478,31 +5719,80 @@ def episodic_decay_scan(
     stale_days: int = 14,
     semantic_threshold: int = 2,
     max_promote: int = 10,
+    semantic_hard_threshold: int = 5,
 ) -> dict:
     """
     迭代319：扫描情节记忆 — 衰减过期情节 chunk，提升高频召回情节 chunk 为语义 chunk。
     迭代327：semantic_threshold 降低 3 → 2（access_count=0 的情节 chunk 因 content 太短
     从未被召回，threshold=3 导致晋升路径永远不触发；降低到 2 让 access_count>=2 的 10 个
     chunks 有资格晋升，也避免"先有鸡还是先有蛋"的死锁）。
+    迭代379：新增 A0 原地提升路径 — 基于 Tulving (1972) 双加工理论：
+      单个情节 chunk 多次访问（>= semantic_hard_threshold=5）时，原地升级为语义记忆。
+      避免碎片合并（promote_to_semantic 路径），保留 chunk identity，
+      提升 stability × 1.5，设 info_class='semantic'，让语义层衰减速率（0.97）生效。
+      OS 类比：mprotect(PROT_READ|PROT_EXEC) — 热页面提升保护级别，
+        从 anonymous page（情节）升级为 file-backed 共享页（语义，跨 session 共享）。
 
-    两个子操作（类比睡眠巩固的特化版本）：
-      A. 提升：info_class='episodic' AND access_count >= semantic_threshold
-         → 调用 promote_to_semantic()，一次只处理同 summary 类别的
-      B. 衰减：info_class='episodic' AND last_accessed < (now - stale_days)
-         AND access_count < 2 → importance *= 0.7, oom_adj += 50
+    三个子操作（类比睡眠巩固的特化版本）：
+      A0. 原地提升（iter379）：单个 info_class='episodic' chunk，
+          access_count >= semantic_hard_threshold（默认5）→ 原地升级 info_class='semantic',
+          stability × 1.5（上限 200），oom_adj -= 50（增加保留概率）
+      A.  合并提升：info_class='episodic' AND access_count >= semantic_threshold（默认2）
+          → 调用 promote_to_semantic()，合并同组情节 chunk 为新语义 chunk
+      B.  衰减：info_class='episodic' AND last_accessed < (now - stale_days)
+          AND access_count < 2 → importance *= 0.7, oom_adj += 50
 
     OS 类比：Linux khugepaged + kswapd 协同 —
-      khugepaged 提升高频访问小页面（促进 → 语义），
-      kswapd 回收冷页面（衰减 → 降权 → 更易被 evict）。
+      A0: mprotect() 热页面原地升级权限（不复制，不移动）
+      A:  khugepaged 提升高频访问小页面（促进 → 语义）
+      kswapd 回收冷页面（衰减 → 降权 → 更易被 evict）
 
     Returns:
-      {"decayed": N, "promoted": N, "new_semantic_ids": [...]}
+      {"decayed": N, "promoted": N, "inplace_promoted": N, "new_semantic_ids": [...]}
     """
-    result: dict = {"decayed": 0, "promoted": 0, "new_semantic_ids": []}
+    result: dict = {"decayed": 0, "promoted": 0, "inplace_promoted": 0, "new_semantic_ids": []}
     now = datetime.now(timezone.utc)
     now_iso = now.isoformat()
 
-    # ── 子操作 A：提升高频情节 chunk ──────────────────────────────────────────
+    # ── 子操作 A0：原地提升（iter379 新增）────────────────────────────────────
+    # 认知科学基础：Tulving (1972) episodic-to-semantic shift —
+    #   情节记忆通过多次重激活（access_count++）逐渐脱离时间/情境特异性，
+    #   转化为与情境无关的通用语义知识（语义记忆）。
+    # 触发条件：access_count >= semantic_hard_threshold（5），chunk_type 为可巩固类型
+    # 效果：info_class 原地更新（不新建 chunk），stability × 1.5，oom_adj -= 50
+    _CONSOLIDATABLE_TYPES = ("reasoning_chain", "conversation_summary", "causal_chain",
+                              "decision", "design_constraint")
+    try:
+        inplace_rows = conn.execute(
+            "SELECT id, stability, oom_adj, chunk_type FROM memory_chunks "
+            "WHERE project=? AND info_class='episodic' "
+            "  AND chunk_type IN ({}) "
+            "  AND COALESCE(access_count,0) >= ?".format(
+                ",".join("?" * len(_CONSOLIDATABLE_TYPES))
+            ),
+            (project, *_CONSOLIDATABLE_TYPES, semantic_hard_threshold),
+        ).fetchall()
+
+        inplace_promoted = 0
+        for row in inplace_rows:
+            cid, cur_stability, cur_oom, ctype = row
+            cur_stability = cur_stability or 1.0
+            cur_oom = cur_oom or 0
+            new_stability = min(200.0, cur_stability * 1.5)
+            new_oom = max(-500, cur_oom - 50)
+            conn.execute(
+                "UPDATE memory_chunks "
+                "SET info_class='semantic', stability=?, oom_adj=?, updated_at=? "
+                "WHERE id=?",
+                (round(new_stability, 4), new_oom, now_iso, cid),
+            )
+            inplace_promoted += 1
+
+        result["inplace_promoted"] = inplace_promoted
+    except Exception:
+        pass
+
+    # ── 子操作 A：合并提升高频情节 chunk（原有路径）─────────────────────────
     try:
         promote_rows = conn.execute(
             "SELECT id FROM memory_chunks "
@@ -3665,6 +5955,127 @@ def reap_ghosts(conn: sqlite3.Connection,
 
 _FTS_OPTIMIZE_INTERVAL: float = 3600.0  # 冷却时间（秒），最少 1 小时间隔
 _fts_last_optimize: float = 0.0  # 上次 optimize 的 monotonic 时间戳
+
+
+def interference_decay(conn: sqlite3.Connection, new_chunk: dict, project: str,
+                       threshold_mild: float = 0.30,
+                       threshold_strong: float = 0.50,
+                       decay_mild: float = 0.10,
+                       decay_strong: float = 0.20,
+                       max_affected: int = 10) -> int:
+    """
+    iter386: Interference-Based Retrievability Decay — 干扰式检索衰减
+
+    认知科学依据：
+      McGeoch (1932) Interference Theory — 遗忘的主因是新旧记忆之间的干扰，
+        而非时间本身（Ebbinghaus 的衰减曲线只是表象）。
+      Anderson (2003) Inhibition Theory — 海马回路通过主动抑制机制降低干扰记忆的可及性，
+        确保最相关记忆优先浮现（Retrieval-Induced Forgetting, RIF）。
+
+    OS 类比：CPU TLB Shootdown (INVLPG, x86 SMP)
+      当一个核修改了页表（写入新chunk）时，必须向所有其他核广播 TLB 失效（INVLPG），
+      否则其他核的 TLB 仍持有旧的虚地址→物理地址映射（过时知识仍被注入）。
+      类比：写入覆盖旧知识的新 chunk → 旧 chunk 的 retrievability 降低（TLB 失效）。
+
+    算法：
+      1. FTS5 搜索新 chunk 的 summary，找语义相近旧 chunk（同 project）
+      2. 计算 Jaccard 相似度（summary token 集合）
+      3. mild 干扰 [threshold_mild, threshold_strong): retrievability -= decay_mild
+      4. strong 干扰 [threshold_strong, +∞): retrievability -= decay_strong
+      5. design_constraint 类型免疫（设计约束不受覆盖，只能显式 supersede）
+      6. retrievability 下限 0.05（防止完全消失，仍可在 page fault 时 swap_in）
+
+    保护机制：
+      - design_constraint 不受干扰（mlock 保护）
+      - 相同 chunk_type 的干扰权重 × 1.5（同类型更可能是覆盖更新）
+      - retrievability 下限 0.05
+
+    Returns:
+      受影响的 chunk 数量
+    """
+    import re as _re
+
+    if not new_chunk or not project:
+        return 0
+
+    new_summary = (new_chunk.get("summary") or "").strip()
+    new_type = new_chunk.get("chunk_type", "")
+    new_id = new_chunk.get("id", "")
+
+    if not new_summary:
+        return 0
+
+    # Token 化：英文词 + CJK bigram
+    def _tokenize(text: str) -> frozenset:
+        tokens = set()
+        for m in _re.finditer(r'[a-zA-Z0-9_\u4e00-\u9fff]{2,}', text.lower()):
+            tokens.add(m.group())
+        cn = _re.sub(r'[^\u4e00-\u9fff]', '', text)
+        for i in range(len(cn) - 1):
+            tokens.add(cn[i:i + 2])
+        return frozenset(tokens)
+
+    new_tokens = _tokenize(new_summary)
+    if not new_tokens:
+        return 0
+
+    # FTS5 搜索语义相近的旧 chunk
+    try:
+        similar = fts_search(conn, new_summary, project, top_k=max_affected * 2)
+    except Exception:
+        return 0
+
+    if not similar:
+        return 0
+
+    affected = 0
+    for chunk in similar[:max_affected * 2]:
+        cid = chunk.get("id", "")
+        if not cid or cid == new_id:
+            continue
+        # design_constraint 免疫
+        if chunk.get("chunk_type") == "design_constraint":
+            continue
+        # 获取当前 retrievability
+        row = conn.execute(
+            "SELECT retrievability, chunk_type FROM memory_chunks WHERE id=?", (cid,)
+        ).fetchone()
+        if not row:
+            continue
+        old_ret, old_type = float(row[0] or 0.8), (row[1] or "")
+
+        # 计算 Jaccard 相似度
+        old_tokens = _tokenize(chunk.get("summary") or "")
+        if not old_tokens:
+            continue
+        inter = len(new_tokens & old_tokens)
+        union = len(new_tokens | old_tokens)
+        if union == 0:
+            continue
+        jaccard = inter / union
+
+        # 同类型干扰系数 1.5（更可能是内容更新）
+        type_factor = 1.5 if old_type == new_type else 1.0
+
+        if jaccard >= threshold_strong:
+            penalty = decay_strong * type_factor
+        elif jaccard >= threshold_mild:
+            penalty = decay_mild * type_factor
+        else:
+            continue  # 相似度太低，不干扰
+
+        new_ret = max(0.05, old_ret - penalty)
+        if new_ret < old_ret:
+            try:
+                conn.execute(
+                    "UPDATE memory_chunks SET retrievability=? WHERE id=?",
+                    (round(new_ret, 4), cid)
+                )
+                affected += 1
+            except Exception:
+                pass
+
+    return affected
 
 
 def fts_optimize(conn: sqlite3.Connection, force: bool = False) -> bool:

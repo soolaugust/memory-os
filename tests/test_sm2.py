@@ -118,13 +118,21 @@ def test_quality4_mild_gain(conn):
 
 
 def test_default_quality_is_4(conn):
-    """recall_quality=None 默认 quality=4 → × 1.1。"""
-    insert_chunk(conn, _make_chunk("c5", stability=1.0))
+    """recall_quality=None + 1-day gap → iter389 再巩固窗口推断 quality=4 → × 1.1。"""
+    from datetime import timedelta
+    # 设置 last_accessed 为 25 小时前（> medium_gap=24hr → quality=5 已超过，
+    # 但为了测试 quality=4 场景，设置为 6 小时前（处于 medium zone）
+    chunk = _make_chunk("c5", stability=1.0)
+    chunk["last_accessed"] = (__import__("datetime").datetime.now(
+        __import__("datetime").timezone.utc
+    ) - __import__("datetime").timedelta(hours=6)).isoformat()
+    insert_chunk(conn, chunk)
     conn.commit()
     update_accessed(conn, ["c5"], recall_quality=None)
     conn.commit()
     s = _get_stability(conn, "c5")
-    assert abs(s - 1.1) < 1e-6, f"默认 quality=4 → ×1.1，got {s}"
+    # 6hr gap → quality=4 → ×1.1
+    assert abs(s - 1.1) < 0.01, f"6hr gap → quality=4 → ×1.1，got {s}"
 
 
 def test_no_quality_param_backward_compat(conn):

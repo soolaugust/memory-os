@@ -41,6 +41,7 @@ OS 类比：Linux CFS nice 值 (-20 ~ 19)
 """
 import sys
 import json
+import math
 import os
 import zlib
 # ── 迭代159：Remove pathlib.Path — 消除 ~7ms import 开销 ──────────────────────
@@ -103,6 +104,7 @@ TLB_FILE = os.path.join(MEMORY_OS_DIR, ".last_tlb.json")       # 迭代57→64: 
 CHUNK_VERSION_FILE = os.path.join(MEMORY_OS_DIR, ".chunk_version")  # 迭代64: chunk_version
 PAGE_FAULT_LOG = os.path.join(MEMORY_OS_DIR, "page_fault_log.json")
 SHADOW_TRACE_FILE = os.path.join(MEMORY_OS_DIR, ".shadow_trace.json")  # 迭代85: Shadow Trace
+IOR_FILE = os.path.join(MEMORY_OS_DIR, ".ior_state.json")  # iter391: Inhibition of Return
 
 # ── Heavy modules — 延迟加载（迭代61 vDSO Fast Path）──
 # 这些模块只在 Stage 2（完整检索）时才需要
@@ -1197,6 +1199,45 @@ def _write_shadow_trace(project: str, top_k_ids: list, session_id: str = "") -> 
         pass  # shadow trace 写入失败不影响正常流程
 
 
+def _update_ior_state(top_k_ids: list, session_id: str, exempt_types: set = None,
+                      chunk_types: dict = None) -> None:
+    """
+    iter391: 更新 IOR (Inhibition of Return) 状态文件。
+    记录本次注入的 chunk_ids 和当前 turn，用于下次检索时施加返回抑制。
+    OS 类比：Linux CFQ timeslice bookkeeping — 更新已服务字节数，调整下次服务权重。
+    """
+    try:
+        _ior_data = {}
+        try:
+            with open(IOR_FILE, 'r', encoding="utf-8") as _ior_f:
+                _ior_data = json.loads(_ior_f.read())
+        except Exception:
+            pass
+
+        if _ior_data.get("session_id") != session_id:
+            # 新 session — 重置 IOR 状态
+            _ior_data = {"session_id": session_id, "injections": {}, "current_turn": 0}
+
+        _ior_data["current_turn"] = _ior_data.get("current_turn", 0) + 1
+        _cur_turn = _ior_data["current_turn"]
+        _injs = _ior_data.get("injections", {})
+
+        for cid in top_k_ids:
+            # design_constraint 等豁免类型不记录 IOR
+            if exempt_types and chunk_types and chunk_types.get(cid) in exempt_types:
+                continue
+            _injs[cid] = _cur_turn
+
+        # 清理过旧的记录（> 50 turns ago，避免内存无限增长）
+        _stale_cutoff = _cur_turn - 50
+        _ior_data["injections"] = {k: v for k, v in _injs.items() if v > _stale_cutoff}
+
+        with open(IOR_FILE, 'w', encoding="utf-8") as _ior_f:
+            _ior_f.write(json.dumps(_ior_data, ensure_ascii=False))
+    except Exception:
+        pass  # IOR 状态更新失败不影响主流程
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def _open_db_readonly():
@@ -1282,6 +1323,25 @@ def main():
 
     prompt = hook_input.get("prompt", "") or ""
     query = _build_query(hook_input)
+
+    # ── iter372: Context-Aware current context — cwd + focus keywords ──────────
+    # OS 类比：NUMA topology — 本地节点的页面访问延迟更低，优先分配
+    # 编码特异性原理（Tulving 1975）：编码时与检索时上下文越匹配，记忆提取越准确
+    _current_cwd = (hook_input.get("cwd", "") or os.environ.get("CLAUDE_CWD", "")).rstrip("/")
+    _current_context = {"cwd": _current_cwd}
+    # ── iter394: Contextual Similarity Boost — 从 query 提取当前任务情境 ──────
+    # Tulving (1983) Encoding Specificity + Godden & Baddeley (1975):
+    #   检索时的 session_type/task_verbs 与编码时越一致，记忆提取成功率越高。
+    # OS 类比：NUMA-aware scheduler — 优先将进程调度到数据所在的 NUMA 节点。
+    if query:
+        try:
+            from store_vfs import extract_encoding_context as _eec
+            _q_ctx = _eec(query)
+            _current_context["session_type"] = _q_ctx.get("session_type", "unknown")
+            _current_context["task_verbs"] = _q_ctx.get("task_verbs", [])
+            _current_context["query"] = query  # fallback for entity extraction
+        except Exception:
+            _current_context["query"] = query
 
     # 缺页日志：上轮推理标记的知识缺口，追加到查询
     page_fault_queries = _read_page_fault_log()
@@ -1494,6 +1554,17 @@ def main():
         except Exception:
             pass
 
+        # ── iter368: Attention Focus Stack — 会话注意焦点关键词加载 ─────────
+        # OS 类比：CPU register file — 读取"热"寄存器，零额外 I/O
+        # 人的记忆类比：focus of attention — 焦点中的概念激活阈值更低
+        _focus_keywords: list = []
+        try:
+            from store_focus import ensure_focus_schema, get_focus
+            ensure_focus_schema(conn)
+            _focus_keywords = get_focus(conn, session_id)
+        except Exception:
+            pass  # 焦点加载失败不影响主流程
+
         # ── iter89: Tool Pattern Keywords — 工具模式关键词集 ──
         # 迭代101：从全局聚合改为意图感知过滤。
         # OS 类比：branch predictor history table — 只保留与当前 PC 相关的跳转历史，
@@ -1593,6 +1664,79 @@ def main():
         _hybrid_bm25_count = 0  # 记录 BM25 补充数（供 dmesg 日志）
         _bm25_global_discount = 1.0  # iter131: BM25 fallback 时全局项目折扣，默认 1.0（不折扣）
 
+        def _compute_context_match(enc_ctx: dict, cur_ctx: dict) -> float:
+            """
+            iter372: NUMA-aware context match score — 0.0 ~ 0.20
+
+            编码特异性原理（Tulving 1975 Encoding Specificity Principle）：
+              编码时的上下文（cwd + 关注关键词）与检索时的上下文越接近，
+              记忆提取的准确率越高。OS 类比：NUMA 本地节点优先分配，
+              远端节点访问延迟更高（类比：上下文不匹配的 chunk 相关性折扣）。
+
+            cwd 匹配：+0.10（最强信号，表明 chunk 在同一工作目录/项目下编码）
+            关键词重叠：+0.05 × Jaccard（细粒度上下文相似度）
+            iter385 实体重叠：+0.05 × entity_Jaccard（Godden & Baddeley 1975 情境再现）
+              encoding_context.entities 与当前 query 实体词的交集越大 → boost 越高
+              认知科学：情境再现原则 — 检索时复原编码情境可最大化回忆成功率。
+              OS 类比：CPU LLC prefetch hint — 提示 prefetcher 预取与当前实体相关的 cache line。
+            总计上限 0.20（避免 context boost 主导 FTS5 relevance）
+            """
+            if not enc_ctx or not cur_ctx:
+                return 0.0
+            boost = 0.0
+            enc_cwd = (enc_ctx.get("cwd") or "").rstrip("/")
+            cur_cwd = (cur_ctx.get("cwd") or "").rstrip("/")
+            if enc_cwd and cur_cwd:
+                if enc_cwd == cur_cwd or cur_cwd.startswith(enc_cwd + "/"):
+                    boost += 0.10
+            enc_kw = set(enc_ctx.get("keywords") or [])
+            cur_kw = set(cur_ctx.get("keywords") or _focus_keywords)
+            if enc_kw and cur_kw:
+                intersection = len(enc_kw & cur_kw)
+                union = len(enc_kw | cur_kw)
+                if union > 0:
+                    boost += (intersection / union) * 0.05
+            # ── iter385: Entity-level Encoding Context Boost ──────────────────
+            # Godden & Baddeley (1975) Context-Dependent Memory:
+            #   当检索上下文（query 中的实体词）与编码上下文（enc_ctx.entities）重叠时，
+            #   该 chunk 更可能是当前情境下的正确答案。
+            #   实现：提取 query 中的英文标识符和 CJK bigram，与 enc_ctx.entities 计算 Jaccard
+            enc_entities = set(e.lower() for e in (enc_ctx.get("entities") or []) if e)
+            cur_entities = set(cur_ctx.get("entities") or [])
+            if not cur_entities:
+                # fallback: 从 query 中提取实体词
+                import re as _re
+                _q = cur_ctx.get("query", "")
+                cur_entities = set(m.group().lower()
+                                   for m in _re.finditer(r'[a-zA-Z][a-zA-Z0-9_\.]{2,}', _q))
+                _cjk = _re.sub(r'[^\u4e00-\u9fff]', '', _q)
+                for _i in range(len(_cjk) - 1):
+                    cur_entities.add(_cjk[_i:_i + 2])
+            if enc_entities and cur_entities:
+                _ei = len(enc_entities & cur_entities)
+                _eu = len(enc_entities | cur_entities)
+                if _eu > 0:
+                    boost += (_ei / _eu) * 0.05
+            # ── iter394: Session Type + Task Verbs Boost ──────────────────────
+            # Tulving (1983) Encoding Specificity + Godden & Baddeley (1975):
+            #   任务情境类型（debug/design/refactor/qa）一致 → +context_type_boost
+            #   task_verbs 词集交集越大 → +task_verbs_boost × Jaccard
+            # OS 类比：NUMA-aware task scheduler — 同 NUMA 域的内存访问优先调度。
+            if _sysctl("retriever.context_type_boost_enabled"):
+                enc_stype = enc_ctx.get("session_type", "unknown")
+                cur_stype = cur_ctx.get("session_type", "unknown")
+                if (enc_stype and cur_stype and enc_stype != "unknown"
+                        and cur_stype != "unknown" and enc_stype == cur_stype):
+                    boost += _sysctl("retriever.context_type_boost")
+                enc_verbs = set(enc_ctx.get("task_verbs") or [])
+                cur_verbs = set(cur_ctx.get("task_verbs") or [])
+                if enc_verbs and cur_verbs:
+                    _vi = len(enc_verbs & cur_verbs)
+                    _vu = len(enc_verbs | cur_verbs)
+                    if _vu > 0:
+                        boost += (_vi / _vu) * _sysctl("retriever.task_verbs_boost")
+            return min(boost, 0.25)  # iter394: 上限从 0.20 提升到 0.25（新增两个 boost 维度）
+
         def _score_chunk(chunk, relevance):
             # 迭代322: Query-Conditioned Importance — 动态 α
             # OS 类比：CPUFreq P-state — 高负载（高 relevance）降低 importance 依赖；
@@ -1615,7 +1759,19 @@ def main():
                 chunk_project=chunk.get("project", ""),
                 current_project=project,
                 query_alpha=_dyn_alpha,
+                chunk_type=chunk.get("chunk_type", ""),  # iter375: type-differential decay
             )
+            # ── iter369: Soft Forgetting — Ebbinghaus 遗忘曲线阈值 ──────────
+            # OS 类比：DAMON cold page candidate — 低访问频率页面降低换入优先级
+            # retrievability < 0.15 的 chunk 被视为"高度遗忘"状态：
+            #   知识已经"淡出"工作记忆，score 折扣 × 0.55
+            #   使其只在 FTS5 强命中（高 relevance）时才能出现在 top-K 中
+            # 豁免：design_constraint（约束不受遗忘影响）
+            _ret = float(chunk.get("retrievability") or 1.0)
+            if (_ret < 0.15
+                    and chunk.get("chunk_type") != "design_constraint"):
+                score *= 0.55
+
             # 迭代300：info_class 路由权重调整
             # ephemeral chunk 降权 0.3，避免临时状态挤掉 world/operational 知识
             # operational chunk 在跨项目召回时降权 0.1（偏好/规则有项目局部性）
@@ -1644,6 +1800,133 @@ def main():
             _sess_inj = _session_injection_counts.get(chunk.get("id", ""), 0)
             if _sess_inj >= _tmv_session_density_gate:
                 score *= 0.70
+            # ── iter368: Attention Focus Bonus ─────────────────────────────
+            # OS 类比：寄存器中的变量零访问延迟 bonus（vs 内存访问 200 cycles）
+            # 当前焦点关键词命中 → chunk 进入"注意焦点"→ 激活阈值降低
+            if _focus_keywords:
+                try:
+                    from store_focus import focus_score_bonus as _fsb
+                    _fb = _fsb(_focus_keywords, chunk.get("summary", ""),
+                               chunk.get("content", "")[:200])
+                    score += _fb
+                except Exception:
+                    pass
+            # ── iter376: Emotional Salience Retrieval Boost ─────────────────
+            # OS 类比：Linux OOM Score — oom_adj=-800 高情绪显著性记忆优先保留
+            # 认知科学依据：McGaugh (2000) 情绪增强记忆巩固 — 杏仁核激活增强海马编码
+            # emotional_weight > threshold → score += weight × factor
+            try:
+                _ew = float(chunk.get("emotional_weight") or 0.0)
+                _et = _sysctl("retriever.emotional_boost_threshold")  # default 0.4
+                if _ew > (_et or 0.4):
+                    _ef = _sysctl("retriever.emotional_boost_factor")  # default 0.08
+                    score += _ew * (_ef or 0.08)
+            except Exception:
+                pass
+            # ── iter396: Source Monitoring Weight ──────────────────────────────
+            # OS 类比：Linux LSM (Linux Security Modules) — 操作前检查来源 security context，
+            #   不同 context 获得不同的访问权限（capability 粒度）。
+            # 认知科学依据：Johnson (1993) Source Monitoring Framework —
+            #   来源可信度（source credibility）影响记忆的检索优先级。
+            #   hearsay < inferred < tool_output < direct（可信度递增）。
+            # source_reliability ∈ [0.0, 1.0] → score *= source_monitor_weight()
+            # weight ∈ [0.80, 1.15]，中间区间（0.60~0.85）保持不变（避免噪音误判）
+            try:
+                _sm_enabled = _sysctl("retriever.source_monitor_enabled")
+                if _sm_enabled is None or _sm_enabled:  # default: enabled
+                    _sr = float(chunk.get("source_reliability") or 0.7)
+                    from store_vfs import source_monitor_weight as _smw
+                    _sm_weight = _smw(_sr)
+                    if abs(_sm_weight - 1.0) > 0.001:  # 避免无意义乘法
+                        score *= _sm_weight
+            except Exception:
+                pass
+            # ── iter403: Cue-Dependent Forgetting — Context Cue Weight ──────────
+            # OS 类比：NUMA-aware memory access — 编码时 context = home node；
+            #   检索时 context 越接近 home node → 访问延迟越低 → 优先返回。
+            # 认知科学依据：Tulving & Thomson (1973) Encoding Specificity Principle —
+            #   检索时上下文线索（cues）越接近编码时上下文，检索成功率越高。
+            # encode_context（编码时关键词集）∩ 当前 retrieve_context → Jaccard overlap
+            # overlap ∈ [0.50, 1.0] → weight ∈ [1.10, 1.20]（高匹配，提升优先级）
+            # overlap ∈ [0.20, 0.50) → weight = 1.0（中等，不调整）
+            # overlap < 0.20 → weight ∈ [0.85, 1.0)（低匹配，轻微降权）
+            try:
+                _cdf_enabled = _sysctl("retriever.context_cue_enabled")
+                if _cdf_enabled is None or _cdf_enabled:  # default: enabled
+                    _enc_ctx_str = chunk.get("encode_context") or ""
+                    if _enc_ctx_str:
+                        from store_vfs import (
+                            compute_context_overlap as _ccoverlap,
+                            context_cue_weight as _ccweight,
+                            extract_encode_context as _ec_extract,
+                        )
+                        # 从当前 query 提取 retrieve_context
+                        _ret_ctx = _ec_extract(query, chunk_type="")
+                        if _ret_ctx:
+                            _cc_overlap = _ccoverlap(_enc_ctx_str, _ret_ctx)
+                            _cc_weight = _ccweight(_cc_overlap)
+                            if abs(_cc_weight - 1.0) > 0.001:
+                                score *= _cc_weight
+            except Exception:
+                pass
+            # ── iter404: Semantic Priming Boost ────────────────────────────────
+            # OS 类比：Linux page readahead cache hit — primed entity match → score 提升。
+            # 认知科学依据：Collins & Loftus (1975) Spreading Activation Theory —
+            #   当前活跃概念（primed）激活相关记忆的检索速度更快，优先级更高。
+            # 仅在 project + chunk_id 已知时（memory_chunks 行存在）才计算。
+            try:
+                _pr_enabled = _sysctl("retriever.semantic_priming_enabled")
+                if _pr_enabled is None or _pr_enabled:  # default: enabled
+                    _pr_chunk_id = chunk.get("id") or chunk.get("chunk_id")
+                    _pr_project = chunk.get("project", "")
+                    if _pr_chunk_id and _pr_project and conn is not None:
+                        from store_vfs import compute_priming_boost as _cpboost
+                        _pr_boost = _cpboost(conn, _pr_chunk_id, _pr_project)
+                        if _pr_boost > 0.001:
+                            score += _pr_boost
+            except Exception:
+                pass
+            # ── iter372: Context-Aware Retrieval Boost ─────────────────────────
+            # OS 类比：NUMA-aware allocation — 本地节点优先（低延迟）
+            # 编码特异性：chunk 编码时的 cwd + 关键词与当前越匹配，score 越高
+            try:
+                _enc_ctx = chunk.get("encoding_context") or {}
+                if isinstance(_enc_ctx, str):
+                    import json as _json
+                    _enc_ctx = _json.loads(_enc_ctx) if _enc_ctx else {}
+                _ctx_boost = _compute_context_match(_enc_ctx, _current_context)
+                score += _ctx_boost
+            except Exception:
+                pass
+            # ── iter405: Retroactive Interference — Recency Penalty ────────────
+            # OS 类比：MGLRU generation demotion — 年龄较大的 pages 在新 pages 涌入时面临更大驱逐压力。
+            # 认知科学依据：Underwood (1957) RI — 新记忆会干扰旧记忆的检索，相似度越高干扰越大。
+            # 对年龄 > 7天 且有更新同主题 chunk 的旧 chunk 施加轻微罚分。
+            try:
+                _ri_enabled = _sysctl("retriever.retroactive_interference_enabled")
+                if _ri_enabled is None or _ri_enabled:  # default: enabled
+                    _ri_chunk_id = chunk.get("id") or chunk.get("chunk_id")
+                    _ri_project = chunk.get("project", "")
+                    _ri_created = chunk.get("created_at", "")
+                    if _ri_chunk_id and _ri_project and _ri_created and conn is not None:
+                        _ri_now = datetime.utcnow()
+                        try:
+                            _ri_ct = datetime.fromisoformat(_ri_created.replace("Z", "+00:00")).replace(tzinfo=None)
+                        except Exception:
+                            _ri_ct = _ri_now
+                        _ri_age_days = max(0.0, (_ri_now - _ri_ct).total_seconds() / 86400)
+                        if _ri_age_days > 7.0:
+                            from store_vfs import (
+                                get_newer_same_topic_count as _gntc,
+                                compute_recency_penalty as _crp,
+                            )
+                            _ri_count, _ri_sim = _gntc(conn, _ri_chunk_id, _ri_project)
+                            if _ri_count > 0:
+                                _ri_penalty = _crp(_ri_age_days, _ri_count, _ri_sim)
+                                if _ri_penalty > 0.001:
+                                    score -= _ri_penalty
+            except Exception:
+                pass
             return score
 
         # ── 迭代357：Working Set TLB Probe（pre-FTS5 热数据快速命中）──
@@ -1752,6 +2035,43 @@ def main():
                         candidates_count += len(_sa_rows)
                 except Exception:
                     pass  # spreading activation 失败不阻塞主流程
+
+            # ── iter380：Schema Spreading Activation — Bartlett (1932) Schema Theory ──
+            # OS 类比：SLUB allocator partial list — 命中 chunk 所在 kmem_cache，
+            # 同 slab 的相邻对象自动成为候选（schema-level prefetch）。
+            # 在 entity_edges 图扩散（Collins & Loftus 1975）之后，
+            # 再叠加 schema 框架级激活（更高层次语义聚合）。
+            if not _check_deadline("schema_spread"):
+                try:
+                    from store_vfs import schema_spread_activate as _schema_sa
+                    _schema_result = _schema_sa(
+                        conn, list(fts_ids), project=project,
+                        max_per_schema=3,
+                        activation_score=0.25,
+                        existing_ids=fts_ids,
+                    )
+                    if _schema_result:
+                        _schema_ids = list(_schema_result.keys())
+                        _schema_ph = ",".join("?" * len(_schema_ids))
+                        _schema_rows = conn.execute(
+                            f"SELECT id, summary, content, chunk_type, importance, "
+                            f"last_accessed, access_count, created_at, project, "
+                            f"info_class, lru_gen "
+                            f"FROM memory_chunks WHERE id IN ({_schema_ph})",
+                            _schema_ids,
+                        ).fetchall()
+                        _schema_col = ("id","summary","content","chunk_type","importance",
+                                       "last_accessed","access_count","created_at","project",
+                                       "info_class","lru_gen")
+                        for row in _schema_rows:
+                            c = dict(zip(_schema_col, row))
+                            activation_bonus = _schema_result.get(c["id"], 0.0)
+                            base_score = _score_chunk(c, relevance=0.15)
+                            final.append((base_score + activation_bonus, c))
+                            fts_ids.add(c["id"])
+                        candidates_count += len(_schema_rows)
+                except Exception:
+                    pass  # schema spreading 失败不阻塞主流程
 
             # ── 迭代330：Causal Secondary Search — causal_chain 专属二次检索 ──
             # OS 类比：Linux readahead ≥ 2 pass — 第一轮 VFS readahead 基于 offset，
@@ -1940,6 +2260,25 @@ def main():
         # 不再执行 madvise/swap_fault/router，直接返回 FTS5+scorer 的结果
         if _check_deadline("post_scoring", is_hard=True):
             # hard deadline 到期：跳过所有后续增强阶段
+            # ── iter388: Temporal Priming（hard deadline 路径）──
+            try:
+                if session_id and _sysctl("retriever.priming_enabled"):
+                    _priming_boost = _sysctl("retriever.priming_boost")
+                    _shadow_data = None
+                    try:
+                        with open(SHADOW_TRACE_FILE, 'r', encoding="utf-8") as _sf:
+                            _shadow_data = json.loads(_sf.read())
+                    except Exception:
+                        pass
+                    if _shadow_data and _shadow_data.get("session_id") == session_id:
+                        _primed_ids = set(_shadow_data.get("top_k_ids") or [])
+                        if _primed_ids:
+                            final = [
+                                (s + _priming_boost if c.get("id") in _primed_ids else s, c)
+                                for s, c in final
+                            ]
+            except Exception:
+                pass
             # 迭代50：hard deadline 路径也使用 DRR 选择
             final.sort(key=lambda x: x[0], reverse=True)
             # 迭代86：最低相关性门槛 — A/B评测发现无关query注入噪音
@@ -2052,6 +2391,10 @@ def main():
                         pass  # write-back 失败不影响已输出的结果
                     # 迭代85：Shadow Trace
                     _write_shadow_trace(project, accessed_ids, session_id)
+                    # iter391: IOR — hard deadline 路径也更新返回抑制状态
+                    _update_ior_state(accessed_ids, session_id,
+                                      exempt_types=set((_sysctl("retriever.ior_exempt_types") or "").split(",")),
+                                      chunk_types={c["id"]: c.get("chunk_type", "") for _, c in top_k})
                     sys.exit(0)
 
         # ── 迭代32：madvise boost — 预热 hint 匹配加分 ──
@@ -2175,6 +2518,55 @@ def main():
         except Exception:
             pass  # intent prefetch 失败不影响主流程
 
+        # ── iter383：Spacing Effect Scheduler — 主动复习注入 ────────────────────
+        # 认知科学：Ebbinghaus (1885) + SuperMemo SM-2 间隔效应
+        #   知识的保留率随时间指数衰减，最优复习时机在遗忘前，
+        #   每次成功复习后 stability 增大，下次遗忘窗口更宽（间隔效应）。
+        # 触发条件：仅在 retrieval_mode='full' 且 session is_start=True 时
+        #   检查高重要性 chunk 是否超过了 stability 天未被访问。
+        # OS 类比：Linux pdflush proactive writeback — 不等内存压力，
+        #   按 dirty_expire_interval 定期扫描并主动刷出 dirty pages。
+        try:
+            _is_session_start = (retrieval_mode == "full")
+            if _is_session_start:
+                from store_vfs import find_spaced_review_candidates
+                _spacing_candidates = find_spaced_review_candidates(
+                    conn, project, top_n=3, min_importance=0.70
+                )
+                _spacing_injected = 0
+                _existing_ids_spacing = {c["id"] for _, c in final}
+                for _sc in _spacing_candidates:
+                    if _sc["id"] not in _existing_ids_spacing:
+                        # score = 基础评分 + urgency 修正（urgency 越低越迫切，score 取中等值）
+                        _sc_score = _unified_retrieval_score(
+                            relevance=0.2, importance=_sc["importance"],
+                            last_accessed=_sc["last_accessed"],
+                            access_count=0,
+                            chunk_id=_sc["id"], query_seed=prompt,
+                            chunk_project=project,
+                            current_project=project,
+                        )
+                        final.append((_sc_score, {
+                            "id": _sc["id"],
+                            "summary": _sc["summary"],
+                            "chunk_type": _sc["chunk_type"],
+                            "importance": _sc["importance"],
+                            "last_accessed": _sc["last_accessed"],
+                            "access_count": 0,
+                            "embedding": "[]", "tags": "[]",
+                            "spacing_review": True,
+                            "days_overdue": _sc.get("days_overdue", 0),
+                        }))
+                        _existing_ids_spacing.add(_sc["id"])
+                        _spacing_injected += 1
+                if _spacing_injected > 0:
+                    _deferred.log(DMESG_DEBUG, "retriever",
+                                  f"spacing_review: {_spacing_injected} chunks injected "
+                                  f"(overdue={[c.get('days_overdue',0) for c in _spacing_candidates[:_spacing_injected]]})",
+                                  session_id=session_id, project=project)
+        except Exception:
+            pass  # spacing review 失败不影响主流程
+
         # ── 迭代98：强制注入 design_constraint — 符号匹配 ──
         # OS 类比：Linux mlock(2) — 标记的内存不可淘汰，总是驻留在 RAM
         # 检查 final 中是否有 design_constraint；若有，强制保留在 top_k 中
@@ -2198,6 +2590,56 @@ def main():
         #     2. 每个类型有 max_same_type 上限（类比 quantum 配额）
         #     3. 超出配额的 chunk 让位给其他类型的高分 chunk
         #     4. 如果其他类型不足以填满，配额回流给主类型
+        # ── iter388: Temporal Priming — Tulving & Schacter (1990) ──
+        # 认知科学：同会话最近召回的 chunk 处于"激活窗口"，再次相关时更易浮现。
+        # OS 类比：CPU 时间局部性 — 最近访问的 cache line 有更高的 L2/L3 命中概率。
+        try:
+            if session_id and _sysctl("retriever.priming_enabled"):
+                _priming_boost = _sysctl("retriever.priming_boost")
+                _shadow_data = None
+                try:
+                    with open(SHADOW_TRACE_FILE, 'r', encoding="utf-8") as _sf:
+                        _shadow_data = json.loads(_sf.read())
+                except Exception:
+                    pass
+                if _shadow_data and _shadow_data.get("session_id") == session_id:
+                    _primed_ids = set(_shadow_data.get("top_k_ids") or [])
+                    if _primed_ids:
+                        final = [
+                            (s + _priming_boost if c.get("id") in _primed_ids else s, c)
+                            for s, c in final
+                        ]
+        except Exception:
+            pass  # priming 失败不影响主流程
+        # ── iter391: Inhibition of Return — Posner (1980) ──────────────────────
+        # 认知科学：最近被注入的 chunk 有短暂的返回抑制，促进检索多样性。
+        # OS 类比：Linux CFQ anti-starvation — 刚被服务的请求在 timeslice 内降优先级。
+        try:
+            if session_id and _sysctl("retriever.ior_enabled"):
+                _ior_penalty = _sysctl("retriever.ior_penalty")
+                _ior_decay_turns = _sysctl("retriever.ior_decay_turns")
+                _ior_exempt = set(_sysctl("retriever.ior_exempt_types").split(","))
+                _ior_data = None
+                try:
+                    with open(IOR_FILE, 'r', encoding="utf-8") as _ior_f:
+                        _ior_data = json.loads(_ior_f.read())
+                except Exception:
+                    pass
+                if (_ior_data and _ior_data.get("session_id") == session_id
+                        and isinstance(_ior_data.get("injections"), dict)):
+                    _ior_injs = _ior_data["injections"]
+                    _ior_cur_turn = _ior_data.get("current_turn", 0)
+                    if _ior_injs:
+                        final = [
+                            (s * (1.0 - _ior_penalty * math.exp(
+                                -math.log(2) / max(1, _ior_decay_turns) *
+                                max(0, _ior_cur_turn - _ior_injs.get(c.get("id"), -999))
+                            )) if (c.get("id") in _ior_injs and
+                                   c.get("chunk_type") not in _ior_exempt) else s, c)
+                            for s, c in final
+                        ]
+        except Exception:
+            pass  # IOR 失败不影响主流程
         final.sort(key=lambda x: x[0], reverse=True)
         # 迭代86：最低相关性门槛 — A/B评测发现无关query注入噪音
         # 迭代88：自适应门槛 — 通用知识 query 用更高阈值防止误注入
@@ -2495,6 +2937,47 @@ def main():
         except Exception:
             pass  # WMB 失败不影响主流程，降级使用原始 top_k
 
+        # ── iter390: Prospective Memory Trigger — 展望记忆触发注入 ──────────────
+        # 认知科学：Einstein & McDaniel (1990) Prospective Memory —
+        #   当 query 匹配到之前记录的"未来意图"触发条件时，主动注入相关 chunk。
+        # OS 类比：inotify 触发 — 注册的监听事件满足时唤醒等待进程。
+        try:
+            if priority == "FULL" and not _check_deadline("prospective"):
+                from store_vfs import query_triggers as _query_triggers, fire_trigger as _fire_trigger
+                _trig_matches = _query_triggers(conn, project, query, max_triggers=2)
+                if _trig_matches:
+                    _already_ids = {c.get("id") for _, c in top_k}
+                    _trig_injected = 0
+                    for _tcid, _tid, _tpat in _trig_matches:
+                        if _tcid in _already_ids:
+                            continue
+                        _trow = conn.execute(
+                            "SELECT * FROM memory_chunks WHERE id=? LIMIT 1", (_tcid,)
+                        ).fetchone()
+                        if _trow:
+                            _tc = dict(_trow)
+                            _tscore = _score_chunk(_tc, 0.8)  # 展望记忆固定较高初始分
+                            top_k.append((_tscore, _tc))
+                            _already_ids.add(_tcid)
+                            _trig_injected += 1
+                            # 触发计数（需要写连接，延迟处理）
+                            try:
+                                _wconn_trig = open_db()
+                                ensure_schema(_wconn_trig)
+                                _fire_trigger(_wconn_trig, _tid)
+                                _wconn_trig.commit()
+                                _wconn_trig.close()
+                            except Exception:
+                                pass
+                    if _trig_injected > 0:
+                        top_k.sort(key=lambda x: x[0], reverse=True)
+                        top_k = top_k[:effective_top_k]
+                        _deferred.log(DMESG_DEBUG, "retriever",
+                                      f"iter390 prospective_trigger: injected={_trig_injected}",
+                                      session_id=session_id, project=project)
+        except Exception:
+            pass  # 展望记忆注入失败不阻塞主流程
+
         top_k_ids = sorted([c["id"] for _, c in top_k])
         current_hash = hashlib.md5("|".join(top_k_ids).encode()).hexdigest()[:8]
 
@@ -2730,6 +3213,28 @@ def main():
         except Exception:
             pass  # tool pattern hint 失败不阻塞
 
+        # ── iter366: Knowledge Graph 1-hop expansion ────────────────────────
+        # OS 类比：prefetch adjacent pages — BM25 命中后扩散邻边补充关联知识
+        # 人的联想类比：语义网络扩散 — 从已激活节点扩散到强关联邻节点
+        try:
+            _graph_seed_ids = [c["id"] for _, c in top_k]
+            if _graph_seed_ids:
+                from store_graph import expand_with_neighbors, ensure_graph_schema
+                ensure_graph_schema(conn)
+                _graph_neighbors = expand_with_neighbors(
+                    conn, _graph_seed_ids, top_n=2, min_weight=0.55,
+                    exclude_types=["entity_stub", "tool_insight", "prompt_context"]
+                )
+                if _graph_neighbors:
+                    _graph_lines = ["【关联知识（图扩散）】"]
+                    for _gn in _graph_neighbors:
+                        _et = _gn.get("edge_type", "related")
+                        _gs = _gn.get("summary", "")[:80]
+                        _graph_lines.append(f"  ↳[{_et}] {_gs}")
+                    inject_lines.extend(_graph_lines)
+        except Exception:
+            pass  # graph 扩散失败不阻塞
+
         context_text = "\n".join(inject_lines)
         if len(context_text) > effective_max_chars:
             context_text = context_text[:effective_max_chars] + "…"
@@ -2846,6 +3351,10 @@ def main():
             pass  # write-back 失败不影响已输出的结果
         # 迭代85：Shadow Trace — 记录最后一次成功检索的 top_k IDs
         _write_shadow_trace(project, accessed_ids, session_id)
+        # iter391: IOR — 更新返回抑制状态（injection 后记录本次注入的 chunk turn）
+        _update_ior_state(accessed_ids, session_id,
+                          exempt_types=set((_sysctl("retriever.ior_exempt_types") or "").split(",")),
+                          chunk_types={c["id"]: c.get("chunk_type", "") for _, c in top_k})
         sys.exit(0)
     finally:
         try:

@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent / "hooks"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 import tmpfs  # noqa
 
@@ -116,9 +117,11 @@ def test_end_to_end_spreading(conn):
     insert_edge(conn, "retriever", "depends_on", "store", project="test", confidence=1.0)
     conn.commit()
 
+    # distance_decay_enabled=False：测试 iter310 原始语义，不含 iter393 距离衰减
     result = spreading_activate(
         conn, ["c_retriever"], project="test",
         decay=0.7, max_hops=1, max_activation_bonus=1.0,
+        distance_decay_enabled=False,
     )
 
     assert "c_store" in result, \

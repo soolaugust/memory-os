@@ -106,6 +106,10 @@ _REGISTRY: dict = {
         "SessionStart 注入的最大字符数"),
     "loader.working_set_top_k": (5, int, 1, 20, None,
         "工作集恢复的 Top-K 条数"),
+    "loader.restore_working_set": (True, bool, None, None, None,
+        "iter378: 是否在 SessionStart 时恢复持久化工作集（.ws_{project}.json）"),
+    "loader.ws_max_restore": (20, int, 5, 100, None,
+        "iter378: 从 .ws_{project}.json 最多恢复多少个 chunk（按 access_count 排序）"),
 
     # ── knowledge_router ──
     "router.top_k_per_source": (3, int, 1, 20, None,
@@ -143,9 +147,31 @@ _REGISTRY: dict = {
 
     # ── scorer ──
     "scorer.importance_decay_rate": (0.95, float, 0.5, 1.0, None,
-        "importance 遗忘曲线衰减率（每7天）"),
+        "importance 遗忘曲线衰减率（每7天，全局默认）"),
     "scorer.importance_floor": (0.3, float, 0.0, 0.9, None,
         "importance 衰减下限"),
+    # ── iter375: Type-Differential Decay Rates ──
+    # 人类记忆情节/语义双系统（Tulving 1972）:情节记忆衰减快，语义记忆衰减慢
+    # OS 类比：Linux MGLRU — younger generation pages age faster
+    # decay_rate 越大 = 衰减越慢（0.99 ≈ 很慢，0.85 ≈ 较快）
+    "scorer.decay_rate_task_state":           (0.88, float, 0.5, 1.0, None,
+        "task_state 专属衰减率（情节记忆，衰减快）"),
+    "scorer.decay_rate_conversation_summary": (0.90, float, 0.5, 1.0, None,
+        "conversation_summary 专属衰减率（情节记忆）"),
+    "scorer.decay_rate_decision":             (0.97, float, 0.5, 1.0, None,
+        "decision 专属衰减率（语义记忆，衰减慢）"),
+    "scorer.decay_rate_design_constraint":    (0.99, float, 0.5, 1.0, None,
+        "design_constraint 专属衰减率（几乎不衰减）"),
+    "scorer.decay_rate_reasoning_chain":      (0.95, float, 0.5, 1.0, None,
+        "reasoning_chain 专属衰减率（语义记忆）"),
+    "scorer.decay_rate_quantitative_evidence":(0.96, float, 0.5, 1.0, None,
+        "quantitative_evidence 专属衰减率"),
+    "scorer.decay_rate_causal_chain":         (0.95, float, 0.5, 1.0, None,
+        "causal_chain 专属衰减率"),
+    "scorer.decay_rate_excluded_path":        (0.93, float, 0.5, 1.0, None,
+        "excluded_path 专属衰减率（中速衰减）"),
+    "scorer.decay_rate_procedure":            (0.96, float, 0.5, 1.0, None,
+        "procedure 专属衰减率（程序记忆，慢速衰减）"),
     "scorer.access_bonus_cap": (0.2, float, 0.0, 1.0, None,
         "access_bonus 上限"),
     "scorer.freshness_bonus_max": (0.15, float, 0.0, 0.5, None,
@@ -210,6 +236,19 @@ _REGISTRY: dict = {
     # ── COW 预扫描（迭代39）──
     "extractor.cow_prescan_chars": (3000, int, 500, 10000, None,
         "COW 预扫描采样字符数（只扫描消息前 N 个字符）"),
+
+    # ── iter392：Generation Effect — 主动生成增强 ──
+    # 认知科学：Slamecka & Graf (1978) Generation Effect —
+    #   自己生成的内容（vs 被动阅读）记忆留存率显著更高（+50%~+80%）。
+    #   主动生成触发更深度认知加工（elaborative encoding），形成更强记忆痕迹。
+    # 应用：reasoning_chain / decision 是 agent 主动生成的推理产物，
+    #   写入时给予 stability 额外乘子，使其在 Ebbinghaus 曲线下衰减更慢。
+    "extractor.generation_boost_enabled": (True, bool, None, None, None,
+        "是否对 agent 主动生成类 chunk（reasoning_chain/decision）应用 generation effect stability 加成（iter392）"),
+    "extractor.generation_boost_factor": (1.2, float, 1.0, 2.0, None,
+        "生成效应稳定性加成系数：reasoning_chain/decision 的 stability 初始值乘以此系数（iter392，默认 1.2）"),
+    "extractor.generation_boost_types": ("reasoning_chain,decision,causal_chain", str, None, None, None,
+        "应用 generation_boost 的 chunk_type 集合（逗号分隔，iter392）"),
 
     # ── Deadline I/O Scheduler（迭代41）──
     "retriever.deadline_ms": (50.0, float, 5.0, 200.0, None,
@@ -414,6 +453,16 @@ _REGISTRY: dict = {
         "IWCSI 触发的 importance 下限：只强制曝光 importance >= 此值的零召回 chunk"),
     "retriever.cold_start_max_inject": (1, int, 1, 3, None,
         "IWCSI 每次最多强制注入的 chunk 数量（默认1，避免挤占其他类型）"),
+    # ── iter376: Emotional Salience Retrieval Boost ──────────────────────────
+    # OS 类比：Linux OOM Score 情绪加权 — 高情绪显著性记忆优先保留，类比 oom_adj=-800
+    # 认知科学依据：McGaugh (2000) 情绪增强记忆巩固（amygdala-hippocampus interaction）
+    #   情绪事件（高 arousal）触发杏仁核激活，通过 norepinephrine 增强海马编码强度。
+    #   在 memory-os 中：emotional_weight > 0 的 chunk 代表高情绪显著性知识，
+    #   检索时应优先，类比高 oom_adj 进程保留在内存中不被 kswapd 淘汰。
+    "retriever.emotional_boost_factor": (0.08, float, 0.0, 0.5, None,
+        "情绪显著性加分系数：score += emotional_weight * factor（emotional_weight > threshold 时）"),
+    "retriever.emotional_boost_threshold": (0.4, float, 0.0, 1.0, None,
+        "情绪显著性加分触发阈值：emotional_weight > 此值时才加分，防止低情绪度噪音"),
 
     # ── 迭代335：Ghost Reaper — zombie chunk FTS5 污染清除 ──
     # OS 类比：Linux wait4() — 回收 zombie 进程，释放进程表项
@@ -421,6 +470,99 @@ _REGISTRY: dict = {
     # 仍在 FTS5 索引中，消耗 result slot 并产生 false recall
     "retriever.ghost_filter_enabled": (True, bool, None, None, None,
         "是否在 fts_search 中过滤 importance=0 的 ghost chunk（Layer 2 软过滤防护）"),
+
+    # ── iter388: Temporal Priming — 时间性启动效应 ──
+    # 认知科学依据：Tulving & Schacter (1990) Priming Effect —
+    #   最近在同会话中被召回的记忆，在随后的检索中被激活的阈值降低（启动效应）。
+    #   神经基础：海马-新皮层投射维持短期激活状态（working memory buffer），
+    #   最近命中的 chunk 仍处于"激活窗口"，再次相关时更易浮现。
+    # OS 类比：CPU 时间局部性 (temporal locality) — 最近访问的 cache line 比
+    #   未访问的有更高命中概率（L2/L3 temporal prefetch）。
+    "retriever.priming_enabled": (True, bool, None, None, None,
+        "是否启用会话内时间性启动效应：同会话最近召回的 chunk 得 priming_boost 加分（iter388）"),
+    "retriever.priming_boost": (0.08, float, 0.0, 0.30, None,
+        "启动效应加分幅度：同会话最近召回的 chunk score += priming_boost（iter388，默认 0.08）"),
+
+    # ── iter389: Reconsolidation Window — 再巩固窗口 ──────────────────────────
+    # 认知科学依据：Walker & Stickgold (2004) Memory Reconsolidation —
+    #   记忆在每次被激活后进入不稳定的"可塑窗口"，然后重新巩固（reconsolidation）。
+    #   间隔越长的重复激活，巩固效果越强（spacing effect, Ebbinghaus 1885）。
+    #   短间隔内反复命中（< 1小时）= 工作记忆内刷新，不触发长时记忆巩固。
+    #   长间隔后命中（> 1天）= 真正的间隔回忆（spaced retrieval），SM-2 质量最高。
+    # OS 类比：Linux MGLRU page aging —
+    #   刚被访问的页（youngest generation）再次访问不触发 generation 晋升（短时局部性），
+    #   但跨 aging interval 后再次访问会晋升到 younger generation（真正的热页）。
+    # 在 update_accessed() 中：根据 now - last_accessed 动态推断 SM-2 quality，
+    #   替代之前固定 quality=4 的简化假设，实现真正的 spacing effect。
+    "recon.short_gap_hours": (1.0, float, 0.0, 24.0, None,
+        "再巩固短间隔阈值（小时）：gap < 此值时 SM-2 quality=3（无增益，仅更新访问时间）"),
+    "recon.medium_gap_hours": (24.0, float, 1.0, 168.0, None,
+        "再巩固中间隔阈值（小时）：short<=gap<medium 时 SM-2 quality=4（轻微加固）"),
+    "recon.long_gap_quality": (5, int, 3, 5, None,
+        "gap >= medium_gap_hours 时的 SM-2 quality（默认5=最大巩固，间隔回忆效果最强）"),
+    "recon.enabled": (True, bool, None, None, None,
+        "是否启用再巩固窗口动态 SM-2 quality（False 时回退到固定 quality=4）"),
+
+    # ── iter390: Prospective Memory — 展望记忆触发 ───────────────────────────
+    # 认知科学依据：Einstein & McDaniel (1990) Prospective Memory —
+    #   意图性记忆（"记得在X时做Y"）需要在未来条件满足时主动提取。
+    #   extractor 检测展望意图信号 → 注册 trigger_conditions；
+    #   retriever 在 query 匹配时注入关联 chunk（提醒效果）。
+    # OS 类比：Linux inotify — 注册事件监听，条件满足时唤醒等待进程。
+    "prospective.enabled": (True, bool, None, None, None,
+        "是否启用展望记忆触发（extractor 检测意图 + retriever 注入提醒，iter390）"),
+    "prospective.max_inject": (2, int, 1, 5, None,
+        "每次检索最多注入的展望记忆 chunk 数量（避免占满 Top-K，默认 2）"),
+    "prospective.score_boost": (0.8, float, 0.3, 1.0, None,
+        "展望记忆触发注入的初始评分（较高以确保注入，但低于 design_constraint）"),
+
+    # ── iter391: Inhibition of Return — 返回抑制动态衰减 ─────────────────────
+    # 认知科学依据：Posner (1980) Inhibition of Return —
+    #   注意力访问一个位置后，有 ~300ms 的返回抑制（IOR）；对记忆系统同样适用：
+    #   Klein (2000) IOR in memory search — 最近被检索的项目有短暂的检索抑制，
+    #   防止搜索固着在同一位置，促进广度探索。
+    # OS 类比：Linux CFQ fair queuing anti-starvation —
+    #   刚被服务的请求在 timeslice 内被降优先级，让其他等待队列获得服务机会。
+    # 实现：session 级 IOR 状态（chunk_id → last_inject_turn），
+    #   score *= (1 - ior_penalty × exp(-ior_decay_rate × turns_since_inject))
+    "retriever.ior_enabled": (True, bool, None, None, None,
+        "是否启用 IOR 返回抑制（最近注入的 chunk 获得短暂的分数惩罚，iter391）"),
+    "retriever.ior_penalty": (0.20, float, 0.0, 0.5, None,
+        "IOR 峰值惩罚系数：刚被注入的 chunk 分数 × (1 - ior_penalty)（iter391，默认 0.20）"),
+    "retriever.ior_decay_turns": (3, int, 1, 20, None,
+        "IOR 半衰期（检索轮次）：经过此轮次后惩罚衰减到一半（iter391，默认 3 轮）"),
+    "retriever.ior_exempt_types": ("design_constraint", str, None, None, None,
+        "IOR 豁免的 chunk_type（逗号分隔，这些类型不受返回抑制影响，iter391）"),
+
+    # ── iter393：Semantic Distance Decay in Spreading Activation ──
+    # 认知科学：Collins & Loftus (1975) Spreading Activation Theory —
+    #   激活从锚点节点沿语义图扩散，激活量随语义距离（路径长度）衰减。
+    #   距离越远，激活越低，形成自然的语义相关性梯度。
+    # OS 类比：NUMA 局部性 — 本节点内存访问延迟低，跨 2 个 NUMA 节点的访问
+    #   延迟呈指数增长（L1→L2→L3→DRAM→remote DRAM 约 3-10 倍梯度）。
+    "retriever.sa_distance_decay_enabled": (True, bool, None, None, None,
+        "是否对 spreading activation 应用语义距离衰减（iter393，默认启用）"),
+    "retriever.sa_distance_decay_factor": (0.6, float, 0.1, 1.0, None,
+        "每跳语义距离衰减系数：hop_distance 跳的激活分乘以此系数的 hop 次方（iter393，默认 0.6）"),
+    "retriever.sa_max_hops": (2, int, 1, 4, None,
+        "spreading activation 最大跳数（iter393，默认 2 跳；跳数越多计算越贵）"),
+
+    # ── iter394：Contextual Similarity Boost — 编码情境检索增强 ──
+    # 认知科学：Tulving (1983) Encoding Specificity Principle +
+    #   Godden & Baddeley (1975) Context-Dependent Memory —
+    #   检索时的任务情境（session_type: debug/design/refactor/qa）与编码时越相似，
+    #   记忆提取成功率越高。水下学习 → 水下更易回忆（情境再现效应）。
+    # OS 类比：NUMA-aware scheduling — 进程在同一 NUMA 节点上运行时，
+    #   访问该节点分配的内存延迟最低（情境局部性 ≈ NUMA 局部性）。
+    # 实现：检索时从 query 提取 session_type/task_verbs，
+    #   与 chunk.encoding_context.session_type/task_verbs 比对，
+    #   匹配时加 context_type_boost（+0.05）+ task_verbs overlap boost（+0.03）。
+    "retriever.context_type_boost_enabled": (True, bool, None, None, None,
+        "是否启用 session_type 情境匹配 boost（iter394，默认启用）"),
+    "retriever.context_type_boost": (0.05, float, 0.0, 0.15, None,
+        "session_type 精确匹配时的 score boost（iter394，默认 +0.05）"),
+    "retriever.task_verbs_boost": (0.03, float, 0.0, 0.10, None,
+        "task_verbs Jaccard 交集加权 boost 上限（iter394，默认 +0.03）"),
 
     # ── BM25 Fallback Global Discount（迭代131）──
     # OS 类比：Linux NUMA Aware Scheduling — 当 local node 内存不足强制 cross-node 分配时，

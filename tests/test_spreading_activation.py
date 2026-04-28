@@ -111,8 +111,9 @@ def test_one_hop_activation(conn):
         pytest.skip("_spreading_activate 尚未实现")
 
     # max_activation_bonus=1.0 以测试原始分数计算（不截断）
+    # distance_decay_enabled=False：测试 iter310 原始语义，不含 iter393 距离衰减
     result = fn(conn, ["chunk_A"], project="test", decay=0.7, max_hops=1,
-                max_activation_bonus=1.0)
+                max_activation_bonus=1.0, distance_decay_enabled=False)
 
     assert "chunk_B" in result, "一跳邻居 chunk_B 应被激活"
     # decay=0.7, hop=1, conf=0.9 → score = parent(1.0) × conf(0.9) × decay^1(0.7) = 0.63
@@ -140,8 +141,9 @@ def test_two_hop_activation(conn):
         pytest.skip("_spreading_activate 尚未实现")
 
     # max_activation_bonus=1.0 测试原始分数不截断
+    # distance_decay_enabled=False：测试 iter310 原始语义，不含 iter393 距离衰减
     result = fn(conn, ["chunk_A"], project="test", decay=0.7, max_hops=2,
-                max_activation_bonus=1.0)
+                max_activation_bonus=1.0, distance_decay_enabled=False)
 
     assert "chunk_C" in result, "二跳邻居 chunk_C 应被激活"
     # decay=0.7, hop=2, conf=1.0 → parent×conf×decay² = 1.0×1.0×0.7² = 0.49

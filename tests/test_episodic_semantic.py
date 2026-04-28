@@ -254,7 +254,8 @@ def test_episodic_decay_promotes_high_access(conn):
     result = episodic_decay_scan(conn, "test", semantic_threshold=3)
     conn.commit()
 
-    assert result["promoted"] >= 1 or result.get("new_semantic_ids"), \
+    # iter379: A0 in-place promotion (inplace_promoted) OR A merge promotion (promoted/new_semantic_ids)
+    assert result["promoted"] >= 1 or result.get("new_semantic_ids") or result.get("inplace_promoted", 0) >= 1, \
         f"高频情节 chunk 应被提升，got {result}"
 
 

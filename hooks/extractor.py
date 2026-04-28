@@ -992,6 +992,106 @@ def _deduplicate(items: list) -> list:
     return result
 
 
+# ── iter370: Uncertainty Signal Extraction ──────────────────────────────────
+# 认知科学背景：Metcognition / TOT (Tip-of-the-Tongue) 现象
+#   人类在知识检索失败时会产生"感觉知道但说不出"的元认知信号。
+#   这类信号如果被捕获并存入外部记忆，下次检索时可定向补充知识空白。
+# OS 类比：MMU soft page fault — CPU 访问 valid VMA 内的未映射页时，
+#   产生 #PF 异常（中断），OS 记录缺页地址，后台 mmap/swap-in 补充；
+#   这里 Claude 说"我不确定X"= soft page fault，X = 缺页地址，
+#   DB 中写入 [不确定] X chunk = fault 记录，下次 SessionStart prefetch 补充。
+
+_UNCERTAINTY_PATTERNS = [
+    # 中文强不确定（P0）
+    r'(?:我不确定|不确定是否|不清楚|尚不明确)\s*[：:]?\s*(.{5,80})',
+    r'(?:需要验证|待验证|待确认|需要确认)\s*[：:]?\s*(.{5,80})',
+    r'(?:可能|也许|或许)\s*(?:需要|要)(?:确认|验证|查看)\s*(.{5,60})',
+    # 中文隐式不确定（P1）
+    r'(?:我(?:猜|认为可能)|这里假设)\s*(.{5,60})\s*(?:，|，但|，不过)',
+    r'(?:假设|假定)\s*(.{5,60})\s*(?:成立|正确|是对的)',
+    # 英文（P0/P1）
+    r'(?:I\'m not sure|not certain|unclear)[,\s]+(?:about\s+)?(.{5,80})',
+    r'(?:need to verify|need to check|need to confirm)[,\s]+(.{5,80})',
+    r'(?:I assume|assuming)[,\s]+(.{5,60})\s*(?:,|but|though)',
+]
+
+_UNCERTAINTY_RE = [re.compile(p, re.IGNORECASE) for p in _UNCERTAINTY_PATTERNS]
+
+
+def _extract_uncertainty_signals(text: str) -> list:
+    """
+    iter370：从 assistant 消息中提取强不确定性信号。
+    返回 [(topic_str, confidence_level)] 列表。
+    confidence_level: 'low' (显式不确定) / 'medium' (隐式假设)
+    """
+    results = []
+    seen: set = set()
+    for i, pat in enumerate(_UNCERTAINTY_RE):
+        level = 'low' if i < 5 else 'medium'
+        for m in pat.finditer(text):
+            topic = m.group(1).strip()
+            # 清理 markdown 标记
+            topic = re.sub(r'\*{1,3}|`{1,3}', '', topic).strip()
+            # 截断到第一个标点或换行
+            topic = re.split(r'[。！？\n]', topic)[0].strip()[:80]
+            key = re.sub(r'\s+', '', topic.lower())
+            if len(topic) >= 5 and key not in seen:
+                seen.add(key)
+                results.append((topic, level))
+    return results[:6]  # 最多 6 条（避免噪声过多）
+
+
+def _write_uncertainty_chunks(
+    conn, signals: list, project: str, session_id: str
+) -> int:
+    """
+    iter370：将不确定性信号写入 DB 作为 reasoning_chain chunk。
+    summary = "[不确定] {topic}"，importance = 0.55（低于正常决策 0.7，但高于噪声）。
+    chunk_type = "reasoning_chain"，info_class = "episodic"（会话级，快速衰减）。
+    OS 类比：MMU page_fault_log 写入 — /proc/vmstat pgfault 计数器递增，
+      同时记录 fault address 到 vm_fault 结构体供后续 swap-in 使用。
+    """
+    if not signals:
+        return 0
+    import uuid as _uuid
+    now_iso = datetime.now(timezone.utc).isoformat()
+    written = 0
+    for topic, level in signals:
+        summary = f"[不确定] {topic}"
+        # 幂等：同项目内相同 summary 不重写
+        if already_exists(conn, summary, "reasoning_chain"):
+            continue
+        chunk_id = "uf_" + _uuid.uuid4().hex[:16]
+        importance = 0.50 if level == 'medium' else 0.55
+        chunk = {
+            "id": chunk_id,
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "project": project,
+            "source_session": session_id,
+            "chunk_type": "reasoning_chain",
+            "info_class": "episodic",
+            "content": f"Claude 在会话 {session_id[:8]} 中表示不确定：{topic}",
+            "summary": summary,
+            "tags": ["uncertainty", "page_fault"],
+            "importance": importance,
+            "retrievability": 1.0,
+            "last_accessed": now_iso,
+            "access_count": 0,
+            "oom_adj": 50,    # 比正常 chunk 更易被淘汰（临时信号）
+            "lru_gen": 0,
+            "stability": 0.5,  # 低稳定性，快速衰减
+            "raw_snippet": "",
+            "encoding_context": {},
+        }
+        try:
+            insert_chunk(conn, chunk)
+            written += 1
+        except Exception:
+            pass
+    return written
+
+
 def _is_quality_chunk(summary: str) -> bool:
     """
     写入前质量过滤——返回 False 则丢弃。
@@ -1324,6 +1424,42 @@ def _cow_prescan(text: str) -> bool:
     return bool(_COW_PRESCAN.search(sample))
 
 
+def _detect_prospective_intent(text: str) -> str:
+    """
+    iter390: 检测文本中的展望记忆意图信号。
+    认知科学：Einstein & McDaniel (1990) Prospective Memory —
+      "记得在X时做Y"的意图性记忆，需要在未来触发时主动提取。
+    OS 类比：inotify_add_watch() — 注册条件触发器，等待事件唤醒。
+
+    返回 trigger_pattern（关键词或短语），None 表示无展望意图。
+    trigger_pattern 将存入 trigger_conditions，用于后续 query 匹配。
+    """
+    import re as _re
+    # 展望意图信号模式（中文 + 英文）
+    _PM_PATTERNS = [
+        # 中文展望意图
+        (r'下次(?:用|访问|打开|遇到|处理|运行|启动|提交|部署)([^，。；\n]{2,20})', 1),
+        (r'记得(?:在|下次|以后|下回)([^，。；\n]{2,20})', 1),
+        (r'以后([^，。；\n]{2,20})(?:时|的时候)(?:注意|记得|需要|要)', 0),
+        (r'(?:TODO|待办|备忘)[：:]\s*([^，。；\n]{3,40})', 1),
+        (r'下一次([^，。；\n]{2,20})(?:时|需要|记得)', 1),
+        (r'将来([^，。；\n]{2,20})(?:时|需要|记得|注意)', 1),
+        # 英文展望意图
+        (r'(?:remember to|TODO:|remind me to|next time)\s+([^\n.]{3,40})', 1),
+        (r'when (?:you |I )?(?:next |again )?([^\n.]{3,30}),?\s*(?:remember|make sure)', 1),
+    ]
+    for pattern, group in _PM_PATTERNS:
+        m = _re.search(pattern, text, _re.IGNORECASE)
+        if m:
+            try:
+                matched_phrase = m.group(group).strip()
+                if len(matched_phrase) >= 2:
+                    return matched_phrase
+            except IndexError:
+                return m.group(0).strip()[:40]
+    return None
+
+
 def _calculate_confidence(chunk_type: str, summary: str) -> float:
     """
     迭代100：ECC 初始置信度评估 — 从提取特征自动推断。
@@ -1412,6 +1548,20 @@ def _write_chunk(chunk_type: str, summary: str, project: str, session_id: str,
     info_class = _route_info_class(chunk_type, summary)
     # 迭代301：Ebbinghaus stability 初始值
     stability = importance * 2.0
+    # ── iter392：Generation Effect — 主动生成类 chunk stability 加成 ──
+    # Slamecka & Graf (1978): 自己生成的内容记忆留存率 +50%~+80%
+    # agent 主动推理生成的 reasoning_chain/decision/causal_chain 受益于此效应
+    # OS 类比：Linux CoW 触发后，进程私有页面加入 active_list（比继承页更高生成亲和性）
+    try:
+        from config import get as _cget
+        if _cget("extractor.generation_boost_enabled"):
+            _gen_types = set(t.strip() for t in
+                             (_cget("extractor.generation_boost_types") or "").split(",") if t.strip())
+            if chunk_type in _gen_types:
+                _gen_factor = float(_cget("extractor.generation_boost_factor") or 1.2)
+                stability = min(stability * _gen_factor, 365.0)
+    except Exception:
+        pass  # config 不可用时不影响主流程
 
     # 迭代306：raw_snippet 截断到 500 字
     raw_snippet = (raw_snippet or "")[:500]
@@ -1477,6 +1627,51 @@ def _write_chunk(chunk_type: str, summary: str, project: str, session_id: str,
         except Exception:
             pass  # 三元组抽取失败不影响主流程
 
+        # ── iter380：Schema Anchoring — Bartlett (1932) Schema Theory ──────────
+        # 写入 chunk 后，扫描 summary 匹配预定义 schema 规则，写入 schema_anchors 绑定行。
+        # OS 类比：kmem_cache_alloc — 新对象分配时自动归属对应 kmem_cache。
+        try:
+            _schema_row = conn.execute(
+                "SELECT id FROM memory_chunks WHERE summary=? AND chunk_type=? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (summary, chunk_type),
+            ).fetchone()
+            _schema_cid = _schema_row[0] if _schema_row else chunk.id
+            from store_vfs import anchor_chunk_schema as _anchor_schema
+            _anchor_schema(conn, _schema_cid, summary, project)
+        except Exception:
+            pass  # schema anchoring 失败不影响主流程
+
+        # ── iter381: Auto-Supersede — Proactive Interference Control ─────────
+        # OS 类比：Linux kernel module hot-reload — insmod 新版本模块时，
+        #   kernel 将旧模块标记为 MODULE_STATE_GOING（降低其优先级），
+        #   新模块成为权威版本。
+        #
+        # 认知科学依据：Proactive Interference (PI, McGeoch & McDonald 1931)
+        #   新知识与旧知识语义冲突时，旧知识干扰新知识的提取。
+        #   解决：写入新 chunk 时检测并标记冲突的旧 chunk，使检索层自动跳过。
+        #
+        # detect_conflict() + supersede_chunk() 存在于 store_vfs.py 但
+        # 从未在写路径调用（孤儿函数）— iter381 修复此缺口。
+        # 只对 decision + reasoning_chain（事实/规则类知识）做冲突检测，
+        # 避免对 conversation_summary 等叙述性 chunk 误判。
+        if chunk_type in ("decision", "reasoning_chain"):
+            try:
+                # _schema_cid 由 iter380 块设置；若 iter380 失败则退回 chunk.id
+                _new_cid = locals().get("_schema_cid") or chunk.id
+                from store_vfs import (detect_conflict as _detect_conflict,
+                                       supersede_chunk as _supersede_chunk)
+                _conflict_ids = _detect_conflict(conn, summary, chunk_type, project)
+                for _old_id in _conflict_ids:
+                    # 跳过 self-reference（不超越自身）
+                    if _old_id != _new_cid:
+                        _supersede_chunk(conn, _old_id, _new_cid,
+                                         reason=f"superseded by newer: {summary[:60]}",
+                                         project=project,
+                                         session_id=session_id)
+            except Exception:
+                pass  # 冲突检测失败不影响主流程
+
         # ── 迭代320：情感显著性 importance 调整 ──────────────────────────────
         # 在写入后立即用情感唤醒词调整 importance，
         # 崩溃/关键/突破类信息自动上调，已解决/废弃类下调。
@@ -1494,6 +1689,100 @@ def _write_chunk(chunk_type: str, summary: str, project: str, session_id: str,
                 apply_emotional_salience(conn, _cid2, summary, _cur_imp)
         except Exception:
             pass  # 情感调整失败不影响主流程
+
+        # ── iter371: Memory Conflict Detection — MESI 缓存一致性失效 ─────────────
+        # OS 类比：MESI 协议 Modified → Invalidate — 新写入触发旧矛盾 chunk 降权
+        # 认知科学：前向干扰（Retroactive Interference）— 新记忆降低旧矛盾记忆的提取
+        try:
+            from store_vfs import detect_and_invalidate_conflicts
+            _conflict_count = detect_and_invalidate_conflicts(
+                conn, summary, chunk_type, project
+            )
+        except Exception:
+            pass  # conflict detection 失败不影响主流程
+
+        # ── iter377: Proactive Interference Correction — 新 chunk 主动干预旧记忆 ──
+        # OS 类比：Linux COW (Copy-on-Write) page split — 写入新页后，新页优先级更高
+        # 认知科学：Proactive Interference (Wixted 2004 "重新巩固理论") —
+        #   旧记忆干扰新记忆的编码，修正策略是强化新记忆以赢得检索竞争。
+        # 实现：新 chunk 写入后，若 find_similar 发现语义相似的旧 chunk
+        #   → 新 chunk importance × 1.1（cap 0.99），增强检索竞争力
+        try:
+            from store_vfs import find_similar as _find_sim_pi
+            _old_sim_id = _find_sim_pi(conn, summary, chunk_type, project=project)
+            if _old_sim_id:
+                # 找到语义相似的旧 chunk → 新 chunk importance 上调
+                _pi_row = conn.execute(
+                    "SELECT id, importance FROM memory_chunks WHERE summary=? AND chunk_type=? "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (summary, chunk_type),
+                ).fetchone()
+                if _pi_row:
+                    _pi_id, _pi_cur_imp = _pi_row[0], _pi_row[1] or importance
+                    _pi_boosted = min(0.99, _pi_cur_imp * 1.1)
+                    if _pi_boosted > _pi_cur_imp:
+                        conn.execute(
+                            "UPDATE memory_chunks SET importance=? WHERE id=?",
+                            (_pi_boosted, _pi_id)
+                        )
+                        dmesg_log(conn, DMESG_DEBUG, "extractor",
+                                  f"iter377 proactive_correction: imp {_pi_cur_imp:.3f}"
+                                  f"→{_pi_boosted:.3f} (similar={_old_sim_id[:8]})",
+                                  session_id=session_id, project=project)
+        except Exception:
+            pass  # Proactive Interference Correction 失败不影响主流程
+
+        # ── iter386: Interference Decay — 干扰式检索衰减 ────────────────────────
+        # OS 类比：TLB Shootdown (INVLPG) — 写入新映射时广播旧映射失效
+        # 认知科学：McGeoch (1932) Interference Theory — 新旧相似记忆相互干扰
+        # 与 iter371 (MESI 语义矛盾失效) 互补：
+        #   iter371：检测显式否定词（放弃/replaced by）→ importance × 0.8
+        #   iter386：检测宽泛语义相似（Jaccard）→ retrievability -= penalty
+        # 两者共同防止过时知识污染注入。
+        try:
+            from store_vfs import interference_decay as _interference_decay
+            _chunk_dict_for_decay = {"id": locals().get("_pi_id") or chunk.id,
+                                     "summary": summary,
+                                     "chunk_type": chunk_type}
+            _id_count = _interference_decay(conn, _chunk_dict_for_decay, project)
+            if _id_count > 0:
+                dmesg_log(conn, DMESG_DEBUG, "extractor",
+                          f"iter386 interference_decay: {_id_count} chunks retrievability降低",
+                          session_id=session_id, project=project)
+        except Exception:
+            pass  # interference_decay 失败不影响主流程
+
+        # ── iter390: Prospective Memory Trigger — 展望记忆意图检测 ──────────────
+        # 认知科学：Einstein & McDaniel (1990) Prospective Memory —
+        #   意图性记忆：检测"下次/记得/以后/TODO"等延迟意图信号，注册 trigger 条件。
+        #   当后续 query 匹配 trigger_pattern 时，注入该 chunk（提醒效果）。
+        # OS 类比：inotify_add_watch() — 注册文件系统事件监听，触发时唤醒等待进程。
+        try:
+            _pm_pattern = _detect_prospective_intent(summary)
+            if _pm_pattern:
+                from store_vfs import insert_trigger as _insert_trigger
+                import hashlib as _hashlib
+                _tid = "trig_" + _hashlib.md5(
+                    f"{chunk.id}:{_pm_pattern}".encode()
+                ).hexdigest()[:12]
+                _now_iso = __import__("datetime").datetime.now(
+                    __import__("datetime").timezone.utc
+                ).isoformat()
+                _insert_trigger(conn, {
+                    "id": _tid,
+                    "chunk_id": chunk.id,
+                    "project": project,
+                    "session_id": session_id,
+                    "trigger_pattern": _pm_pattern,
+                    "trigger_type": "keyword",
+                    "created_at": _now_iso,
+                })
+                dmesg_log(conn, DMESG_DEBUG, "extractor",
+                          f"iter390 prospective_trigger: chunk={chunk.id[:8]} "
+                          f"pattern='{_pm_pattern}'",
+                          session_id=session_id, project=project)
+        except Exception:
+            pass  # 展望记忆检测失败不阻塞主流程
 
         # 迭代100：IPC 广播知识更新（OS 类比：inotify — 文件变更通知）
         try:
@@ -2203,6 +2492,18 @@ def main():
         # 仍然执行 page_fault 提取（知识缺口检测不依赖信号词）
         page_faults = _extract_page_fault_candidates(text)
         _write_page_fault_log(page_faults, session_id)
+        # iter370: 即使 COW miss，也提取不确定性信号（soft fault 独立于信号词检测）
+        try:
+            _uf_signals_cow = _extract_uncertainty_signals(text)
+            if _uf_signals_cow:
+                _uf_conn_cow = open_db()
+                ensure_schema(_uf_conn_cow)
+                _uf_cnt_cow = _write_uncertainty_chunks(_uf_conn_cow, _uf_signals_cow, project, session_id)
+                if _uf_cnt_cow > 0:
+                    _uf_conn_cow.commit()
+                _uf_conn_cow.close()
+        except Exception:
+            pass
         # 写入 madvise hints（即使无提取物，也记录话题趋势）
         topic = _extract_topic(text)
         _write_madvise_hints(text, [], [], [], [], project, session_id, topic)
@@ -2632,6 +2933,23 @@ def main():
 
     _write_page_fault_log(page_faults, session_id)
 
+    # ── iter370: Uncertainty Signal Extraction — soft page fault 记录 ─────────
+    # OS 类比：MMU soft page fault — 访问 valid VMA 内未映射地址 → 记录 fault address，
+    #   后台 swap-in 补充（类比：下次 SessionStart prefetch 填补知识空白）。
+    # 从 assistant 消息中提取 Claude 显式声明的不确定性，写入 DB 作为 episodic chunk，
+    # 使后续会话 retriever 能 FTS5 命中并补充相关知识。
+    try:
+        _uf_signals = _extract_uncertainty_signals(text)
+        if _uf_signals:
+            _uf_conn = open_db()
+            ensure_schema(_uf_conn)
+            _uf_count = _write_uncertainty_chunks(_uf_conn, _uf_signals, project, session_id)
+            if _uf_count > 0:
+                _uf_conn.commit()
+            _uf_conn.close()
+    except Exception:
+        pass  # 不确定性提取失败不影响主流程
+
     # ── 迭代32：madvise — 写入检索 hint（MADV_WILLNEED）──
     # OS 类比：应用程序在完成一轮处理后，通过 madvise 告知内核下一轮可能访问的区域
     # extractor 分析本轮对话内容，提取主题实体作为 hint
@@ -2908,12 +3226,348 @@ def main():
                       f"sleep_consolidate: merged={_slp_result['merged']} "
                       f"boosted={_slp_result['boosted']} decayed={_slp_result['decayed']} "
                       f"ep_promoted={_slp_result.get('episodic_promoted',0)} "
+                      f"ep_inplace={_slp_result.get('episodic_inplace_promoted',0)} "
                       f"ep_decayed={_slp_result.get('episodic_decayed',0)}",
                       session_id=session_id, project=project)
         _slp_conn.commit()
         _slp_conn.close()
     except Exception:
         pass  # sleep_consolidate 失败不影响主流程
+
+    # ── iter374: Chunk Coalescing — Slab Allocator 合并碎片化小 chunk ────────
+    # OS 类比：Linux Slab Allocator — 合并碎片化对象，提升内存利用率
+    # 人的记忆类比：Chunking (Miller 1956) — 将相关小记忆片段合并为有意义组块
+    try:
+        from store_vfs import coalesce_small_chunks as _coalesce
+        _coal_conn = open_db()
+        ensure_schema(_coal_conn)
+        _coal_n = _coalesce(_coal_conn, project=project)
+        if _coal_n > 0:
+            dmesg_log(_coal_conn, DMESG_INFO, "extractor",
+                      f"coalesce: merged_groups={_coal_n}",
+                      session_id=session_id, project=project)
+        _coal_conn.commit()
+        _coal_conn.close()
+    except Exception:
+        pass  # coalesce 失败不影响主流程
+
+    # ── iter366: Knowledge Graph — chunk_edges 构建 ──────────────────────────
+    # OS 类比：/proc/[pid]/maps vm_area_struct 邻接 — 描述地址空间区域间关联
+    # 人的记忆类比：语义网络（semantic network）— 知识节点间的有向关联边
+    try:
+        if written_chunk_ids and len(written_chunk_ids) >= 2:
+            from store_graph import (add_cooccurrence_edges, infer_edges_from_summaries,
+                                      ensure_graph_schema)
+            _graph_conn = open_db()
+            ensure_graph_schema(_graph_conn)
+
+            # 1. 共现边：同 session 写入的 chunk 之间建立弱关联
+            _cooc_count = add_cooccurrence_edges(_graph_conn, written_chunk_ids, weight=0.5)
+
+            # 2. 规则推断边：从 chunk 类型和 summary 推断强关联
+            _graph_chunks = []
+            if written_chunk_ids:
+                _gc_ids = ",".join("?" * len(written_chunk_ids))
+                _gc_rows = _graph_conn.execute(
+                    f"SELECT id, summary, chunk_type FROM memory_chunks WHERE id IN ({_gc_ids})",
+                    written_chunk_ids
+                ).fetchall()
+                _graph_chunks = [{"id": r[0], "summary": r[1], "chunk_type": r[2]}
+                                  for r in _gc_rows]
+            _rule_count = infer_edges_from_summaries(_graph_conn, _graph_chunks)
+            _graph_conn.close()
+            dmesg_log(open_db(), DMESG_DEBUG, "extractor",
+                      f"graph_edges: cooccurrence={_cooc_count} rule={_rule_count}",
+                      session_id=session_id, project=project)
+    except Exception:
+        pass  # graph 构建失败不影响主流程
+
+    # ── iter368: Attention Focus Update — 会话注意焦点栈更新 ─────────────────
+    # OS 类比：register allocator — 高频变量进寄存器，低频出寄存器
+    # 人的记忆类比：Cowan (2001) focus of attention — 当前正在处理的主题留在焦点中
+    try:
+        if session_id and session_id != "unknown" and text:
+            from store_focus import ensure_focus_schema, update_focus
+            _focus_conn = open_db()
+            ensure_focus_schema(_focus_conn)
+            # 从当前对话文本（最后 500 字）提取焦点关键词
+            update_focus(_focus_conn, session_id, text[-500:])
+            _focus_conn.close()
+    except Exception:
+        pass  # 焦点更新失败不影响主流程
+
+    # ── iter367: Temporal Proximity Edges — 时序邻近性关联边 ─────────────────
+    # OS 类比：Linux readahead sequential detection — 顺序访问的相邻 block 自动预取
+    # 人的记忆类比：Temporal contiguity effect (Kahana 1996) — 时间上相邻编码的记忆
+    #   更容易相互激活（自由回忆实验中，相邻词对的联想概率更高）
+    # 实现：同 session 中时间相邻（<5min）写入的 chunk 之间建立 COOCCURS 弱边
+    try:
+        if written_chunk_ids and session_id and session_id != "unknown":
+            from store_graph import add_edge, EdgeType, ensure_graph_schema
+            _tp_conn = open_db()
+            ensure_graph_schema(_tp_conn)
+            # 查询同 session 中在本次写入之前 5 分钟内写入的 chunk
+            _tp_cutoff = (datetime.now(timezone.utc)
+                          .replace(tzinfo=None) if True else None)
+            import datetime as _dt_mod
+            _tp_since = (
+                _dt_mod.datetime.now(_dt_mod.timezone.utc)
+                - _dt_mod.timedelta(minutes=5)
+            ).isoformat()
+            _tp_rows = _tp_conn.execute(
+                """SELECT id FROM memory_chunks
+                   WHERE source_session=?
+                     AND id NOT IN ({})
+                     AND created_at >= ?
+                   ORDER BY created_at DESC LIMIT 10""".format(
+                    ",".join("?" * len(written_chunk_ids))
+                ),
+                [session_id, *written_chunk_ids, _tp_since]
+            ).fetchall()
+            _tp_recent_ids = [r[0] for r in _tp_rows]
+            _tp_edge_count = 0
+            if _tp_recent_ids:
+                for _new_id in written_chunk_ids:
+                    for _old_id in _tp_recent_ids:
+                        # 弱双向边（weight=0.3，低于共现边的 0.5）
+                        if add_edge(_tp_conn, _new_id, _old_id, EdgeType.COOCCURS, 0.3,
+                                    source="temporal"):
+                            _tp_edge_count += 1
+                        if add_edge(_tp_conn, _old_id, _new_id, EdgeType.COOCCURS, 0.3,
+                                    source="temporal"):
+                            _tp_edge_count += 1
+                _tp_conn.commit()
+            _tp_conn.close()
+    except Exception:
+        pass  # 时序边构建失败不影响主流程
+
+    # ── iter365: Workspace Todos — 前瞻性记忆提取 ────────────────────────────
+    # OS 类比：inotify_add_watch — "当我回到这里时提醒我"
+    # 人的记忆类比：前瞻性记忆（Prospective Memory）— 带未来意向的记忆
+    try:
+        _todo_cwd = hook_input.get("cwd", "") or os.environ.get("CLAUDE_CWD", "")
+        if _todo_cwd:
+            from store_todos import (extract_todos_from_text, add_todo,
+                                     ensure_todos_schema)
+            from store_workspace import _workspace_id as _ws_id_todo
+            _todo_ws_id = _ws_id_todo(_todo_cwd)
+            _todo_conn = open_db()
+            ensure_todos_schema(_todo_conn)
+            _todo_items = extract_todos_from_text(text)
+            for _ti in _todo_items:
+                add_todo(
+                    _todo_conn,
+                    workspace_id=_todo_ws_id,
+                    project=project,
+                    content=_ti["content"],
+                    source_session=session_id,
+                    due_hint=_ti.get("due_hint", ""),
+                )
+            _todo_conn.close()
+    except Exception:
+        pass  # todo 提取失败不影响主流程
+
+    # ── iter364: Session Episode Write — 情节时间线 ──────────────────────────
+    # OS 类比：ftrace ring buffer flush — session 结束时将本次行为记录写入持久化 ring。
+    # 人的记忆类比：情节记忆（Episodic Memory）— 带时间戳的行为事件，
+    #   下次 SessionStart 时可注入"上次在这里做了什么"。
+    try:
+        from store_episodes import (write_episode, build_episode_summary,
+                                    ensure_episodes_schema)
+        _ep_conn = open_db()
+        ensure_episodes_schema(_ep_conn)
+
+        # 收集修改的文件（从 transcript 中解析 Edit/Write tool calls）
+        _ep_files = []
+        if transcript_path:
+            try:
+                import re as _re_ep
+                from pathlib import Path as _Path_ep
+                _tp = _Path_ep(transcript_path)
+                if _tp.exists():
+                    _tail = _tp.read_bytes()[-300_000:]
+                    _tail_text = _tail.decode("utf-8", errors="ignore")
+                    # 提取 Edit/Write 工具的 file_path 参数
+                    for _fm in _re_ep.finditer(
+                        r'"tool_name"\s*:\s*"(?:Edit|Write)".*?"file_path"\s*:\s*"([^"]+)"',
+                        _tail_text, _re_ep.DOTALL
+                    ):
+                        _fp = _fm.group(1)
+                        if _fp not in _ep_files:
+                            _ep_files.append(_fp)
+            except Exception:
+                pass
+
+        # 工具调用统计（从 dmesg tool_profiler 获取，或简单计数）
+        _ep_tools: dict = {}
+        try:
+            _ep_rows = _ep_conn.execute(
+                """SELECT tool_name, COUNT(*) FROM tool_call_log
+                   WHERE session_id=? GROUP BY tool_name""",
+                (session_id,)
+            ).fetchall()
+            _ep_tools = {r[0]: r[1] for r in _ep_rows}
+        except Exception:
+            pass  # tool_call_log 可能不存在
+
+        # chunk 数量
+        _ep_chunk_count = (len(decisions) + len(excluded) + len(reasoning)
+                           + len(conv_summaries) + len(constraints)
+                           + len(causal_chains))
+
+        _ep_summary = build_episode_summary(
+            text, _ep_chunk_count, _ep_files, _ep_tools
+        )
+
+        # workspace_id — 从 cwd 派生
+        _ep_ws_id = None
+        try:
+            _ep_cwd = hook_input.get("cwd", "") or os.environ.get("CLAUDE_CWD", "")
+            if _ep_cwd:
+                from store_workspace import _workspace_id as _ws_id_fn
+                _ep_ws_id = _ws_id_fn(_ep_cwd)
+        except Exception:
+            pass
+
+        write_episode(
+            _ep_conn,
+            session_id=session_id,
+            project=project,
+            summary=_ep_summary,
+            workspace_id=_ep_ws_id,
+            ended_at=datetime.now(timezone.utc).isoformat(),
+            chunks_created=_ep_chunk_count,
+            files_modified=_ep_files[:20],  # 最多记录 20 个文件
+            tools_used=_ep_tools,
+        )
+        _ep_conn.close()
+    except Exception:
+        pass  # episode 写入失败不影响主流程
+
+    # ── iter378: Persistent Working Set Serialization ────────────────────────
+    # OS 类比：CRIU dump_task() — 序列化进程完整状态到磁盘，下次 restore 时无缝恢复。
+    # 人的记忆类比：Denning (1968) Working Set Model — 工作集是进程"最近使用的页面集合"。
+    #   每次项目切换（session 切换）后，人会自动带上该项目的工作集记忆（端口、配置、约束）。
+    #   memory-os 等价：将本次会话中频繁访问的 chunk 序列化到 .ws_{project}.json，
+    #   下次 SessionStart 时 loader.py 优先注入这些 hot chunks，而不是从 FTS5 冷启动重建。
+    #
+    # 直接解决"不记得端口"问题：
+    #   端口/配置 chunk 每次被访问 → access_count 递增 → 进入 top-N 工作集 →
+    #   下次会话开始时自动注入上下文 → Claude 无需每次重新检索。
+    try:
+        if _sysctl("loader.restore_working_set"):
+            from agent_working_set import registry as _ws_registry
+            _ws_obj = _ws_registry.get(session_id) if _ws_registry else None
+            if _ws_obj is not None:
+                _ws_chunks = _ws_obj.list_chunks()
+                if _ws_chunks:
+                    _ws_max = _sysctl("loader.ws_max_restore")
+                    # 按 access_count 降序（热页优先），截取 top-N
+                    _ws_sorted = sorted(
+                        _ws_chunks,
+                        key=lambda x: x.get("access_count", 0),
+                        reverse=True,
+                    )[:_ws_max]
+                    # 序列化为精简格式（只保留检索需要的字段）
+                    _ws_entries = []
+                    for _wc in _ws_sorted:
+                        _ws_entries.append({
+                            "id": _wc.get("id", ""),
+                            "summary": _wc.get("summary", ""),
+                            "chunk_type": _wc.get("chunk_type", ""),
+                            "importance": _wc.get("importance", 0.7),
+                            "access_count": _wc.get("access_count", 0),
+                        })
+                    _ws_fname = f".ws_{project.replace(':', '_').replace('/', '_')}.json"
+                    _ws_path = MEMORY_OS_DIR / _ws_fname
+                    _ws_path.write_text(
+                        json.dumps({
+                            "project": project,
+                            "session_id": session_id,
+                            "saved_at": datetime.now(timezone.utc).isoformat(),
+                            "chunks": _ws_entries,
+                        }, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    try:
+                        _ws_conn = open_db()
+                        dmesg_log(_ws_conn, DMESG_INFO, "extractor",
+                                  f"ws_serialize: {len(_ws_entries)} hot chunks → {_ws_fname}",
+                                  session_id=session_id, project=project)
+                        _ws_conn.commit()
+                        _ws_conn.close()
+                    except Exception:
+                        pass
+    except Exception:
+        pass  # 工作集序列化失败不影响主流程
+
+    # ── iter382: Reconsolidate on Stop — 召回触发重新巩固 ────────────────────
+    # 神经科学依据：Nader et al. (2000) 再巩固理论 —
+    #   记忆每次被检索后进入"不稳定窗口"（labile state），
+    #   随后以更新形式重新巩固（re-stabilization）。
+    #   重复且深度匹配的召回 → importance 上升（长期增强，LTP）。
+    #
+    # OS 类比：Linux ARC T1→T2 晋升 — 被反复命中的页面从"最近访问"
+    #   晋升到"频繁访问"，淘汰优先级降低。
+    #   session 结束时用本次 Stop hook 的 text 作为 query，
+    #   对本次 session 中被注入（shadow trace）的 chunk 做再巩固。
+    #
+    # reconsolidate() 存在于 store_vfs.py 但从未在 Stop hook 调用（孤儿函数）
+    # — iter382 修复此缺口：session 结束时自动强化被引用的记忆。
+    try:
+        # 获取本次 session 注入的 chunk IDs（shadow trace 或 recall_traces）
+        _rc_injected_ids: list = []
+        try:
+            # 优先从 shadow trace 文件获取（最近检索工作集）
+            import json as _rc_json
+            _shadow_trace_path = MEMORY_OS_DIR / ".shadow_trace.json"
+            if _shadow_trace_path.exists():
+                _st_data = _rc_json.loads(_shadow_trace_path.read_text(encoding="utf-8"))
+                if _st_data.get("project") == project:
+                    _rc_injected_ids = _st_data.get("top_k_ids", [])
+        except Exception:
+            pass
+
+        if not _rc_injected_ids:
+            # Fallback: 从 recall_traces 获取本 session 的注入 IDs
+            try:
+                _rc_conn_ro = open_db()
+                _rc_rows = _rc_conn_ro.execute(
+                    """SELECT top_k_json FROM recall_traces
+                       WHERE session_id=? AND project=? AND injected=1
+                       ORDER BY timestamp DESC LIMIT 5""",
+                    (session_id, project)
+                ).fetchall()
+                for _rc_row in _rc_rows:
+                    if _rc_row[0]:
+                        import json as _rc_json2
+                        _rc_items = _rc_json2.loads(_rc_row[0])
+                        for _rci in _rc_items:
+                            _cid_r = _rci.get("id", "")
+                            if _cid_r and _cid_r not in _rc_injected_ids:
+                                _rc_injected_ids.append(_cid_r)
+                _rc_conn_ro.close()
+            except Exception:
+                pass
+
+        if _rc_injected_ids and text:
+            from store_vfs import reconsolidate as _reconsolidate
+            _rc_conn = open_db()
+            ensure_schema(_rc_conn)
+            _rc_n = _reconsolidate(
+                _rc_conn,
+                recalled_chunk_ids=_rc_injected_ids,
+                query=text[-300:],   # 本轮 assistant 回复末尾作为 recall context
+                project=project,
+            )
+            if _rc_n > 0:
+                dmesg_log(_rc_conn, DMESG_DEBUG, "extractor",
+                          f"reconsolidate: {_rc_n} chunks importance boosted",
+                          session_id=session_id, project=project)
+            _rc_conn.commit()
+            _rc_conn.close()
+    except Exception:
+        pass  # reconsolidate 失败不影响主流程
 
     sys.exit(0)
 

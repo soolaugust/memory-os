@@ -363,6 +363,148 @@ def main():
             prefix = _TYPE_PREFIX.get(chunk_type, "")
             lines.append(f"- {prefix} {summary}".strip())
 
+    # ── iter378: Persistent Working Set Restoration ──────────────────────────
+    # OS 类比：CRIU restore — 从磁盘反序列化上次进程的工作集页面，恢复到 warm cache 状态。
+    # 人的记忆类比：Denning (1968) Working Set — 切换项目时自动带上"最近用过的热页面"。
+    # 直接解决"不记得端口"问题：hot chunks（端口/配置/约束）持久化→下次 SessionStart 注入。
+    if _sysctl("loader.restore_working_set"):
+        try:
+            _ws_fname = f".ws_{project.replace(':', '_').replace('/', '_')}.json"
+            _ws_path = MEMORY_OS_DIR / _ws_fname
+            if _ws_path.exists():
+                _ws_data = json.loads(_ws_path.read_text(encoding="utf-8"))
+                _ws_age_secs = _age_secs(_ws_data.get("saved_at", ""))
+                # 只恢复 24 小时内的工作集（避免注入过时数据）
+                if _ws_age_secs <= 86400:
+                    _ws_restored_chunks = _ws_data.get("chunks", [])
+                    if _ws_restored_chunks:
+                        _TYPE_PREFIX_WS = {
+                            "decision": "[决策]",
+                            "reasoning_chain": "[推理]",
+                            "conversation_summary": "[摘要]",
+                            "excluded_path": "[排除]",
+                            "design_constraint": "⚠️ [约束]",
+                            "quantitative_evidence": "[量化]",
+                            "causal_chain": "[因果]",
+                            "procedure": "[流程]",
+                        }
+                        # 去重：已在 working_set 中出现的 summary 不重复注入
+                        _existing_summaries = set()
+                        if working_set:
+                            for _score, _ct, _sm in working_set:
+                                _existing_summaries.add(_sm)
+
+                        _ws_new_lines = []
+                        for _wc in _ws_restored_chunks:
+                            _sm = _wc.get("summary", "").strip()
+                            _ct = _wc.get("chunk_type", "")
+                            if not _sm or _sm in _existing_summaries:
+                                continue
+                            _existing_summaries.add(_sm)
+                            _pfx = _TYPE_PREFIX_WS.get(_ct, "")
+                            _ws_new_lines.append(f"- {_pfx} {_sm}".strip())
+
+                        if _ws_new_lines:
+                            lines.append("【热工作集·持久化恢复】")
+                            lines.extend(_ws_new_lines[:10])  # 最多 10 条，保持注入简洁
+        except Exception:
+            pass  # 持久化工作集恢复失败不影响主流程
+
+    # ── iter363: Workspace Activation — 工作区感知 ──
+    # OS 类比：exec() → 加载新程序的地址空间，而非一页一页缺页加载
+    # 切换到项目目录时，整体激活该工作区的结构化知识（端口/服务/命令）
+    try:
+        _cwd = _hook_input.get("cwd", "") or os.environ.get("CLAUDE_CWD", "")
+        if _cwd:
+            import sys as _sys_ws
+            _ROOT_WS = Path(__file__).parent.parent
+            if str(_ROOT_WS) not in _sys_ws.path:
+                _sys_ws.path.insert(0, str(_ROOT_WS))
+            from store_workspace import resolve_workspace, activate_workspace
+            from workspace_scanner import scan_and_store
+            _ws_conn = open_db()
+            from store_workspace import ensure_workspace_schema as _ensure_ws
+            _ensure_ws(_ws_conn)
+            _ws_id = resolve_workspace(_ws_conn, _cwd)
+            # 增量扫描（hash 比对，只处理变更文件）
+            scan_and_store(_ws_conn, _ws_id, _cwd, force=False)
+            _ws_data = activate_workspace(_ws_conn, _ws_id)
+            _ws_conn.close()
+
+            _ws_lines = []
+            # file_facts: 端口/服务等结构化信息
+            if _ws_data.get("file_facts"):
+                _ws_lines.append(f"【工作区: {_ws_data['workspace_name']}】")
+                for _ff in _ws_data["file_facts"][:3]:  # 最多展示 3 个文件
+                    _fname = Path(_ff["file"]).name
+                    _ports = [f for f in _ff["facts"] if f.get("type") == "port"]
+                    _envs = [f for f in _ff["facts"] if f.get("type") == "env_var"]
+                    if _ports:
+                        _port_strs = [f.get("description", "") for f in _ports[:4]]
+                        _ws_lines.append(f"  {_fname}: " + " | ".join(_port_strs))
+                    if _envs and not _ports:
+                        _env_strs = [f.get("description", "") for f in _envs[:3]]
+                        _ws_lines.append(f"  {_fname}: " + " | ".join(_env_strs))
+            # kb_chunks: workspace 关联的已积累知识
+            if _ws_data.get("kb_chunks"):
+                if not _ws_lines:
+                    _ws_lines.append(f"【工作区: {_ws_data['workspace_name']}】")
+                for _kc in _ws_data["kb_chunks"][:3]:
+                    _ws_lines.append(f"  [{_kc['chunk_type']}] {_kc['summary'][:80]}")
+            if _ws_lines:
+                lines.extend(_ws_lines)
+    except Exception:
+        pass  # workspace 激活失败不影响主流程
+
+    # ── iter364: Session Episode Injection — 情节时间线注入 ──────────────────
+    # OS 类比：ftrace 重放 — 新 session 看到上次进程运行的行为轨迹
+    # 人的记忆类比：情节记忆激活 — 进入熟悉环境时自动想起"上次在这里做了什么"
+    try:
+        _ep_cwd = _hook_input.get("cwd", "") or os.environ.get("CLAUDE_CWD", "")
+        _ep_ws_id = None
+        if _ep_cwd:
+            from store_workspace import _workspace_id as _ws_id_fn2
+            _ep_ws_id = _ws_id_fn2(_ep_cwd)
+
+        from store_episodes import (get_recent_episodes, format_episodes_for_injection,
+                                     ensure_episodes_schema, mark_episode_injected)
+        _ep_conn2 = open_db()
+        ensure_episodes_schema(_ep_conn2)
+        _episodes = get_recent_episodes(
+            _ep_conn2, project,
+            workspace_id=_ep_ws_id,
+            limit=3,
+        )
+        _ep_text = format_episodes_for_injection(_episodes, max_chars=300)
+        if _ep_text:
+            lines.append(_ep_text)
+            for _ep in _episodes:
+                mark_episode_injected(_ep_conn2, _ep["session_id"])
+        _ep_conn2.close()
+    except Exception:
+        pass  # episode 注入失败不影响主流程
+
+    # ── iter365: Workspace Todos Injection — 前瞻性记忆 ──────────────────────
+    # OS 类比：cron 到达时间 → 触发 job — 进入工作区时注入 pending 待办
+    # 人的记忆类比：前瞻性记忆激活 — 回到熟悉地方时想起"我记得要做 X"
+    try:
+        if _cwd:  # _cwd 来自上方 workspace activation block
+            from store_todos import (get_pending_todos, format_todos_for_injection,
+                                      ensure_todos_schema, mark_todo_injected)
+            from store_workspace import _workspace_id as _ws_id_todo
+            _todo_ws_id = _ws_id_todo(_cwd)
+            _todo_conn2 = open_db()
+            ensure_todos_schema(_todo_conn2)
+            _pending_todos = get_pending_todos(_todo_conn2, _todo_ws_id, limit=5)
+            _todo_text = format_todos_for_injection(_pending_todos, max_chars=200)
+            if _todo_text:
+                lines.append(_todo_text)
+                for _td in _pending_todos:
+                    mark_todo_injected(_todo_conn2, _td["id"])
+            _todo_conn2.close()
+    except Exception:
+        pass  # todo 注入失败不影响主流程
+
     # ── 迭代91: 活跃目标注入 — Goal Awareness ──
     # OS 类比：/etc/rc.d/rc.local — 系统启动时自动加载持久化的任务目标配置
     if STORE_DB.exists():
