@@ -590,6 +590,41 @@ _REGISTRY: dict = {
     "store_vfs.rtmc_min_importance": (0.35, float, 0.0, 1.0, None,
         "iter445: 触发 RTMC 的最低 importance 阈值（默认 0.35，低重要性 chunk 不参与奖励巩固）"),
 
+    # ── iter446: Temporal Contiguity Effect — 时间毗邻性的记忆互相强化（Kahana 1996）─────────────────────
+    # 认知科学依据：
+    #   Kahana (1996) "Associative retrieval processes in free recall" (Journal of Memory and Language) —
+    #     自由回忆实验中，时间上相邻编码（proximity in time）的词汇倾向于相互触发回忆（lag-CRP 曲线峰值在 lag=±1）。
+    #     时间毗邻性提供了"情节内的时序链接"：你想起 item_N 时，item_{N+1} 和 item_{N-1} 被同时激活。
+    #   Howard & Kahana (2002) "A distributed representation of temporal context" (Journal of Math Psychology) —
+    #     时间上下文向量（temporal context vector）在相邻学习事件间高度相关，
+    #     形成隐式的"时间序列索引"，使相邻编码记忆在检索时相互提示。
+    #   Polyn & Kahana (2008) Meta-analysis: lag-CRP effect is robust across free recall tasks —
+    #     时间毗邻性效应不依赖语义相似度（即使语义无关的词也会因时间相邻而互相触发）。
+    #
+    # memory-os 等价：
+    #   sleep_consolidate 时，对 created_at 时间上相邻的 chunk 对（同一项目内，时间差 <= tce_window_secs）
+    #   进行双向 stability 相互加成：
+    #     共同属于同一时间窗口 → 时间情节单元 → 双方 stability × (1 + tce_bonus)
+    #   tce_window_secs：时间毗邻窗口（秒），默认 1800s = 30分钟（一个典型编码 session 的时间粒度）
+    #   只处理 importance >= tce_min_importance 的 chunk（低重要性相邻不值得强化）
+    #   最多处理 tce_max_group_size 个相邻 chunk（防止一个长 session 把所有 chunk 都相互加成）
+    #
+    # OS 类比：Linux MGLRU temporal cohort aging —
+    #   同一 aging interval 内被访问的 pages 属于同一 "generation"，
+    #   同代 pages 在 kswapd 扫描时被一起保护（temporal cohort effect = 同代互保）；
+    #   类比：同一时间窗口写入的 chunk = 同一 generation，sleep 时互相加成 stability
+    #   （temporal contiguity → generation membership → mutual protection）。
+    "store_vfs.tce_enabled": (True, bool, None, None, None,
+        "iter446: 是否启用 Temporal Contiguity Effect — 时间毗邻写入的 chunk 在 sleep 时相互加成 stability"),
+    "store_vfs.tce_window_secs": (1800, int, 60, 7200, None,
+        "iter446: 时间毗邻窗口（秒）：created_at 差距 <= 此值的 chunk 视为时间毗邻对（默认 30 分钟）"),
+    "store_vfs.tce_bonus": (0.05, float, 0.0, 0.30, None,
+        "iter446: 时间毗邻加成系数：相邻对中每个 chunk stability × (1 + tce_bonus)（默认 0.05 = 5%）"),
+    "store_vfs.tce_min_importance": (0.45, float, 0.0, 1.0, None,
+        "iter446: 触发 TCE 的最低 importance 阈值（默认 0.45，低重要性 chunk 的时间毗邻不强化）"),
+    "store_vfs.tce_max_group_size": (10, int, 2, 50, None,
+        "iter446: 每个时间窗口内最多参与 TCE 的 chunk 数量（按 importance 降序取 top N，避免长 session 失控）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。

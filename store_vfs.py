@@ -7216,6 +7216,14 @@ def sleep_consolidate(
     except Exception:
         pass
 
+    # ── 子操作 15（iter446）：Temporal Contiguity Effect — 时间毗邻写入的 chunk 相互加成 stability ──
+    # OS 类比：Linux MGLRU temporal cohort aging — 同代 pages 在 kswapd 扫描时相互保护
+    try:
+        tce_result = apply_temporal_contiguity_consolidation(conn, project)
+        result["tce_boosted"] = tce_result.get("tce_boosted", 0)
+    except Exception:
+        pass
+
     return result
 
 
@@ -9674,6 +9682,149 @@ def apply_reward_tagged_memory_consolidation(
         conn.commit()
 
     return {"rtmc_boosted": rtmc_boosted, "total_examined": total_examined}
+
+
+# ── iter446: Temporal Contiguity Effect — 时间毗邻性的记忆互相强化（Kahana 1996）────────────────────
+# 认知科学依据：
+#   Kahana (1996) "Associative retrieval processes in free recall" (J. Memory & Language) —
+#     lag-CRP 曲线峰值在 lag=±1（时间相邻的记忆强度互相激活），时间毗邻提供隐式时序链接。
+#   Howard & Kahana (2002) — 时间上下文向量高度相关的相邻事件在睡眠回放时被联合重放。
+# OS 类比：Linux MGLRU temporal cohort aging —
+#   同一 aging interval 内被访问的 pages 属于同一 generation，sleep 扫描时互相保护。
+
+def apply_temporal_contiguity_consolidation(
+    conn: sqlite3.Connection,
+    project: str,
+) -> dict:
+    """
+    iter446: Temporal Contiguity Effect (TCE) — sleep 时对时间毗邻写入的 chunk 相互加成 stability。
+
+    算法：
+    1. 获取项目内 importance >= tce_min_importance 的所有 chunk，按 created_at 排序。
+    2. 滑动窗口：对连续 chunk 中 created_at 差距 <= tce_window_secs 的相邻对识别。
+    3. 找出属于同一时间窗口的 chunk 组（时间段内 >= 2 个 chunk = 形成时间情节单元）。
+    4. 对每个有效 chunk 组（size <= tce_max_group_size），每个成员 stability × (1 + tce_bonus)。
+    5. 返回 {"tce_boosted": N, "total_examined": N}
+
+    时间毗邻逻辑：
+      - 同一窗口内的 chunk 代表同一编码情节（如一次连续的调试会话、一次设计讨论）。
+      - 睡眠期海马重放时，时序链接使同情节内的 chunk 相互激活（lag-CRP 效应）。
+      - 相互加成体现了"情节记忆组块化"：相邻编码的知识被整合到同一情节表示中。
+
+    Returns:
+      {"tce_boosted": N, "total_examined": N}
+    """
+    try:
+        import config as _cfg_tce
+    except ImportError:
+        return {"tce_boosted": 0, "total_examined": 0}
+
+    try:
+        if not _cfg_tce.get("store_vfs.tce_enabled"):
+            return {"tce_boosted": 0, "total_examined": 0}
+        tce_window_secs = _cfg_tce.get("store_vfs.tce_window_secs")       # 1800
+        tce_bonus = _cfg_tce.get("store_vfs.tce_bonus")                   # 0.05
+        tce_min_importance = _cfg_tce.get("store_vfs.tce_min_importance") # 0.45
+        tce_max_group = _cfg_tce.get("store_vfs.tce_max_group_size")      # 10
+    except Exception:
+        return {"tce_boosted": 0, "total_examined": 0}
+
+    from datetime import datetime as _dt_tce, timezone as _tz_tce
+    now_iso = _dt_tce.now(_tz_tce.utc).isoformat()
+
+    # 获取所有符合 importance 阈值的 chunk，按 created_at 排序
+    try:
+        rows = conn.execute(
+            """SELECT id, stability, importance, created_at FROM memory_chunks
+               WHERE project = ?
+                 AND COALESCE(importance, 0.0) >= ?
+                 AND COALESCE(stability, 0.1) > 0.1
+                 AND created_at IS NOT NULL
+               ORDER BY created_at ASC
+               LIMIT 2000""",
+            (project, tce_min_importance),
+        ).fetchall()
+    except Exception:
+        return {"tce_boosted": 0, "total_examined": 0}
+
+    if len(rows) < 2:
+        return {"tce_boosted": 0, "total_examined": len(rows)}
+
+    total_examined = len(rows)
+
+    # 解析 created_at 为 timestamp（秒），构建 (cid, stab, ts) 列表
+    parsed = []
+    for row in rows:
+        try:
+            cid = row[0] if isinstance(row, (list, tuple)) else row["id"]
+            stab = row[1] if isinstance(row, (list, tuple)) else row["stability"]
+            created_at_str = row[3] if isinstance(row, (list, tuple)) else row["created_at"]
+
+            if not created_at_str:
+                continue
+            if created_at_str.endswith("Z"):
+                created_at_str = created_at_str[:-1] + "+00:00"
+            from datetime import datetime as _dt2_tce, timezone as _tz2_tce
+            ca_dt = _dt2_tce.fromisoformat(created_at_str)
+            if ca_dt.tzinfo is None:
+                ca_dt = ca_dt.replace(tzinfo=_tz2_tce.utc)
+            ts = ca_dt.timestamp()
+            parsed.append((cid, float(stab or 0.1), ts))
+        except Exception:
+            continue
+
+    if len(parsed) < 2:
+        return {"tce_boosted": 0, "total_examined": total_examined}
+
+    # 滑动窗口：找出同一时间窗口内的 chunk 组（连续 created_at 差 <= tce_window_secs）
+    # 算法：从左到右，维护当前组 [group_start_ts, ...]，差距超过窗口则提交当前组，开新组
+    groups = []
+    current_group = [parsed[0]]
+    for i in range(1, len(parsed)):
+        cid, stab, ts = parsed[i]
+        prev_ts = parsed[i - 1][2]
+        if ts - prev_ts <= tce_window_secs:
+            current_group.append(parsed[i])
+        else:
+            if len(current_group) >= 2:
+                groups.append(current_group)
+            current_group = [parsed[i]]
+    if len(current_group) >= 2:
+        groups.append(current_group)
+
+    if not groups:
+        return {"tce_boosted": 0, "total_examined": total_examined}
+
+    tce_boosted = 0
+    updates = []
+
+    for group in groups:
+        # 如果组太大，按 importance（此处用稳定性代理）取 top tce_max_group 个
+        # 注意：rows 是按 importance 降序查询出来的，但这里是按 created_at 排序后分组
+        # 需要从 group 中筛选：我们已经按 importance 过滤了（>= min_imp），
+        # 如果组 size 超过 max_group，随机或按顺序取前 max_group 个（时间顺序）
+        if len(group) > tce_max_group:
+            # 取 stability 最高的 top tce_max_group 个（保护最重要的）
+            group = sorted(group, key=lambda x: x[1], reverse=True)[:tce_max_group]
+
+        # 对组内每个 chunk 施加时间毗邻加成
+        for cid, stab_f, ts in group:
+            if stab_f <= 0.1:
+                continue
+            new_stab = min(365.0, stab_f * (1.0 + tce_bonus))
+            if new_stab <= stab_f + 0.0001:
+                continue
+            updates.append((round(new_stab, 4), now_iso, cid))
+            tce_boosted += 1
+
+    if updates:
+        conn.executemany(
+            "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=?",
+            updates,
+        )
+        conn.commit()
+
+    return {"tce_boosted": tce_boosted, "total_examined": total_examined}
 
 
 # ── iter432: Cumulative Interference Effect — 累积干扰加速遗忘（Underwood 1957）──
