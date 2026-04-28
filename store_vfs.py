@@ -1821,6 +1821,24 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
     except Exception:
         pass  # von restorff 效应写入失败不阻塞主流程
 
+    # iter408: Proactive Interference — 旧强记忆干扰新 chunk 的 initial stability（Underwood 1957）
+    # 项目中已有高相似度+高 access_count 的 chunk → 新 chunk stability 降低
+    try:
+        _pi_project = d.get("project", "")
+        _pi_base_stability = d.get("stability", 1.0)
+        if _pi_project:
+            apply_proactive_interference(conn, d["id"], _pi_project, base_stability=_pi_base_stability)
+    except Exception:
+        pass  # proactive interference 写入失败不阻塞主流程
+
+    # iter409: Flashbulb Memory — 高情绪唤醒 chunk 的 initial stability 加强（Brown & Kulik 1977）
+    # emotional_weight > 0 → stability bonus（与 iter376 检索时加分互补，这里是写入时固化增强）
+    try:
+        _fb_base_stability = d.get("stability", 1.0)
+        apply_flashbulb_effect(conn, d["id"], base_stability=_fb_base_stability)
+    except Exception:
+        pass  # flashbulb effect 写入失败不阻塞主流程
+
 
 # ── iter403：Cue-Dependent Forgetting — Context-Sensitive Retrieval（Tulving 1974）──
 #
@@ -2779,6 +2797,279 @@ def apply_isolation_effect(
             context_window=context_window,
         )
         bonus = isolation_stability_bonus(isolation, base_stability)
+        new_stability = base_stability + bonus
+        if bonus > 0.001:
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?",
+                (new_stability, chunk_id)
+            )
+        return new_stability
+    except Exception:
+        return base_stability
+
+
+# ── iter408: Proactive Interference — 旧知识干扰新知识写入（Underwood 1957）─────
+#
+# 认知科学依据：
+#   Underwood (1957) "Proactive Inhibition and Forgetting":
+#     学习新材料时，先前学习的相似材料产生"前摄抑制"（Proactive Interference）。
+#     已学材料越多、越相似 → 新材料的初始记忆强度越低。
+#   Porter & Duncan (1953): PI 效应与已有材料的数量正相关。
+#   Postman & Underwood (1973) interference theory review:
+#     PI 是遗忘的主要机制之一（与 RI 并列）。
+#
+# 与 iter405 RI（Retroactive Interference）的对称性：
+#   RI（iter405）: 新 chunk 写入后，旧 chunk 检索分降低（新干扰旧）
+#   PI（iter408）: 旧 chunk 存在时，新 chunk 写入时 stability 降低（旧干扰新）
+#
+#   RI + PI = 完整的干扰理论（Miller 1956 双向干扰）
+#
+# OS 类比：Linux TLB Shootdown Cost
+#   修改一个被多核共享的 PTE（page table entry）时，内核必须向持有该
+#   TLB entry 的所有 CPU 发送 IPI（inter-processor interrupt），强制
+#   其 flush TLB（TLB shootdown）。共享该 PTE 的 CPU 越多，shootdown 开销越大。
+#   类比：与新 chunk 语义重叠的旧 chunk 越多、越"活跃"（高 access_count），
+#   新 chunk 写入时面临的"认知阻力"越大 → initial stability 越低。
+#
+# 实现：
+#   compute_pi_penalty(conn, chunk_id, project) → float [0.0, 0.10]
+#     1. 找最近邻居（最相似的 search_k=5 个 chunk）
+#     2. 计算平均 Jaccard 相似度 avg_sim
+#     3. 统计其中 access_count >= strong_acc_threshold 的"强旧记忆"数量
+#     4. penalty = avg_sim × (strong_count / search_k) × max_penalty
+#   apply_proactive_interference(conn, chunk_id, project, base_stability)
+#     计算 penalty，更新 DB stability
+#
+# 保护规则：
+#   1. design_constraint 类型豁免（约束永远应被记住）
+#   2. 新 chunk 高 importance (> 0.85) → penalty 减半
+#   3. 最大 penalty = base × 0.10（保守，避免过度惩罚新知识）
+
+
+def compute_pi_penalty(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    project: str,
+    search_k: int = 5,
+    strong_acc_threshold: int = 3,
+    max_penalty: float = 0.10,
+) -> float:
+    """
+    iter408: 计算新 chunk 面临的 Proactive Interference 惩罚系数。
+
+    Returns:
+      float ∈ [0.0, max_penalty] — PI 导致的 stability 降低量（非比例，绝对值）
+      返回值直接从 base_stability 中减去。
+
+    公式：
+      avg_sim = 与最近 search_k 个邻居的平均 Jaccard 相似度
+      strong_ratio = 其中 access_count >= threshold 的邻居比例
+      penalty = avg_sim × strong_ratio × max_penalty
+    """
+    if not chunk_id or not project:
+        return 0.0
+    try:
+        row = conn.execute(
+            "SELECT encode_context FROM memory_chunks WHERE id=? AND project=?",
+            (chunk_id, project)
+        ).fetchone()
+        if not row:
+            return 0.0
+        target_ctx = _parse_ec_to_set(row[0] or "")
+        if not target_ctx:
+            return 0.0
+
+        # 找最近的 search_k 个邻居（不含自身）
+        neighbors = conn.execute(
+            """SELECT id, encode_context, access_count
+               FROM memory_chunks
+               WHERE project=? AND id != ?
+                 AND encode_context IS NOT NULL AND encode_context != ''
+               ORDER BY created_at DESC
+               LIMIT ?""",
+            (project, chunk_id, search_k)
+        ).fetchall()
+
+        if not neighbors:
+            return 0.0
+
+        similarities = []
+        strong_count = 0
+        for nb_row in neighbors:
+            nb_id = nb_row[0] if isinstance(nb_row, (list, tuple)) else nb_row["id"]
+            nb_ctx_str = nb_row[1] if isinstance(nb_row, (list, tuple)) else nb_row["encode_context"]
+            nb_acc = nb_row[2] if isinstance(nb_row, (list, tuple)) else nb_row["access_count"]
+            nb_ctx = _parse_ec_to_set(nb_ctx_str or "")
+            if nb_ctx:
+                sim = _jaccard_ec(target_ctx, nb_ctx)
+                similarities.append(sim)
+                if sim > 0.0 and (nb_acc or 0) >= strong_acc_threshold:
+                    strong_count += 1
+
+        if not similarities:
+            return 0.0
+
+        avg_sim = sum(similarities) / len(similarities)
+        strong_ratio = strong_count / len(similarities)
+        penalty = avg_sim * strong_ratio * max_penalty
+        return min(penalty, max_penalty)
+    except Exception:
+        return 0.0
+
+
+def apply_proactive_interference(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    project: str,
+    base_stability: float = 1.0,
+    search_k: int = 5,
+    strong_acc_threshold: int = 3,
+    max_penalty: float = 0.10,
+) -> float:
+    """
+    iter408: 计算 PI 惩罚并更新 chunk 的 stability。
+
+    保护规则：
+      - design_constraint 豁免（永久知识不受 PI）
+      - high importance (>0.85) → penalty 减半
+      - penalty < 0.001 → 跳过 DB 写入
+
+    Returns:
+      float — 更新后的 stability
+    """
+    if not chunk_id or not project:
+        return base_stability
+    try:
+        # 检查保护条件
+        row = conn.execute(
+            "SELECT chunk_type, importance FROM memory_chunks WHERE id=?",
+            (chunk_id,)
+        ).fetchone()
+        if not row:
+            return base_stability
+
+        chunk_type = row[0] if isinstance(row, (list, tuple)) else row["chunk_type"]
+        importance = row[1] if isinstance(row, (list, tuple)) else row["importance"]
+
+        # design_constraint 豁免
+        if chunk_type == "design_constraint":
+            return base_stability
+
+        penalty = compute_pi_penalty(
+            conn, chunk_id, project,
+            search_k=search_k,
+            strong_acc_threshold=strong_acc_threshold,
+            max_penalty=max_penalty,
+        )
+
+        # 高 importance 新知识抗 PI（减半惩罚）
+        if (importance or 0.0) > 0.85:
+            penalty *= 0.5
+
+        new_stability = max(0.1, base_stability - penalty)
+        if penalty > 0.001:
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?",
+                (new_stability, chunk_id)
+            )
+        return new_stability
+    except Exception:
+        return base_stability
+
+
+# ── iter409: Flashbulb Memory — 情绪性内容的写入时 stability 加强（Brown & Kulik 1977）
+#
+# 认知科学依据：
+#   Brown & Kulik (1977) "Flashbulb memories":
+#     高情绪唤醒事件（例如 JFK 遇刺）形成极其鲜明、持久、细节丰富的记忆。
+#     与普通记忆相比，flashbulb 记忆的消退曲线更平缓。
+#   McGaugh (2000) "Memory — a century of consolidation" (Science):
+#     情绪唤醒触发杏仁核激活 → norepinephrine 释放 → 增强海马编码强度（amygdala modulation）。
+#   Cahill et al. (1994, Nature): β-肾上腺素受体阻断剂阻断了情绪增强效应
+#     → 直接神经生理证据支持 norepinephrine 机制。
+#
+# 与 iter376 的区别：
+#   iter376（emotional_boost_factor）：retrieval 时加分——情绪 chunk 更容易被检索到
+#   iter409（flashbulb_stability_bonus）：insert 时加强——情绪 chunk 的初始 stability 更高
+#   → iter376 是检索优先级，iter409 是记忆固化强度，互补而非冗余
+#
+# OS 类比：Linux mlockall(MCL_CURRENT | MCL_FUTURE)
+#   高优先级进程调用 mlockall 将所有（当前和未来）内存页锁定在 RAM 中，
+#   无法被 kswapd 驱逐。情绪性记忆 = 被 mlockall 的内存 = 衰减抵抗力最强。
+#
+# 实现：
+#   flashbulb_stability_bonus(emotional_weight, base_stability) → bonus
+#     strong (≥ 0.70): +30% of base (cap: base × 0.30)
+#     medium (0.50-0.70): interp 15→30%
+#     weak (0.30-0.50): interp 0→15%
+#     < 0.30: no bonus
+#   apply_flashbulb_effect(conn, chunk_id, base_stability) → new_stability
+
+
+def flashbulb_stability_bonus(emotional_weight: float, base_stability: float) -> float:
+    """
+    iter409: 将 emotional_weight 映射为 stability bonus（Brown & Kulik 1977）。
+
+    设计（McGaugh 2000 杏仁核 norepinephrine 效应梯度）：
+      strong (≥ 0.70): factor = 0.30（极强情绪唤醒，如系统崩溃/重大决策）
+      medium [0.50, 0.70): 线性插值 0.15 → 0.30
+      weak   [0.30, 0.50): 线性插值 0.00 → 0.15
+      < 0.30: factor = 0（无情绪显著性，不加分）
+
+    cap: base × 0.30（上限，防止 stability 异常膨胀）
+    """
+    try:
+        emotional_weight = float(emotional_weight)
+        base_stability = float(base_stability)
+    except (TypeError, ValueError):
+        return 0.0
+    if emotional_weight <= 0.0 or base_stability <= 0.0:
+        return 0.0
+
+    _FB_STRONG = 0.70
+    _FB_MEDIUM = 0.50
+    _FB_WEAK   = 0.30
+    _FB_MAX_FACTOR = 0.30
+    _FB_MED_FACTOR = 0.15
+
+    if emotional_weight >= _FB_STRONG:
+        factor = _FB_MAX_FACTOR
+    elif emotional_weight >= _FB_MEDIUM:
+        t = (emotional_weight - _FB_MEDIUM) / (_FB_STRONG - _FB_MEDIUM)
+        factor = _FB_MED_FACTOR + t * (_FB_MAX_FACTOR - _FB_MED_FACTOR)
+    elif emotional_weight >= _FB_WEAK:
+        t = (emotional_weight - _FB_WEAK) / (_FB_MEDIUM - _FB_WEAK)
+        factor = 0.0 + t * _FB_MED_FACTOR
+    else:
+        return 0.0
+
+    bonus = base_stability * factor
+    max_bonus = base_stability * _FB_MAX_FACTOR
+    return min(bonus, max_bonus)
+
+
+def apply_flashbulb_effect(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    base_stability: float = 1.0,
+) -> float:
+    """
+    iter409: 读取 chunk 的 emotional_weight，计算 flashbulb bonus 并更新 stability。
+
+    Returns:
+      float — 更新后的 stability（= base + bonus）
+    """
+    if not chunk_id:
+        return base_stability
+    try:
+        row = conn.execute(
+            "SELECT emotional_weight FROM memory_chunks WHERE id=?",
+            (chunk_id,)
+        ).fetchone()
+        if not row:
+            return base_stability
+        ew = row[0] if isinstance(row, (list, tuple)) else row["emotional_weight"]
+        bonus = flashbulb_stability_bonus(ew or 0.0, base_stability)
         new_stability = base_stability + bonus
         if bonus > 0.001:
             conn.execute(

@@ -264,6 +264,24 @@ _REGISTRY: dict = {
     "store_vfs.isolation_min_neighbors": (3, int, 1, 20, None,
         "iter407: 邻居少于此数时返回 0.0 孤立度（避免项目初期误判所有 chunk 为孤立）"),
 
+    # ── iter408: Proactive Interference — 旧知识干扰新知识写入 ─────────────────────
+    "store_vfs.pi_enabled": (True, bool, None, None, None,
+        "是否启用 iter408 Proactive Interference：旧强记忆干扰新 chunk 写入时的 initial stability"),
+    "store_vfs.pi_search_k": (5, int, 1, 20, None,
+        "iter408: 计算 PI 时检索的语义邻居数量"),
+    "store_vfs.pi_strong_acc_threshold": (3, int, 1, 50, None,
+        "iter408: 视为'强旧记忆'的 access_count 阈值（≥ 此值才产生 PI 压力）"),
+    "store_vfs.pi_max_penalty": (0.10, float, 0.0, 0.30, None,
+        "iter408: PI 最大惩罚（从 base_stability 中减去的上限，默认 0.10）"),
+
+    # ── iter409: Flashbulb Memory — 情绪性内容写入时 stability 加强 ────────────────
+    "store_vfs.flashbulb_enabled": (True, bool, None, None, None,
+        "是否启用 iter409 Flashbulb Memory：emotional_weight 高的 chunk 写入时 stability 加强"),
+    "store_vfs.flashbulb_strong_threshold": (0.70, float, 0.3, 1.0, None,
+        "iter409: 强情绪唤醒阈值（≥ 此值获得最大加成 base×0.30）"),
+    "store_vfs.flashbulb_medium_threshold": (0.50, float, 0.1, 0.9, None,
+        "iter409: 中等情绪唤醒阈值（[medium, strong) 区间线性插值加成）"),
+
     # ── Deadline I/O Scheduler（迭代41）──
     "retriever.deadline_ms": (50.0, float, 5.0, 200.0, None,
         "检索截止时间（ms），超过时跳过低优先级阶段（从30ms调整为50ms，适应VFS+PSI开销）"),
