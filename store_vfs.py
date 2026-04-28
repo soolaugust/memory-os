@@ -7275,6 +7275,16 @@ def sleep_consolidate(
     except Exception:
         pass
 
+    # ── 子操作 20（iter452）：Primary Memory Persistence — session 内密集复述的工作记忆持久化增强 ──
+    # OS 类比：Linux page working set active list — 短时内多次 referenced page 提升到 active list，
+    #   kswapd 优先保护（反复 referenced = 工作集热页 = 值得额外巩固）
+    # 机制：session 内注入次数 >= pmp_min_injections 的 chunk 获得 stability 加成
+    try:
+        pmp_result = apply_primary_memory_persistence(conn, project, gap_seconds=gap_seconds)
+        result["pmp_boosted"] = pmp_result.get("pmp_boosted", 0)
+    except Exception:
+        pass
+
     return result
 
 
@@ -7973,6 +7983,131 @@ def apply_reconsolidation_context_refresh(
             conn.commit()
 
         result["rcr_updated"] = updated
+        return result
+
+    except Exception:
+        return result
+
+
+def apply_primary_memory_persistence(
+    conn: sqlite3.Connection,
+    project: str,
+    gap_seconds: float = 0.0,
+) -> dict:
+    """
+    iter452: Primary Memory Persistence — session 内密集复述的工作记忆持久化增强。
+
+    认知科学依据：
+      Waugh & Norman (1965) "Primary memory" (Psychological Review) —
+        工作记忆中被持续主动复述的信息最终转入长时记忆；停止复述后快速遗忘。
+      Rundus (1971) "Analysis of rehearsal processes in free recall" —
+        复述次数与最终记忆保留率高度正相关（r=0.85）。
+
+    OS 类比：Linux page working set active list promotion —
+      短时间内反复 referenced 的 page 被提升到 active list，优先保护。
+
+    参数：
+      gap_seconds: sleep_consolidate 传入的 session 间隔（用于计算 session 窗口覆盖范围）
+    """
+    result = {"pmp_boosted": 0, "total_examined": 0}
+    if not project:
+        return result
+    try:
+        import config as _config
+        if not _config.get("store_vfs.pmp_enabled"):
+            return result
+
+        pmp_min_injections = int(_config.get("store_vfs.pmp_min_injections") or 3)
+        pmp_ref_count = int(_config.get("store_vfs.pmp_ref_count") or 8)
+        pmp_boost = float(_config.get("store_vfs.pmp_boost") or 0.10)
+        pmp_min_importance = float(_config.get("store_vfs.pmp_min_importance") or 0.40)
+        pmp_session_window_hours = float(_config.get("store_vfs.pmp_session_window_hours") or 24.0)
+
+        now = datetime.now(timezone.utc)
+        # session 窗口：使用 pmp_session_window_hours，但至少覆盖本次 gap
+        window_hours = max(pmp_session_window_hours, gap_seconds / 3600.0)
+        window_cutoff = (now - timedelta(hours=window_hours)).isoformat()
+
+        # 统计 session 内每个 chunk 在 recall_traces 中的注入次数
+        # 通过 top_k_json 解析 chunk_id 的出现次数
+        trace_rows = conn.execute(
+            """SELECT top_k_json, injected FROM recall_traces
+               WHERE project=? AND timestamp >= ?
+               ORDER BY timestamp ASC""",
+            (project, window_cutoff)
+        ).fetchall()
+
+        if not trace_rows:
+            return result
+
+        # 统计每个 chunk 在 session 内被注入的次数
+        injection_counts: dict = {}
+        for trace_row in trace_rows:
+            top_k_json = (trace_row[0] if not hasattr(trace_row, 'keys') else trace_row["top_k_json"]) or "[]"
+            injected = int(trace_row[1] if not hasattr(trace_row, 'keys') else trace_row["injected"] or 0)
+            if injected <= 0:
+                continue
+            try:
+                import json as _json
+                top_k = _json.loads(top_k_json)
+                for item in top_k:
+                    cid = None
+                    if isinstance(item, dict):
+                        cid = item.get("id") or item.get("chunk_id")
+                    elif isinstance(item, str):
+                        cid = item
+                    if cid:
+                        injection_counts[cid] = injection_counts.get(cid, 0) + 1
+            except Exception:
+                continue
+
+        if not injection_counts:
+            return result
+
+        # 筛选达到阈值的 chunk
+        candidate_ids = [cid for cid, cnt in injection_counts.items()
+                         if cnt >= pmp_min_injections]
+
+        if not candidate_ids:
+            return result
+
+        # 获取 chunk 信息
+        placeholders = ",".join("?" * len(candidate_ids))
+        chunk_rows = conn.execute(
+            f"""SELECT id, stability, importance FROM memory_chunks
+                WHERE project=? AND id IN ({placeholders}) AND importance >= ?""",
+            [project] + candidate_ids + [pmp_min_importance]
+        ).fetchall()
+
+        result["total_examined"] = len(chunk_rows)
+        boosted = 0
+
+        for crow in chunk_rows:
+            if hasattr(crow, 'keys'):
+                cid = crow["id"]
+                stab = float(crow["stability"] or 1.0)
+            else:
+                cid = crow[0]
+                stab = float(crow[1] or 1.0)
+
+            session_count = injection_counts.get(cid, 0)
+            pmp_factor = min(1.0, session_count / max(1, pmp_ref_count))
+            bonus = pmp_boost * pmp_factor
+            if bonus < 0.001:
+                continue
+
+            new_stab = min(365.0, stab * (1.0 + bonus))
+            if new_stab > stab + 0.001:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=?",
+                    (new_stab, now.isoformat(), cid)
+                )
+                boosted += 1
+
+        if boosted > 0:
+            conn.commit()
+
+        result["pmp_boosted"] = boosted
         return result
 
     except Exception:

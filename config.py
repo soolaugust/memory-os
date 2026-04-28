@@ -870,6 +870,63 @@ _REGISTRY: dict = {
     "store_vfs.rcr_stable_floor": (60.0, float, 10.0, 365.0, None,
         "iter451: 视为'极度稳固'的 stability 下限（stability >= 此值时跳过 RCR，默认 60 天以上的稳固记忆不更新）"),
 
+    # ── iter452: Primary Memory Persistence — 主动复述的工作记忆持久化（Waugh & Norman 1965）──────────
+    # 认知科学依据：
+    #   Waugh & Norman (1965) "Primary memory" (Psychological Review) —
+    #     工作记忆（primary memory）中的信息只要被持续"rehearsal"（主动复述），就不会快速遗忘；
+    #     停止主动复述后，信息在数秒内从工作记忆中消失（Peterson & Peterson 1959 distractor effect）。
+    #     两种命运：① 被复述（rehearsed）→ 保留在 primary memory → 最终转入 secondary memory（长时记忆）
+    #               ② 未被复述 → 在干扰下快速遗忘（interference-driven displacement）
+    #   Miller (1956) "The magical number seven, plus or minus two" —
+    #     工作记忆容量有限（7±2 chunk），超过容量后只有被主动维持的信息存活。
+    #     主动复述 = 对有限认知资源的主动分配 → 信号：这条信息值得保留。
+    #   Rundus (1971) "Analysis of rehearsal processes in free recall" (JEP) —
+    #     自由回忆实验中，复述次数与最终记忆保留率高度正相关（r=0.85）；
+    #     每多复述一次，最终保留率约提升 8-12%。
+    #   Craik & Watkins (1973) "The role of rehearsal in short-term memory" (JVLVB) —
+    #     "type I" rehearsal（单纯重复）vs "type II" rehearsal（精细加工）：
+    #     精细加工型复述的长时记忆效果更好（≈深度编码），单纯重复型仅维持短期。
+    #     memory-os 中：chunk 被频繁注入到 AI 上下文 = type II rehearsal（被集成进回答推理中，不只是展示）。
+    #
+    # memory-os 等价：
+    #   sleep_consolidate 时，统计本 session 内（过去 gap_seconds 时间窗口内）
+    #   每个 chunk 在 recall_traces 中的 injected 累计次数（session_injection_count）：
+    #     session_injection_count >= pmp_min_injections → chunk 在本 session 被密集复述
+    #     → 给予临时 stability 加成：new_stab = min(365, stab × pmp_boost × pmp_factor)
+    #     pmp_factor = min(1.0, session_injection_count / pmp_ref_count)（注入越多加成越大）
+    #   只对 importance >= pmp_min_importance 的 chunk 应用（低重要性复述无效 → 符合 Craik & Watkins 1973）
+    #
+    # 与 iter445 RTMC（Reward-Tagged Memory Consolidation）的区别：
+    #   RTMC：跨 session 长期累积 access_count × recency（多巴胺奖励信号，宏观历史模式）
+    #   PMP：本 session 内密集注入次数（主动复述，微观即时信号）
+    #   两者互补：RTMC 保护历史高价值记忆，PMP 保护当前 session 的密集使用记忆
+    #   时间粒度：RTMC=跨 session（天级）；PMP=单 session 内（小时级）
+    #
+    # 与 iter413 Sleep Consolidation（SC）的区别：
+    #   SC：importance >= 0.70 的 chunk 一律加成（importance-based gate，与使用频率无关）
+    #   PMP：session 内 injected >= pmp_min_injections 的 chunk（behavior-based，与实际复述相关）
+    #   两者互补：SC 保护重要性高的知识，PMP 保护当前 session 中被密集使用的知识
+    #
+    # OS 类比：Linux page working set estimation (PG_referenced + PG_active) —
+    #   页面在短时间内被多次访问（reference bit 被反复置位），kswapd 将其提升到 active list，
+    #   增加"最近工作集热度"权重，下次 eviction 时优先保护；
+    #   类比：session 内高频注入的 chunk = 短时间内反复 referenced → 工作集热页 → sleep 时优先保护。
+    "store_vfs.pmp_enabled": (True, bool, None, None, None,
+        "iter452: 是否启用 Primary Memory Persistence — session 内密集复述的 chunk 在 sleep 时获得额外巩固"),
+    "store_vfs.pmp_min_injections": (3, int, 1, 50, None,
+        "iter452: 触发 PMP 的最低 session 内注入次数（injected 累计 >= 此值，默认 3）"),
+    "store_vfs.pmp_ref_count": (8, int, 2, 50, None,
+        "iter452: 注入次数参考值：pmp_factor = min(1.0, count / ref_count)，"
+        "count=ref_count 时达到最大加成（默认 8）"),
+    "store_vfs.pmp_boost": (0.10, float, 0.0, 0.30, None,
+        "iter452: PMP 最大 stability 加成系数：new_stab = stab × (1 + pmp_boost × pmp_factor)，"
+        "count=ref_count 时最大加成 = pmp_boost（默认 0.10 ≈ 10%，对应 Rundus 1971 每次复述 +8-12% 保留率）"),
+    "store_vfs.pmp_min_importance": (0.40, float, 0.0, 1.0, None,
+        "iter452: 触发 PMP 的最低 importance 阈值（低重要性 chunk 的复述无效，默认 0.40）"),
+    "store_vfs.pmp_session_window_hours": (24.0, float, 0.5, 48.0, None,
+        "iter452: session 内注入统计时间窗口（小时）：只统计过去 N 小时内的 recall_traces，"
+        "覆盖本 session 的工作区间（默认 24h，与 sleep_consolidate.window_hours 对应）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。
