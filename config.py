@@ -249,6 +249,34 @@ _REGISTRY: dict = {
     "store_vfs.oi_max_coinjected": (5, int, 2, 20, None,
         "iter436: 每条 trace 最多处理的同轮注入 chunk 数（超出部分不施加额外 OI 惩罚）"),
 
+    # ── iter437: Hypermnesia — 多次分布式检索后记忆净增强（Erdelyi & Becker 1974）──────────────
+    # 认知科学依据：Erdelyi & Becker (1974) "1974 hypermnesia for pictures" (Cognitive Psychology) —
+    #   在多轮自由回忆测试中，随测试轮次增加，总召回量呈净增长（不仅是遗忘补偿）：
+    #   一些在第1轮被遗忘的项目，在第2/3轮被成功回忆（"reminiscence"），且总量超过第1轮。
+    #   机制：每次回忆尝试激活不同检索路径，集体覆盖更多记忆痕迹（retrieval route diversity）。
+    #   Payne (1987) Meta-analysis: hypermnesia effect ≈ +15-25% across 3-5 test sessions。
+    #   Roediger & Challis (1989): hypermnesia 最强出现在 imagery-rich、情节性内容（而非语义列表）。
+    # memory-os 等价：
+    #   spaced_access_count（iter420）= 跨 24h 间隔的检索次数，代表不同 session 的独立检索。
+    #   spaced_access_count >= hypermnesia_threshold → 证明 chunk 经历了多次成功的分布式检索路径，
+    #   已达到"超记忆强化"水平；sleep_consolidate 时给予额外 stability boost（hypermnesia_boost）。
+    #   与 Spacing Effect（iter420）区别：SE 是 per-access 机制（每次间隔检索小幅加成）；
+    #   Hypermnesia 是 threshold-triggered 宏观机制（跨越阈值后一次性较大加成，模拟 net improvement）。
+    # OS 类比：Linux khugepaged (Transparent HugePage) 多 epoch 晋升 —
+    #   页面在多个内存分配 epoch 内持续热访问（access_count 跨越 epoch 阈值）→
+    #   khugepaged 将多个 4KB pages 合并为 2MB hugepage，大幅降低 TLB miss rate；
+    #   类比：多次跨 session 检索成功 → 记忆表示从分散的情节痕迹"合并"为稳定的长期表示。
+    "store_vfs.hypermnesia_enabled": (True, bool, None, None, None,
+        "iter437: 是否启用 Hypermnesia — spaced_access_count 超过阈值后触发一次性 stability 净增强"),
+    "store_vfs.hypermnesia_threshold": (4, int, 2, 20, None,
+        "iter437: 触发 Hypermnesia boost 的 spaced_access_count 阈值（默认 4 次跨会话检索）"),
+    "store_vfs.hypermnesia_boost": (1.10, float, 1.0, 1.50, None,
+        "iter437: Hypermnesia stability 加成系数（stability × boost，默认 1.10 ≈ 10% 净增强）"),
+    "store_vfs.hypermnesia_min_importance": (0.55, float, 0.0, 1.0, None,
+        "iter437: 触发 Hypermnesia 的最低 importance 阈值（低重要性 chunk 不触发，避免噪音固化）"),
+    "store_vfs.hypermnesia_cooldown_days": (7.0, float, 1.0, 90.0, None,
+        "iter437: Hypermnesia boost 冷却期（天）：两次 boost 之间的最小间隔，防止反复触发"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。

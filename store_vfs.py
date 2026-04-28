@@ -380,6 +380,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     #   page（massed access）更快晋升到 younger generation（真正的热页）。
     _safe_add_column(conn, "memory_chunks", "spaced_access_count", "INTEGER DEFAULT 0")
 
+    # ── iter437: hypermnesia_last_boost — 上次 Hypermnesia boost 时间（冷却期追踪）──
+    # OS 类比：khugepaged scan_sleep_millisecs — 两次 hugepage 合并之间的最小休眠间隔，
+    #   防止 khugepaged 频繁唤醒消耗 CPU（hypermnesia cooldown 防止反复触发）。
+    _safe_add_column(conn, "memory_chunks", "hypermnesia_last_boost", "TEXT")
+
     # ── Task13：row_version — Optimistic Locking（CAS）──
     # OS 类比：Linux seqlock / atomic_cmpxchg — 读取 sequence number 后写入时验证未变化。
     # 多 agent 并发写：每次 update 递增 row_version，CAS 检查版本防止 ABA 问题。
@@ -7138,6 +7143,14 @@ def sleep_consolidate(
     except Exception:
         pass
 
+    # ── 子操作 6（iter437）：Hypermnesia — 多次分布式检索后的记忆净增强 ──
+    # OS 类比：khugepaged — 跨多个 epoch 热访问的页面晋升为 hugepage（净效率提升）
+    try:
+        hm_result = apply_hypermnesia(conn, project)
+        result["hm_boosted"] = hm_result.get("boosted", 0)
+    except Exception:
+        pass
+
     return result
 
 
@@ -8484,6 +8497,91 @@ def apply_output_interference(
             continue
 
     return {"penalized": penalized, "total_examined": total_examined}
+
+
+# ── iter437: Hypermnesia — 多次分布式检索后记忆净增强（Erdelyi & Becker 1974）──────────────
+# 认知科学依据：Erdelyi & Becker (1974) "1974 hypermnesia for pictures" (Cognitive Psychology) —
+#   多轮自由回忆测试中，随测试次数增加，总召回量呈净增长（hypermnesia）：
+#   不同回忆尝试激活不同检索路径，集体覆盖更多记忆痕迹（retrieval route diversity）。
+#   Payne (1987) Meta-analysis: +15-25% improvement across 3-5 test sessions。
+#   关键条件：必须是间隔分布（spaced）而非集中（massed）的回忆测试。
+# memory-os 等价：
+#   spaced_access_count（iter420）= 跨 24h 间隔的检索次数，代理"不同 session 的检索尝试数"。
+#   达到 hypermnesia_threshold 后触发一次 stability boost（避免反复触发 = cooldown）。
+#   与 Spacing Effect 区别：SE 是 per-access 小幅加成；Hypermnesia 是 threshold-crossing 大幅净增强。
+# OS 类比：Linux khugepaged Transparent HugePage 多 epoch 晋升 —
+#   页面在多个内存分配 epoch 内持续热访问 → khugepaged 合并为 2MB hugepage，降低 TLB miss rate；
+#   类比：多次跨 session 检索 → 记忆表示从分散痕迹"合并"为稳定长期表示（net improvement）。
+
+def apply_hypermnesia(
+    conn: sqlite3.Connection,
+    project: str,
+) -> dict:
+    """
+    iter437: Hypermnesia — 对 spaced_access_count >= threshold 的 chunk 施加净增强 boost。
+
+    在 sleep_consolidate 时调用：
+      1. 查找 spaced_access_count >= hypermnesia_threshold 且 importance >= min_importance 的 chunk
+      2. 排除在 cooldown_days 内已被 boost 的 chunk（hypermnesia_last_boost 字段）
+      3. 对符合条件的 chunk：stability × hypermnesia_boost（上限 365.0）
+      4. 更新 hypermnesia_last_boost = now
+
+    返回：{"boosted": N, "total_examined": N}
+    """
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    try:
+        import config as _cfg_hm
+    except ImportError:
+        return {"boosted": 0, "total_examined": 0}
+
+    try:
+        hm_enabled = _cfg_hm.get("store_vfs.hypermnesia_enabled")
+        if not hm_enabled:
+            return {"boosted": 0, "total_examined": 0}
+
+        hm_threshold = _cfg_hm.get("store_vfs.hypermnesia_threshold")
+        hm_boost = _cfg_hm.get("store_vfs.hypermnesia_boost")
+        hm_min_imp = _cfg_hm.get("store_vfs.hypermnesia_min_importance")
+        hm_cooldown_days = _cfg_hm.get("store_vfs.hypermnesia_cooldown_days")
+    except Exception:
+        return {"boosted": 0, "total_examined": 0}
+
+    now = _dt.now(_tz.utc)
+    now_iso = now.isoformat()
+    cooldown_cutoff = (now - _td(days=hm_cooldown_days)).isoformat()
+
+    try:
+        # 候选：spaced_access_count >= threshold，importance >= min_imp，
+        #   且 hypermnesia_last_boost 为空或在冷却期外
+        rows = conn.execute(
+            """SELECT id, stability
+               FROM memory_chunks
+               WHERE project = ?
+                 AND COALESCE(spaced_access_count, 0) >= ?
+                 AND COALESCE(importance, 0.5) >= ?
+                 AND (hypermnesia_last_boost IS NULL
+                      OR hypermnesia_last_boost < ?)
+               LIMIT 200""",
+            (project, hm_threshold, hm_min_imp, cooldown_cutoff),
+        ).fetchall()
+    except Exception:
+        return {"boosted": 0, "total_examined": 0}
+
+    total_examined = len(rows)
+    boosted = 0
+
+    for (cid, stab) in rows:
+        try:
+            new_stab = min(365.0, float(stab or 1.0) * hm_boost)
+            conn.execute(
+                "UPDATE memory_chunks SET stability=?, hypermnesia_last_boost=?, updated_at=? WHERE id=?",
+                (round(new_stab, 4), now_iso, now_iso, cid),
+            )
+            boosted += 1
+        except Exception:
+            continue
+
+    return {"boosted": boosted, "total_examined": total_examined}
 
 
 # ── iter432: Cumulative Interference Effect — 累积干扰加速遗忘（Underwood 1957）──
