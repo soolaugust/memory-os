@@ -6993,6 +6993,7 @@ def sleep_consolidate(
     active_days: int = 7,
     stale_days: int = 30,
     max_merges: int = 20,
+    gap_seconds: float = 0.0,
 ) -> dict:
     """
     迭代311-C：睡眠巩固（Sleep Consolidation，Walker & Stickgold 2004）
@@ -7237,6 +7238,17 @@ def sleep_consolidate(
     try:
         re_result = apply_retroactive_enhancement(conn, project)
         result["re_boosted"] = re_result.get("re_boosted", 0)
+    except Exception:
+        pass
+
+    # ── 子操作 18（iter449）：Quiet Wakefulness Reactivation — 清醒安静期自发重放预巩固 ──
+    # OS 类比：Linux incremental pdflush writeback — 30s 周期轻量级 dirty page 写回（vs fsync 全量同步）
+    # 只在 gap_seconds > 0 时触发（gap=0 表示连续 session，未检测到休息间隔）
+    try:
+        if gap_seconds > 0:
+            qwr_result = apply_quiet_wakefulness_reactivation(conn, project, gap_seconds)
+            result["qwr_boosted"] = qwr_result.get("qwr_boosted", 0)
+            result["qwr_skipped_reason"] = qwr_result.get("skipped_reason")
     except Exception:
         pass
 
@@ -10175,6 +10187,138 @@ def apply_retroactive_enhancement(
         conn.commit()
 
     return {"re_boosted": re_boosted, "total_examined": total_examined}
+
+
+def apply_quiet_wakefulness_reactivation(
+    conn: sqlite3.Connection,
+    project: str,
+    gap_seconds: float,
+) -> dict:
+    """
+    iter449: Quiet Wakefulness Reactivation (QWR) — 清醒安静期自发重放预巩固。
+
+    机制：
+      - Tambini et al. (2010) Neuron：学习后 10min 安静休息的功能连接增强预测 24h 记忆保留。
+      - Karlsson & Frank (2009) NatNeuro：清醒安静期海马自发重放先前轨迹（awake replay）。
+      - gap in [qwr_min_gap_mins, qwr_sleep_threshold_hours×3600)：处于清醒休息期 → QWR。
+      - gap >= qwr_sleep_threshold_hours×3600：整夜睡眠，由 iter413 SC 处理，此函数跳过。
+
+    参数：
+      gap_seconds — 距上次 session 结束的时间间隔（秒）。
+
+    算法：
+      1. 检查 gap 是否在 QWR 窗口内（[min_gap_mins*60, sleep_threshold_hours*3600)）。
+      2. 查询 last_accessed >= now - qwr_recent_hours 且 importance >= qwr_min_importance 的 chunk。
+      3. 按 importance × recency_factor 排序，取前 qwr_max_chunks 个。
+      4. 每个 chunk stability × qwr_boost_factor，cap 365.0。
+      5. 返回 {"qwr_boosted": N, "total_examined": N, "skipped_reason": str or None}
+
+    OS 类比：Linux page cache incremental writeback (pdflush background flush) —
+      定期小批量 dirty page 写回（QWR = 轻量增量回写），防止积压到 fsync（SC = 全量回写）。
+    """
+    try:
+        import config as _cfg_qwr
+    except ImportError:
+        return {"qwr_boosted": 0, "total_examined": 0, "skipped_reason": "import_error"}
+
+    try:
+        if not _cfg_qwr.get("store_vfs.qwr_enabled"):
+            return {"qwr_boosted": 0, "total_examined": 0, "skipped_reason": "disabled"}
+        qwr_min_gap_mins = _cfg_qwr.get("store_vfs.qwr_min_gap_mins")           # 10
+        qwr_sleep_threshold_hours = _cfg_qwr.get("store_vfs.qwr_sleep_threshold_hours")  # 8.0
+        qwr_recent_hours = _cfg_qwr.get("store_vfs.qwr_recent_hours")           # 4.0
+        qwr_boost_factor = _cfg_qwr.get("store_vfs.qwr_boost_factor")           # 1.03
+        qwr_min_importance = _cfg_qwr.get("store_vfs.qwr_min_importance")       # 0.55
+        qwr_max_chunks = _cfg_qwr.get("store_vfs.qwr_max_chunks")               # 30
+    except Exception:
+        return {"qwr_boosted": 0, "total_examined": 0, "skipped_reason": "config_error"}
+
+    # 检查 gap 是否在 QWR 窗口内
+    min_gap_secs = qwr_min_gap_mins * 60
+    max_gap_secs = qwr_sleep_threshold_hours * 3600
+
+    if gap_seconds < min_gap_secs:
+        # 太短（连续会话），不触发 QWR
+        return {"qwr_boosted": 0, "total_examined": 0, "skipped_reason": "gap_too_short"}
+    if gap_seconds >= max_gap_secs:
+        # 太长（整夜睡眠），由 iter413 SC 处理
+        return {"qwr_boosted": 0, "total_examined": 0, "skipped_reason": "gap_too_long_use_sc"}
+
+    from datetime import datetime as _dt_qwr, timezone as _tz_qwr, timedelta as _td_qwr
+    now_dt = _dt_qwr.now(_tz_qwr.utc)
+    now_iso = now_dt.isoformat()
+
+    # 近期编码窗口（last_accessed 在 qwr_recent_hours 内）
+    recent_cutoff = (now_dt - _td_qwr(hours=qwr_recent_hours)).isoformat()
+
+    try:
+        rows = conn.execute(
+            """SELECT id, stability, importance, last_accessed FROM memory_chunks
+               WHERE project = ?
+                 AND COALESCE(importance, 0.0) >= ?
+                 AND COALESCE(stability, 0.1) > 0.1
+                 AND last_accessed >= ?
+               ORDER BY importance DESC
+               LIMIT ?""",
+            (project, qwr_min_importance, recent_cutoff, qwr_max_chunks * 3),
+        ).fetchall()
+    except Exception:
+        return {"qwr_boosted": 0, "total_examined": 0, "skipped_reason": "query_error"}
+
+    if not rows:
+        return {"qwr_boosted": 0, "total_examined": 0, "skipped_reason": "no_candidates"}
+
+    def _get_field(row, idx, name):
+        return row[idx] if isinstance(row, (list, tuple)) else row[name]
+
+    # 按 importance × recency_factor 排序（近期 + 高重要性优先）
+    scored = []
+    for row in rows:
+        try:
+            cid = _get_field(row, 0, "id")
+            stab = float(_get_field(row, 1, "stability") or 0.1)
+            imp = float(_get_field(row, 2, "importance") or 0.0)
+            la = _get_field(row, 3, "last_accessed") or ""
+            # 计算时间新鲜度（越近 → recency_factor 越大）
+            try:
+                la_dt = _dt_qwr.fromisoformat(la.replace("Z", "+00:00"))
+                if la_dt.tzinfo is None:
+                    la_dt = la_dt.replace(tzinfo=_tz_qwr.utc)
+                hours_ago = (now_dt - la_dt).total_seconds() / 3600.0
+                recency_factor = max(0.0, 1.0 - hours_ago / qwr_recent_hours)
+            except Exception:
+                recency_factor = 0.5
+            score = imp * (0.5 + 0.5 * recency_factor)  # importance 主导，recency 调节
+            scored.append((cid, stab, score))
+        except Exception:
+            continue
+
+    # 取前 qwr_max_chunks 个
+    scored.sort(key=lambda x: x[2], reverse=True)
+    top_chunks = scored[:qwr_max_chunks]
+    total_examined = len(top_chunks)
+
+    if not top_chunks:
+        return {"qwr_boosted": 0, "total_examined": 0, "skipped_reason": "no_valid_rows"}
+
+    # 应用 QWR stability 加成
+    updates = []
+    qwr_boosted = 0
+    for cid, stab, _ in top_chunks:
+        new_stab = min(365.0, stab * qwr_boost_factor)
+        if new_stab <= stab + 0.0001:
+            continue
+        updates.append((round(new_stab, 4), now_iso, cid))
+        qwr_boosted += 1
+
+    if updates:
+        conn.executemany(
+            "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=?",
+            updates,
+        )
+        conn.commit()
+
+    return {"qwr_boosted": qwr_boosted, "total_examined": total_examined, "skipped_reason": None}
 
 
 # ── iter432: Cumulative Interference Effect — 累积干扰加速遗忘（Underwood 1957）──

@@ -712,6 +712,60 @@ _REGISTRY: dict = {
     "store_vfs.re_max_old_per_new": (5, int, 1, 20, None,
         "iter448: 每个新 chunk 最多逆行增强的旧 chunk 数量（按 overlap_score 降序取 top N，默认 5）"),
 
+    # ── iter449: Quiet Wakefulness Reactivation — 清醒安静期自发重放（Karlsson & Frank 2009）────────────
+    # 认知科学依据：
+    #   Karlsson & Frank (2009) Nature Neuroscience "Awake replay of remote experiences in the hippocampus" —
+    #     大鼠在清醒安静期（rest between maze runs），海马体会自发重放先前的空间轨迹（awake sharp-wave ripples）。
+    #     这种清醒重放（awake replay）独立于睡眠，有助于"提前巩固"（pre-consolidation）——
+    #     为后续睡眠期的深度巩固做准备（类比：incremental commit → final fsync）。
+    #   Tambini et al. (2010) Neuron "Enhanced brain correlations during rest are related to memory for recent experiences" —
+    #     人类学习后短暂休息期（~10min quiet wakefulness）的海马-新皮层功能连接显著增强，
+    #     且这种连接增强的程度预测了后续 24h 记忆保留率（r=0.62, p<0.01）。
+    #     关键：只需 10 分钟不受干扰的安静休息，无需睡眠，即可触发记忆重放和早期巩固。
+    #   Dewar et al. (2012) Psychological Science "Ferreting out the nature of the rest period" —
+    #     任何无干扰的"空闲期"（unfilled rest）都有助于新学习，
+    #     主动任务干扰（filled rest）显著削弱记忆保留（interruption effect）。
+    #     等价：session 间隙的"安静期"（无新 AI 交互）= unfilled rest = 触发 QWR 的条件。
+    #   Stickgold (2005) Nature + Diekelmann & Born (2010) — 系统巩固理论：
+    #     海马重放分两阶段：① 清醒/轻睡期小规模重放（pre-consolidation；QWR）
+    #                       ② 慢波睡眠期大规模重放（deep consolidation；iter413 SC）。
+    #     QWR 处理 session 间 minutes 到 hours 的"浅巩固"，SC 处理 hours 以上的"深巩固"。
+    #
+    # memory-os 等价：
+    #   SessionStart 时检测与上次 session 结束的时间间隔（gap = now - last_session_end）。
+    #   gap in [qwr_min_gap_mins/60, qwr_max_gap_hours)：处于"清醒休息期"→ 触发 QWR。
+    #   gap >= sleep_threshold_hours（8h）：由 iter413 SC 处理（深度睡眠巩固），QWR 跳过。
+    #   QWR 只对近期编码（created_at 或 last_accessed >= now - qwr_recent_hours）的
+    #   高 importance chunk 给予轻微 stability 加成（比 SC 保守：+3%，SC 默认 +6%）。
+    #   机制：Tambini 2010 的功能连接增强 = memory-os 中近期 chunk 被"预巩固"加成，
+    #   使其在下次 SC（深度睡眠）前不会过快衰减到遗忘临界。
+    #
+    # 与 iter413 Sleep Consolidation（SC）的区别：
+    #   SC：gap >= 8h（overnight sleep），全量巩固，boost_factor=1.06（+6%），扫描 24h 内活跃 chunk
+    #   QWR：gap in [10min, 8h)（short rest），轻度预巩固，boost_factor=1.03（+3%），扫描 4h 内活跃 chunk
+    #   两者互补：同一 session lifecycle 的 chunk 可能先被 QWR 保护，再被 SC 深度巩固
+    #   不重叠：SC 触发时 QWR 跳过（gap >= sleep_threshold_hours → 由 SC 处理）
+    #
+    # OS 类比：Linux page cache incremental writeback（background flusher）vs fsync（sync writeback）—
+    #   pdflush 30s 定期将少量 dirty pages 写回磁盘（QWR = 轻量级增量回写）；
+    #   sync()/fsync() 触发全量回写（SC = 整夜睡眠的完整巩固）。
+    #   两者互补：incremental flush 防止 dirty page 积累；最终 fsync 保证持久化。
+    "store_vfs.qwr_enabled": (True, bool, None, None, None,
+        "iter449: 是否启用 Quiet Wakefulness Reactivation — 短休息期（< 8h gap）的近期 chunk 获得轻度预巩固"),
+    "store_vfs.qwr_min_gap_mins": (10, int, 1, 120, None,
+        "iter449: 触发 QWR 的最短 gap（分钟）：gap < 此值说明连续会话，不触发 QWR（默认 10 分钟）"),
+    "store_vfs.qwr_sleep_threshold_hours": (8.0, float, 4.0, 24.0, None,
+        "iter449: gap >= 此值（小时）视为'整夜睡眠'，由 iter413 SC 处理，QWR 跳过（默认 8h）"),
+    "store_vfs.qwr_recent_hours": (4.0, float, 0.5, 24.0, None,
+        "iter449: 近期编码时间窗口（小时）：last_accessed >= now - qwr_recent_hours 的 chunk 才参与 QWR（默认 4h）"),
+    "store_vfs.qwr_boost_factor": (1.03, float, 1.0, 1.20, None,
+        "iter449: QWR stability 加成系数（stability × boost_factor，默认 1.03 ≈ +3%，"
+        "比 SC 的 1.06 更保守，对应 Tambini 2010 的较小预巩固效应）"),
+    "store_vfs.qwr_min_importance": (0.55, float, 0.3, 1.0, None,
+        "iter449: 触发 QWR 的最低 importance 阈值（默认 0.55，略高于 SC 的 0.70 阈值下限，但专注近期重要 chunk）"),
+    "store_vfs.qwr_max_chunks": (30, int, 5, 200, None,
+        "iter449: 每次 QWR 最多处理的 chunk 数量（按 importance × recency 排序取前 N，默认 30）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。
