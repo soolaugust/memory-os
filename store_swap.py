@@ -426,3 +426,114 @@ def gc_orphan_swap(conn: sqlite3.Connection) -> dict:
         "deleted_count": deleted,
         "freed_pct": freed_pct,
     }
+
+
+# ── iter430: Spontaneous Recovery — 自发恢复（Pavlov 1927）─────────────────────────
+#
+# 认知科学依据：Pavlov (1927) 经典条件反射消退后，
+#   经过一段时间的"休息"（不需强化），被抑制的反应会自发恢复（spontaneous recovery）。
+#   Rescorla (1997): 恢复程度与休息时间正相关，初始重要性越高恢复越完整。
+#   在记忆领域：被遗忘（inhibited）的记忆经过休息后可部分恢复，
+#     尤其是历史上曾被频繁访问的"强记忆"（high access_count）。
+#
+# OS 类比：Linux MGLRU active 列表晋升 + zswap 热页解压缩 —
+#   在 swap 分区中"休眠"一段时间后，具有高访问历史的页面被优先从 swap 提升，
+#   类比 MGLRU 跨代晋升（被充分访问的 young page 晋升到 active generation）。
+#   与 kswapd 的关系：kswapd 驱逐是抑制（extinction），SR 是抑制后的自发恢复。
+
+def run_spontaneous_recovery(
+    conn: sqlite3.Connection,
+    project: str,
+    now_iso: str = None,
+) -> dict:
+    """
+    iter430: 自发恢复 — 扫描 swap 分区中符合条件的 chunk，
+    将其 swap in 并提升 stability（Pavlov 1927 SR）。
+
+    触发条件（AND）：
+      1. 在 swap 中 >= sr_min_swap_days 天（足够休息时间）
+      2. 历史 access_count_at_swap >= sr_min_access_count（曾经重要）
+      3. original_importance >= sr_min_importance（本身有价值）
+
+    恢复操作：
+      - swap_in → 恢复到主表
+      - stability × sr_recovery_boost（≈ +15%）
+
+    返回 dict：
+      recovered — 恢复的 chunk 数
+      boosted — stability 被提升的 chunk 数
+    """
+    from datetime import datetime, timezone, timedelta
+
+    if now_iso is None:
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+    try:
+        from config import get as _cfg
+        if not _cfg("swap.sr_enabled"):
+            return {"recovered": 0, "boosted": 0}
+        min_swap_days = float(_cfg("swap.sr_min_swap_days") or 3.0)
+        min_access = int(_cfg("swap.sr_min_access_count") or 3)
+        min_imp = float(_cfg("swap.sr_min_importance") or 0.65)
+        recovery_boost = float(_cfg("swap.sr_recovery_boost") or 1.15)
+        max_recover = int(_cfg("swap.sr_max_recover_per_run") or 5)
+    except Exception:
+        min_swap_days, min_access, min_imp = 3.0, 3, 0.65
+        recovery_boost, max_recover = 1.15, 5
+
+    # 找满足条件的 swap 条目（按 original_importance DESC 优先恢复最重要的）
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=min_swap_days)).isoformat()
+    candidates = conn.execute(
+        """SELECT id, original_importance, access_count_at_swap, compressed_data
+           FROM swap_chunks
+           WHERE project = ?
+             AND COALESCE(original_importance, 0.0) >= ?
+             AND COALESCE(access_count_at_swap, 0) >= ?
+             AND datetime(swapped_at) <= datetime(?)
+           ORDER BY COALESCE(original_importance, 0.0) DESC
+           LIMIT ?""",
+        (project, min_imp, min_access, cutoff, max_recover),
+    ).fetchall()
+
+    if not candidates:
+        return {"recovered": 0, "boosted": 0}
+
+    candidate_ids = [row[0] for row in candidates]
+    # 用 swap_in 恢复
+    result = swap_in(conn, candidate_ids)
+    recovered = result.get("restored_count", 0)
+    boosted = 0
+
+    if recovered > 0 and recovery_boost > 1.0:
+        # 对恢复成功的 chunk 提升 stability
+        # 原始 stability 从 candidates 的 compressed_data 中读取（swap_in 不恢复 stability）
+        orig_stab_by_id = {}
+        for row in candidates:
+            cid_c, imp_c, acc_c, cdata_c = row[0], row[1], row[2], row[3]
+            try:
+                orig_json = json.loads(
+                    zlib.decompress(base64.b64decode(cdata_c)).decode("utf-8")
+                )
+                orig_stab_by_id[cid_c] = float(orig_json.get("stability", 1.0) or 1.0)
+            except Exception:
+                orig_stab_by_id[cid_c] = 1.0
+
+        for cid in candidate_ids:
+            try:
+                # 先检查 chunk 是否已恢复到主表
+                exists = conn.execute(
+                    "SELECT id FROM memory_chunks WHERE id=?", (cid,)
+                ).fetchone()
+                if not exists:
+                    continue
+                orig_stab = orig_stab_by_id.get(cid, 1.0)
+                new_stab = min(365.0, orig_stab * recovery_boost)
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?",
+                    (new_stab, cid)
+                )
+                boosted += 1
+            except Exception:
+                pass
+
+    return {"recovered": recovered, "boosted": boosted}

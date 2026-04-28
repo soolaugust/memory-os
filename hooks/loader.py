@@ -841,6 +841,21 @@ def main():
         except Exception:
             pass
 
+        # ── iter430: Spontaneous Recovery — 自发恢复（Pavlov 1927）──
+        # OS 类比：Linux MGLRU 跨代晋升 — swap 中高历史访问 chunk 自发恢复
+        # 在 swap_gc 之后执行（先清理孤儿，再恢复有价值的 chunk）
+        sr_result = {"recovered": 0, "boosted": 0}
+        try:
+            from store_swap import run_spontaneous_recovery
+            sr_result = run_spontaneous_recovery(_log_conn, project)
+            if sr_result.get("recovered", 0) > 0:
+                dmesg_log(_log_conn, DMESG_INFO, "swap",
+                          f"spontaneous_recovery: recovered={sr_result['recovered']} stability_boosted={sr_result['boosted']}",
+                          session_id=_session_id, project=project)
+                _log_conn.commit()
+        except Exception:
+            pass
+
         # 迭代29 dmesg：SessionStart 加载记录
         damon_summary = ""
         damon_hm = damon_result.get("heatmap", {})

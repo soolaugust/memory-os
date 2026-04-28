@@ -219,6 +219,25 @@ _REGISTRY: dict = {
     "swap.fault_top_k": (2, int, 1, 10, None,
         "swap fault 时最多 swap in 的 chunk 数"),
 
+    # ── iter430: Spontaneous Recovery — 自发恢复（Pavlov 1927）──────────────────
+    # 认知科学依据：Pavlov (1927) — 条件反射被抑制后经过休息可自发恢复（不需额外强化）。
+    #   Rescorla (1997): 恢复程度与休息时间正相关。
+    #   应用：被 kswapd 驱逐到 swap 的高历史访问 chunk 经过一段时间后可自发恢复。
+    # OS 类比：Linux zswap 解压缩 + MGLRU active 列表晋升 —
+    #   swap 分区中的页面在满足热度条件时被自动提升回 active 列表。
+    "swap.sr_enabled": (True, bool, None, None, None,
+        "iter430: 是否启用 Spontaneous Recovery — swap 中高历史价值 chunk 的自发恢复"),
+    "swap.sr_min_swap_days": (3.0, float, 0.5, 90.0, None,
+        "iter430: 在 swap 中至少 N 天才触发自发恢复（防止抖动）"),
+    "swap.sr_min_access_count": (3, int, 1, 50, None,
+        "iter430: 历史访问次数阈值：>= N 次才视为'曾经重要'的 chunk"),
+    "swap.sr_min_importance": (0.65, float, 0.3, 1.0, None,
+        "iter430: importance 阈值：>= 此值的 chunk 才参与自发恢复"),
+    "swap.sr_recovery_boost": (1.15, float, 1.0, 2.0, None,
+        "iter430: stability 恢复系数 — swap in 时 stability × boost（默认 1.15 ≈ 15% 提升）"),
+    "swap.sr_max_recover_per_run": (5, int, 1, 50, None,
+        "iter430: 每次 SessionStart 最多恢复的 chunk 数量（限制 swap in I/O）"),
+
     # ── OOM Score（迭代38）──
     "oom.auto_protect_quant": (-500, int, -1000, 0, None,
         "量化证据 chunk 的自动 oom_adj（负值=保护）"),
