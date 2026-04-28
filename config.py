@@ -383,6 +383,39 @@ _REGISTRY: dict = {
     "store_vfs.pf_max_bonus": (0.10, float, 0.0, 0.30, None,
         "iter440: PF stability 最大修复系数（new_stab = current_stab × (1 + pf_max_bonus × 0.04)，默认 0.10）"),
 
+    # ── iter441: Emotional Consolidation — 情绪显著性记忆睡眠优先巩固（McGaugh 2000）────────────────
+    # 认知科学依据：McGaugh (2000) "Memory — a century of consolidation" Science 287 —
+    #   情绪事件（高唤醒）通过杏仁核（amygdala）-海马（hippocampus）交互在睡眠期间
+    #   获得优先记忆巩固：norepinephrine 在 NREM SWS 期间增强 hippocampal replay 频率，
+    #   情绪显著性记忆的 synaptic weight 更新量更大。
+    #   Cahill et al. (1994) "Beta-adrenergic activation and memory" (Nature) —
+    #     情绪显著性内容（β-肾上腺素激活条件）的 2-week 长期保留比中性内容高 30-50%。
+    #   La Bar & Cabeza (2006) Meta-analysis: emotional memories show a "consolidation
+    #     advantage" — 情绪唤醒 → 长时记忆保留率更高（效应量 d≈0.5-0.8）。
+    #
+    # memory-os 等价：
+    #   sleep_consolidate 时，emotional_weight >= ec_min_weight 的 chunk 获得额外
+    #   stability 加成（优先巩固）：new_stab = current_stab × (1 + bonus)
+    #   bonus 与 emotional_weight 线性正比：bonus = emotional_weight × ec_scale
+    #   这与 iter409（Flashbulb Memory 写入时一次性加成）形成互补：
+    #     Flashbulb(409) = 写入时 initial_stability 加成（encoding 阶段）
+    #     Emotional Consolidation(441) = 每次 sleep_consolidate 持续加成（consolidation 阶段）
+    #     两者叠加 = 情绪显著性记忆全生命周期的双重保护
+    #
+    # OS 类比：Linux writeback dirty page priority —
+    #   high-priority dirty pages（PG_writeback + high importance）被 pdflush 优先刷写；
+    #   类比：情绪显著性 chunk（emotional_weight 高）在 sleep consolidation 中被优先处理，
+    #   获得更大的 stability 更新量（优先 writeback = 优先巩固）。
+    "store_vfs.ec_enabled": (True, bool, None, None, None,
+        "iter441: 是否启用 Emotional Consolidation — 情绪显著性 chunk 在 sleep 时获得额外 stability 加成"),
+    "store_vfs.ec_min_weight": (0.40, float, 0.0, 1.0, None,
+        "iter441: 触发 Emotional Consolidation 的最低 emotional_weight 阈值（默认 0.40）"),
+    "store_vfs.ec_scale": (0.08, float, 0.0, 0.30, None,
+        "iter441: 情绪巩固加成系数：bonus = emotional_weight × scale，new_stab = current_stab × (1 + bonus)，"
+        "emotional_weight=1.0 时最大 bonus=ec_scale（默认 0.08 ≈ 8%）"),
+    "store_vfs.ec_min_importance": (0.40, float, 0.0, 1.0, None,
+        "iter441: 触发 Emotional Consolidation 的最低 importance 阈值（低重要性情绪 chunk 不受保护）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。

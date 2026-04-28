@@ -7176,6 +7176,14 @@ def sleep_consolidate(
     except Exception:
         pass
 
+    # ── 子操作 10（iter441）：Emotional Consolidation — 情绪显著性记忆睡眠优先巩固 ──
+    # OS 类比：Linux writeback priority — 高优先级 dirty page 被 pdflush 优先刷写到磁盘
+    try:
+        ec_result = apply_emotional_consolidation(conn, project)
+        result["ec_consolidated"] = ec_result.get("consolidated", 0)
+    except Exception:
+        pass
+
     return result
 
 
@@ -8999,6 +9007,96 @@ def apply_proactive_facilitation(
         conn.commit()
 
     return {"facilitated": facilitated, "total_examined": total_examined}
+
+
+# ── iter441: Emotional Consolidation — 情绪显著性记忆睡眠优先巩固（McGaugh 2000）──────────────────
+# 认知科学依据：McGaugh (2000) Science 287 — 情绪事件通过杏仁核-海马交互在睡眠期间优先巩固；
+#   emotional_weight 代理情绪唤醒水平，高唤醒 chunk 在 sleep_consolidate 时获得额外 stability 加成。
+# OS 类比：Linux writeback priority — 高优先级 dirty page 被 pdflush 优先刷写（优先巩固）。
+
+def apply_emotional_consolidation(
+    conn: sqlite3.Connection,
+    project: str,
+) -> dict:
+    """
+    iter441: Emotional Consolidation — 情绪显著性 chunk 在 sleep_consolidate 时获得额外 stability 加成。
+
+    对 emotional_weight >= ec_min_weight 且 importance >= ec_min_importance 的 chunk，
+    按情绪权重比例给予 stability 修复：
+      bonus = emotional_weight × ec_scale
+      new_stab = min(365.0, current_stab × (1 + bonus))
+
+    这是对 iter409（Flashbulb Memory 写入时加成）的补充：
+    Flashbulb = encoding 阶段一次性加成；Emotional Consolidation = consolidation 阶段持续加成。
+
+    范围：不限于 stale chunk（情绪显著性 chunk 无论访问状态都应获得睡眠巩固优势）。
+
+    Returns:
+      {"consolidated": N, "total_examined": N}
+    """
+    try:
+        import config as _cfg_ec
+    except ImportError:
+        return {"consolidated": 0, "total_examined": 0}
+
+    try:
+        if not _cfg_ec.get("store_vfs.ec_enabled"):
+            return {"consolidated": 0, "total_examined": 0}
+        ec_min_weight = _cfg_ec.get("store_vfs.ec_min_weight")
+        ec_scale = _cfg_ec.get("store_vfs.ec_scale")
+        ec_min_importance = _cfg_ec.get("store_vfs.ec_min_importance")
+    except Exception:
+        return {"consolidated": 0, "total_examined": 0}
+
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc)
+    now_iso = now.isoformat()
+
+    try:
+        rows = conn.execute(
+            """SELECT id, stability, emotional_weight
+               FROM memory_chunks
+               WHERE project = ?
+                 AND COALESCE(emotional_weight, 0.0) >= ?
+                 AND COALESCE(importance, 0.0) >= ?
+                 AND COALESCE(stability, 0.1) > 0.1
+               LIMIT 300""",
+            (project, ec_min_weight, ec_min_importance),
+        ).fetchall()
+    except Exception:
+        return {"consolidated": 0, "total_examined": 0}
+
+    total_examined = len(rows)
+    consolidated = 0
+
+    for row in rows:
+        try:
+            cid = row[0] if isinstance(row, (list, tuple)) else row["id"]
+            stab = row[1] if isinstance(row, (list, tuple)) else row["stability"]
+            ew = row[2] if isinstance(row, (list, tuple)) else row["emotional_weight"]
+
+            stab_f = float(stab or 0.1)
+            ew_f = float(ew or 0.0)
+            if stab_f <= 0.1 or ew_f < ec_min_weight:
+                continue
+
+            bonus = ew_f * ec_scale
+            new_stab = min(365.0, stab_f * (1.0 + bonus))
+            if new_stab <= stab_f + 0.0001:
+                continue
+
+            conn.execute(
+                "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=?",
+                (round(new_stab, 4), now_iso, cid),
+            )
+            consolidated += 1
+        except Exception:
+            continue
+
+    if consolidated > 0:
+        conn.commit()
+
+    return {"consolidated": consolidated, "total_examined": total_examined}
 
 
 # ── iter432: Cumulative Interference Effect — 累积干扰加速遗忘（Underwood 1957）──
