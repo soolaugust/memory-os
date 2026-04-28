@@ -274,9 +274,18 @@ net/
 - extractor Stop 时 `broadcast_knowledge_update()` → ipc_msgq
 - loader SessionStart 时 `consume_pending_notifications()` → 消费并注入
 
+**iter260 Extractor Pool 流程**：
+```
+Stop hook → submit_extract_task() → ipc_msgq[extract_task] → extractor_pool(常驻) → store.db
+                                            ↑                          ↓
+                              pool 未运行时 False             broadcast_knowledge_update
+                                    ↓
+                             同步 fallback（原有逻辑）
+```
+
 ---
 
-### 3.6 知识提取子系统（extractor.py）
+### 3.6 知识提取子系统（extractor.py + extractor_pool.py）
 
 类比 Linux VFS write path + journal commit，Session 结束时提取知识写入 store.db。
 
@@ -348,10 +357,15 @@ tool_insight (0.75)      ← Bash 工具输出中的量化结论
        │
        ▼ Stop
 ┌──────────────┐
-│ extractor.py │ → 提取知识 → store.db
+│ extractor.py │ → submit_extract_task() → ipc_msgq[extract_task]
+│  (Stop hook) │   (pool running: <5ms, return)
+│              │ → fallback: 同步提取 → store.db  (pool not running)
 │              │ → session_intent.json (CRIU P2)
 │              │ → checkpoints (CRIU P1)
 │              │ → madvise hints (预热)
+│
+│ extractor_   │ → poll ipc_msgq → _run_extraction_pipeline()
+│ pool.py      │   → store.db → broadcast_knowledge_update
 └──────────────┘
 ```
 
@@ -416,4 +430,6 @@ tool_insight (0.75)      ← Bash 工具输出中的量化结论
 | extend `_ST_TABLE` 21→271 entries | corpus max rc=270，271项表；-26.8ns/chunk；同 iter251 enlarged TLB | ✅ iter256 |
 | rename `_cs` → `_` (dead var) | iter255后_cs不再使用；消除STORE_FAST interning；-13.5ns/chunk | ✅ iter257 |
 | reorder ndp global-first | PGO分支排序：global 67.9%优先；减少分支预测失败；-30.7ns/chunk | ✅ iter258 |
-| 分布式内存 | NUMA / RDMA | 🔜 iter259+ |
+| multi-agent 隔离 | session_id PRIMARY KEY隔离shadow_traces/session_intents；per-session文件防止last-writer-wins | ✅ iter259 |
+| extractor async pool | Stop hook offload → ipc_msgq → extractor_pool kworker；消除 Stop hook 50-150ms I/O 阻塞 | ✅ iter260 |
+| 分布式内存 | NUMA / RDMA | 🔜 iter261+ |

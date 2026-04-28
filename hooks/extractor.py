@@ -2138,6 +2138,24 @@ def main():
     if not text or len(text) < _sysctl("extractor.min_length"):
         sys.exit(0)
 
+    # ── iter260: Async Pool Offload ──────────────────────────────────────────
+    # OS 类比：queue_work(pool, &work) — Stop hook 提交 work_struct 到 kworker pool，
+    #   立即返回（< 5ms），让 extractor_pool 常驻进程异步处理 I/O 密集的 transcript parsing。
+    # pool 未运行（首次启动/崩溃）时退化到同步执行（fallback 路径，与旧行为等价）。
+    try:
+        project    = resolve_project_id()
+        session_id = (hook_input.get("session_id", "")
+                      or os.environ.get("CLAUDE_SESSION_ID", "")
+                      or "unknown")
+        from hooks.extractor_pool import submit_extract_task
+        if submit_extract_task(hook_input, project, session_id):
+            # 成功入队 → Stop hook 立即返回
+            sys.exit(0)
+        # pool 未运行 → fallback 到下方同步路径
+    except Exception:
+        pass  # import 失败 / 任何异常都 fallback 到同步执行
+    # ── 同步 fallback 路径（pool 未运行时） ─────────────────────────────────
+
     # ── 时间片调度：长消息自适应截断（OS 类比：scheduler time-slice）
     # 超过阈值时，只处理前 N 个最可能含决策的段落（标题+代码块+短段落）
     MAX_CHARS = _sysctl("extractor.max_input_chars")

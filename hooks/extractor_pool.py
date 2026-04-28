@@ -1,0 +1,577 @@
+#!/usr/bin/env python3
+"""
+memory-os extractor_pool — iter260 Async Extraction Worker Pool
+
+OS 类比：Linux kworker pool + pdflush writeback
+  - kworker pool: 多个预分配 worker 线程从 work_queue 取任务并行处理
+  - pdflush / flush-X:Y: 后台 writeback 线程，解耦 I/O 等待与进程运行
+
+问题：extractor.py Stop hook 是同步的。
+  transcript parsing (_read_transcript_tail + _extract_from_tool_outputs + _extract_tool_patterns)
+  平均消耗 50-150ms 的文件 I/O。Stop hook 运行期间 Claude 等待这段 I/O。
+
+方案：
+  1. Stop hook 只提交 extract_task 到 ipc_msgq（<5ms）→ 立即返回
+  2. extractor_pool 常驻进程轮询 ipc_msgq → 取任务 → 完整提取 → 写 store.db → broadcast
+  3. 多 session 并发时，各 session 的 extract_task 由独立 Worker 线程并行处理（kworker pool）
+
+架构：
+  ┌─ Stop hook ─────────────────────────────────────────────────────┐
+  │  ipc_send(extract_task) → return 0                              │
+  └─────────────────────────────────────────────────────────────────┘
+                        ↓  ipc_msgq (SQLite)
+  ┌─ extractor_pool (常驻进程) ────────────────────────────────────────┐
+  │  MainLoop: poll every POLL_INTERVAL_SECS                          │
+  │   → ipc_recv(extract_task) → ThreadPoolExecutor.submit(worker_fn) │
+  │                                                                     │
+  │  worker_fn(task):                                                   │
+  │   1. _run_extraction_pipeline(hook_input)   # 复用 extractor.py 逻辑│
+  │   2. write to store.db                                              │
+  │   3. broadcast_knowledge_update via net.agent_notify               │
+  └─────────────────────────────────────────────────────────────────────┘
+
+OS 类比细化：
+  - ipc_msgq     ↔  kernel work_queue (work_struct 链表)
+  - Worker thread ↔  kworker/N (预分配 kthread，取 work_struct 执行)
+  - POOL_WORKERS  ↔  max_active (kworker pool 最大并发数)
+  - poll interval ↔  timer interrupt 唤醒 ksoftirqd 频率
+
+与 retriever_daemon 的差异：
+  - retriever_daemon: Unix socket，每请求一线程（高频低延迟）
+  - extractor_pool: ipc_msgq 轮询，ThreadPoolExecutor（低频高吞吐）
+  - 选择 ipc_msgq 而非 Unix socket：提取任务需持久化（防止 pool 崩溃丢任务）
+"""
+
+import sys
+import os
+import json
+import time
+import logging
+import signal
+import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor, Future
+from datetime import datetime, timezone
+from pathlib import Path
+
+_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(_ROOT))
+
+# ── 配置 ─────────────────────────────────────────────────────────────────────
+MEMORY_OS_DIR = Path.home() / ".claude" / "memory-os"
+STORE_DB = MEMORY_OS_DIR / "store.db"
+
+POOL_WORKERS   = int(os.environ.get("EXTRACTOR_POOL_WORKERS", "3"))
+POLL_INTERVAL  = float(os.environ.get("EXTRACTOR_POOL_POLL", "2.0"))   # seconds
+TASK_BATCH     = int(os.environ.get("EXTRACTOR_POOL_BATCH", "5"))      # per poll
+HEARTBEAT_FILE = MEMORY_OS_DIR / "extractor_pool.heartbeat"
+PID_FILE       = MEMORY_OS_DIR / "extractor_pool.pid"
+LOG_FILE       = MEMORY_OS_DIR / "extractor_pool.log"
+
+POOL_AGENT_ID  = "extractor_pool"
+
+# ── 日志 ─────────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(str(LOG_FILE), encoding="utf-8"),
+        logging.StreamHandler(sys.stderr),
+    ],
+)
+log = logging.getLogger("extractor_pool")
+
+
+# ── 心跳 + PID 管理 ──────────────────────────────────────────────────────────
+
+def _write_pid() -> None:
+    try:
+        PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _write_heartbeat() -> None:
+    try:
+        HEARTBEAT_FILE.write_text(
+            json.dumps({"pid": os.getpid(),
+                        "ts": datetime.now(timezone.utc).isoformat()}),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _cleanup_pid() -> None:
+    try:
+        PID_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+# ── 数据库辅助 ───────────────────────────────────────────────────────────────
+
+def _open_conn() -> sqlite3.Connection:
+    """Open store.db with WAL + reasonable timeout."""
+    from store import open_db, ensure_schema
+    conn = open_db()
+    ensure_schema(conn)
+    return conn
+
+
+def _dequeue_tasks(conn: sqlite3.Connection, limit: int) -> list:
+    """从 ipc_msgq 取 extract_task 消息（QUEUED→CONSUMED 原子）。"""
+    from store_vfs import ipc_recv
+    return ipc_recv(conn, POOL_AGENT_ID, msg_type="extract_task", limit=limit)
+
+
+# ── Worker：运行提取 pipeline ─────────────────────────────────────────────────
+
+def _run_extraction_pipeline(payload: dict) -> dict:
+    """
+    复用 extractor.py 中的所有提取函数，在 pool worker 线程中执行。
+
+    payload 字段（由 Stop hook 构造）：
+      - session_id: str
+      - project: str
+      - text: str               (last_assistant_message，已截断)
+      - transcript_path: str    (用于 _extract_from_tool_outputs 等)
+      - hook_input_raw: dict    (完整 hook_input，fallback 使用)
+      - submitted_at: str       (ISO)
+
+    返回：{status, decisions, excluded, reasoning, constraints,
+           causal_chains, conv_summaries, page_faults, elapsed_ms}
+    """
+    import time as _time
+    t0 = _time.time()
+
+    session_id     = payload.get("session_id", "unknown")
+    project        = payload.get("project", "unknown")
+    text           = payload.get("text", "")
+    transcript_path = payload.get("transcript_path", "")
+    hook_input_raw = payload.get("hook_input_raw", {})
+
+    result = {
+        "status": "ok",
+        "session_id": session_id,
+        "project": project,
+        "decisions": 0,
+        "excluded": 0,
+        "reasoning": 0,
+        "constraints": 0,
+        "causal_chains": 0,
+        "conv_summaries": 0,
+        "page_faults": 0,
+        "elapsed_ms": 0.0,
+    }
+
+    try:
+        # ── import extractor symbols（在 worker 线程内延迟 import 节省主线程启动时间）
+        from hooks.extractor import (
+            _sysctl,
+            _cow_prescan,
+            DECISION_SIGNALS, EXCLUDED_SIGNALS, REASONING_SIGNALS,
+            _extract_by_signals,
+            _extract_structured_decisions,
+            _extract_comparisons,
+            _extract_causal_chains,
+            _extract_quantitative_conclusions,
+            _extract_constraints,
+            _extract_conversation_summary,
+            _extract_from_tool_outputs,
+            _extract_tool_patterns,
+            _extract_page_fault_candidates,
+            _write_page_fault_log,
+            _extract_topic,
+            _write_madvise_hints,
+            _deduplicate,
+            _read_transcript_tail,
+        )
+        from store import (open_db, ensure_schema, insert_chunk,
+                           kswapd_scan, cgroup_throttle_check,
+                           dmesg_log, DMESG_INFO, DMESG_DEBUG, DMESG_WARN,
+                           aimd_window)
+        from schema import MemoryChunk
+
+        if not text or len(text) < _sysctl("extractor.min_length"):
+            result["status"] = "skip_too_short"
+            return result
+
+        # COW prescan
+        _text_long = len(text) > 500
+        cow_hit = _text_long or _cow_prescan(text)
+        if not cow_hit:
+            page_faults = _extract_page_fault_candidates(text)
+            _write_page_fault_log(page_faults, session_id)
+            topic = _extract_topic(text)
+            _write_madvise_hints(text, [], [], [], [], project, session_id, topic)
+            result["status"] = "cow_skip"
+            result["page_faults"] = len(page_faults)
+            return result
+
+        # ── 提取各类 chunk（复用 extractor.py 逻辑）─────────────────────────
+        decisions = (
+            _extract_by_signals(text, DECISION_SIGNALS)
+            + _extract_structured_decisions(text)
+        )
+        excluded  = _extract_by_signals(text, EXCLUDED_SIGNALS)
+        reasoning = _extract_by_signals(text, REASONING_SIGNALS)
+
+        comp_decisions, comp_exclusions = _extract_comparisons(text)
+        decisions.extend(comp_decisions)
+        excluded.extend(comp_exclusions)
+
+        causal_chains     = _deduplicate(_extract_causal_chains(text))
+        quant_conclusions = _extract_quantitative_conclusions(text)
+        decisions.extend(quant_conclusions)
+        constraints = _extract_constraints(text)
+
+        decisions = _deduplicate(decisions)
+        excluded  = _deduplicate(excluded)
+        reasoning = _deduplicate(reasoning)
+        constraints = _deduplicate(constraints)
+
+        _transcript_extra = _read_transcript_tail(transcript_path) if transcript_path else []
+        conv_summaries = _extract_conversation_summary(text, extra_texts=_transcript_extra)
+        page_faults    = _extract_page_fault_candidates(text)
+
+        # AIMD 策略（仅过滤，不影响写入路径）
+        try:
+            _aimd_conn = open_db()
+            ensure_schema(_aimd_conn)
+            aimd_info   = aimd_window(_aimd_conn, project)
+            aimd_policy = aimd_info["policy"]
+            _aimd_conn.close()
+        except Exception:
+            aimd_policy = "full"
+
+        if aimd_policy == "conservative":
+            excluded = []; conv_summaries = []
+        elif aimd_policy == "moderate":
+            conv_summaries = []
+
+        if not decisions and not excluded and not reasoning and not conv_summaries and not constraints and not causal_chains:
+            _write_page_fault_log(page_faults, session_id)
+            result["status"] = "nothing_extracted"
+            result["page_faults"] = len(page_faults)
+            return result
+
+        # ── 从 transcript 补充提取 tool 模式 ─────────────────────────────────
+        tool_decisions = []
+        tool_excluded  = []
+        tool_constraints = []
+        if transcript_path:
+            try:
+                _tc = open_db()
+                ensure_schema(_tc)
+                _extract_from_tool_outputs(transcript_path, session_id, project, _tc)
+                _extract_tool_patterns(transcript_path, _tc, project, session_id)
+                _tc.commit()
+                _tc.close()
+            except Exception:
+                pass
+
+        # ── 批量写入 ─────────────────────────────────────────────────────────
+        conn = open_db()
+        ensure_schema(conn)
+
+        incoming_count = (len(decisions) + len(excluded) + len(reasoning)
+                          + len(conv_summaries) + len(constraints) + len(causal_chains))
+
+        ksw = kswapd_scan(conn, project, incoming_count)
+        if ksw["evicted_count"] > 0:
+            conn.commit()
+        throttle = cgroup_throttle_check(conn, project, incoming_count)
+        throttle_active   = throttle["throttled"]
+        importance_factor = throttle.get("importance_factor", 1.0)
+        oom_adj_delta     = throttle.get("oom_adj_delta", 0)
+
+        def _write_chunks(texts, chunk_type, base_importance):
+            written = 0
+            for t in texts:
+                if not t or not t.strip():
+                    continue
+                imp = base_importance
+                if throttle_active:
+                    imp = round(imp * importance_factor, 3)
+                chunk = MemoryChunk(
+                    project=project,
+                    source_session=session_id,
+                    chunk_type=chunk_type,
+                    content=t,
+                    summary=t[:120],
+                    tags=[chunk_type, project],
+                    importance=imp,
+                    retrievability=0.5,
+                )
+                insert_chunk(conn, chunk.to_dict())
+                written += 1
+            return written
+
+        _write_chunks(decisions,     "decision",             0.8)
+        _write_chunks(excluded,      "excluded_path",        0.6)
+        _write_chunks(reasoning,     "reasoning_chain",      0.75)
+        _write_chunks(conv_summaries,"conversation_summary", 0.65)
+        _write_chunks(constraints,   "design_constraint",    0.85)
+        _write_chunks(causal_chains, "causal_chain",         0.7)
+        conn.commit()
+
+        # ── Goals 进度更新（per-session 幂等，来自 extractor.py P2 修复）──────
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            _now_iso = _dt.now(_tz.utc).isoformat()
+            conn.execute("ALTER TABLE goals ADD COLUMN last_progress_session TEXT DEFAULT ''")
+        except Exception:
+            pass
+        try:
+            conn.execute(
+                """UPDATE goals SET progress = MIN(1.0, progress + 0.05),
+                   updated_at = ?, last_progress_session = ?
+                   WHERE project = ? AND status = 'active'
+                     AND (last_progress_session IS NULL OR last_progress_session != ?)""",
+                [datetime.now(timezone.utc).isoformat(), session_id, project, session_id]
+            )
+            conn.commit()
+        except Exception:
+            pass
+
+        # ── dmesg ────────────────────────────────────────────────────────────
+        elapsed = (_time.time() - t0) * 1000
+        dmesg_log(conn, DMESG_INFO, "extractor_pool",
+                  f"extracted: d={len(decisions)} e={len(excluded)} r={len(reasoning)} "
+                  f"s={len(conv_summaries)} c={len(constraints)} cc={len(causal_chains)} "
+                  f"pf={len(page_faults)} {elapsed:.1f}ms",
+                  session_id=session_id, project=project)
+        conn.commit()
+        conn.close()
+
+        # ── Page fault log ──────────────────────────────────────────────────
+        _write_page_fault_log(page_faults, session_id)
+
+        # ── 广播知识更新 ─────────────────────────────────────────────────────
+        try:
+            from net.agent_notify import broadcast_knowledge_update
+            stats = {
+                "decisions":   len(decisions),
+                "constraints": len(constraints),
+                "chunks":      incoming_count,
+            }
+            broadcast_knowledge_update(project, session_id, stats)
+        except Exception:
+            pass
+
+        result.update({
+            "decisions":    len(decisions),
+            "excluded":     len(excluded),
+            "reasoning":    len(reasoning),
+            "constraints":  len(constraints),
+            "causal_chains":len(causal_chains),
+            "conv_summaries":len(conv_summaries),
+            "page_faults":  len(page_faults),
+            "elapsed_ms":   round(elapsed, 1),
+        })
+
+    except Exception as e:
+        result["status"] = f"error: {e}"
+        log.exception("worker pipeline error for session=%s", session_id)
+
+    result["elapsed_ms"] = round((_time.time() - t0) * 1000, 1)
+    return result
+
+
+# ── 主循环 ────────────────────────────────────────────────────────────────────
+
+_shutdown = threading.Event()
+
+
+def _signal_handler(sig, frame):
+    log.info("signal %s received, shutting down", sig)
+    _shutdown.set()
+
+
+def run_pool():
+    """
+    常驻进程主循环。
+    OS 类比：kworker/u16:X — 绑定到特定 workqueue，持续取 work 执行。
+    """
+    _write_pid()
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+
+    log.info("extractor_pool started: pid=%d workers=%d poll=%.1fs",
+             os.getpid(), POOL_WORKERS, POLL_INTERVAL)
+
+    executor = ThreadPoolExecutor(max_workers=POOL_WORKERS,
+                                  thread_name_prefix="ext-worker")
+    active_futures: list[Future] = []
+
+    try:
+        while not _shutdown.is_set():
+            _write_heartbeat()
+
+            # 清理已完成 futures，记录结果
+            done = [f for f in active_futures if f.done()]
+            for f in done:
+                active_futures.remove(f)
+                try:
+                    res = f.result()
+                    log.info("task done: status=%s session=%s elapsed=%.1fms",
+                             res.get("status"), res.get("session_id"), res.get("elapsed_ms", 0))
+                except Exception as e:
+                    log.error("task raised exception: %s", e)
+
+            # 若 worker slots 已满，等下次 poll
+            if len(active_futures) >= POOL_WORKERS:
+                _shutdown.wait(timeout=POLL_INTERVAL)
+                continue
+
+            # 从 ipc_msgq 取任务
+            available = POOL_WORKERS - len(active_futures)
+            batch     = min(available, TASK_BATCH)
+            tasks     = []
+            try:
+                conn = _open_conn()
+                tasks = _dequeue_tasks(conn, batch)
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                log.warning("dequeue error: %s", e)
+
+            for msg in tasks:
+                payload = msg.get("payload", {})
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except Exception:
+                        payload = {}
+                future = executor.submit(_run_extraction_pipeline, payload)
+                active_futures.append(future)
+
+            if not tasks:
+                _shutdown.wait(timeout=POLL_INTERVAL)
+
+    finally:
+        log.info("extractor_pool shutting down, waiting for %d active tasks",
+                 len(active_futures))
+        executor.shutdown(wait=True, cancel_futures=False)
+        _cleanup_pid()
+        log.info("extractor_pool stopped")
+
+
+# ── CLI 辅助：健康检查 ────────────────────────────────────────────────────────
+
+def check_health() -> dict:
+    """检查 extractor_pool 是否运行中。可被管理脚本调用。"""
+    if not HEARTBEAT_FILE.exists():
+        return {"running": False, "reason": "no heartbeat file"}
+    try:
+        data = json.loads(HEARTBEAT_FILE.read_text(encoding="utf-8"))
+        pid  = data.get("pid", 0)
+        ts   = data.get("ts", "")
+        # 检查进程是否存活
+        if pid:
+            try:
+                os.kill(pid, 0)
+                alive = True
+            except (ProcessLookupError, PermissionError):
+                alive = False
+        else:
+            alive = False
+        # 检查心跳是否过期（> 30s 认为 hung）
+        stale = False
+        if ts:
+            from datetime import datetime, timezone
+            last = datetime.fromisoformat(ts)
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - last).total_seconds()
+            stale = age > 30
+        return {"running": alive and not stale, "pid": pid, "ts": ts, "stale": stale}
+    except Exception as e:
+        return {"running": False, "reason": str(e)}
+
+
+def submit_extract_task(hook_input: dict, project: str, session_id: str) -> bool:
+    """
+    Stop hook 调用此函数提交异步提取任务。
+    返回 True 表示成功入队，False 表示 pool 未运行（需 fallback 同步执行）。
+
+    OS 类比：queue_work(pool, &my_work) — 提交 work_struct 到 workqueue，
+    如果 workqueue 未初始化则返回 -EINVAL（调用方同步执行）。
+    """
+    health = check_health()
+    if not health.get("running"):
+        return False
+
+    # 构造 extract_task payload
+    text = hook_input.get("last_assistant_message", "")
+    from config import get as _sysctl
+    MAX_CHARS = _sysctl("extractor.max_input_chars")
+    if len(text) > MAX_CHARS:
+        # 与 extractor.py main() 相同的截断逻辑
+        import re
+        signal_words = r'(?:选择|决定|推荐|结论|采用|排除|不用|放弃|根本原因|为什么|核心)'
+        filtered_lines = []
+        in_code = False
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith('```'):
+                in_code = not in_code
+                if len('\n'.join(filtered_lines)) < MAX_CHARS:
+                    filtered_lines.append(line)
+                continue
+            if in_code:
+                continue
+            if (stripped.startswith('#') or re.search(signal_words, stripped)
+                    or stripped.startswith('>') or stripped.startswith('|')):
+                filtered_lines.append(line)
+        text = '\n'.join(filtered_lines)[:MAX_CHARS]
+
+    payload = {
+        "type":            "extract_task",
+        "session_id":      session_id,
+        "project":         project,
+        "text":            text,
+        "transcript_path": hook_input.get("transcript_path", ""),
+        "hook_input_raw":  hook_input,
+        "submitted_at":    datetime.now(timezone.utc).isoformat(),
+    }
+
+    try:
+        from store import open_db, ensure_schema
+        from store_vfs import ipc_send
+        conn = open_db()
+        ensure_schema(conn)
+        ipc_send(conn, source=session_id, target=POOL_AGENT_ID,
+                 msg_type="extract_task", payload=payload,
+                 priority=5, ttl_seconds=300)
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        log.warning("submit_extract_task failed: %s", e)
+        return False
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="memory-os extractor pool")
+    parser.add_argument("cmd", choices=["start", "health", "status"],
+                        nargs="?", default="start")
+    args = parser.parse_args()
+
+    if args.cmd == "health":
+        h = check_health()
+        print(json.dumps(h, ensure_ascii=False))
+        sys.exit(0 if h.get("running") else 1)
+    elif args.cmd == "status":
+        h = check_health()
+        status = "running" if h.get("running") else "stopped"
+        print(f"extractor_pool: {status}")
+        if h.get("pid"):
+            print(f"  pid: {h['pid']}")
+        if h.get("ts"):
+            print(f"  last heartbeat: {h['ts']}")
+        sys.exit(0)
+    else:
+        run_pool()

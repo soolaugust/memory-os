@@ -14,6 +14,14 @@ echo "========================================"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Memory-OS 持续迭代启动"
 echo "========================================"
 
+# ── iter260: 启动 extractor_pool 常驻进程 ────────────────────────────────────
+# OS 类比：systemd service start — 确保后台 kworker pool 在迭代开始前就位
+POOL_WRAPPER="${SCRIPT_DIR}/hooks/extractor_pool_wrapper.sh"
+if [ -f "$POOL_WRAPPER" ]; then
+    bash "$POOL_WRAPPER" ensure
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] extractor_pool: $(bash "$POOL_WRAPPER" status 2>&1 | head -1)"
+fi
+
 ROUND=0
 while [ $ROUND -lt $MAX_ROUNDS ]; do
     ROUND=$((ROUND + 1))

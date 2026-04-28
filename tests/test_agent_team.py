@@ -1068,3 +1068,144 @@ def test_A17_writer_ctx_pressure_per_session_file_isolation(tmp_path, monkeypatc
     file_unknown = _write_pressure_state("unknown", 0.20, "none")
     assert file_unknown == global_file, \
         f"'unknown' session_id should write to global file, got {file_unknown}"
+
+
+# ── A18: submit_extract_task — pool 未运行时返回 False ─────────────────────
+def test_A18_submit_extract_task_returns_false_when_pool_not_running(tmp_path, monkeypatch):
+    """
+    submit_extract_task() 在 pool 未运行时应返回 False（不入队），
+    使 extractor.py fallback 到同步执行路径。
+
+    OS 类比：queue_work() 在 workqueue 未初始化时返回 -EINVAL —
+    调用方在 pool 不存在时应能优雅降级。
+    """
+    import sys
+    _ROOT = Path(__file__).parent.parent
+    if str(_ROOT) not in sys.path:
+        sys.path.insert(0, str(_ROOT))
+
+    mem_dir = tmp_path / "memory-os"
+    mem_dir.mkdir()
+
+    import hooks.extractor_pool as _pool_mod
+    # pool 未运行 → heartbeat 文件不存在
+    monkeypatch.setattr(_pool_mod, "HEARTBEAT_FILE", mem_dir / "extractor_pool.heartbeat")
+    monkeypatch.setattr(_pool_mod, "PID_FILE", mem_dir / "extractor_pool.pid")
+
+    hook_input = {
+        "last_assistant_message": "选择使用 SQLite WAL 模式，因为并发读写性能更好",
+        "session_id": "test-session-submit",
+        "transcript_path": "",
+    }
+    result = _pool_mod.submit_extract_task(hook_input, "test-project", "test-session-submit")
+    assert result is False, \
+        f"submit_extract_task should return False when pool not running, got: {result}"
+
+
+# ── A19: submit_extract_task — pool 运行时入队到 ipc_msgq ──────────────────
+def test_A19_submit_extract_task_enqueues_to_ipc_msgq(fresh_db, monkeypatch, tmp_path):
+    """
+    submit_extract_task() 在 pool 健康时应将 extract_task 写入 ipc_msgq。
+
+    验证：
+    1. check_health() mock 为 running=True
+    2. submit_extract_task() 返回 True
+    3. ipc_msgq 表中有对应的 extract_task 消息
+    4. payload 包含正确的 session_id、project、text
+
+    OS 类比：queue_work(pool, &work) 成功入队 → work_struct 出现在 work_list 中。
+    """
+    db_dir, db_path, conn = fresh_db
+
+    import store_vfs as _vfs
+    monkeypatch.setattr(_vfs, "STORE_DB", db_path)
+
+    import hooks.extractor_pool as _pool_mod
+    monkeypatch.setattr(_pool_mod, "STORE_DB", db_path)
+
+    # mock check_health → running=True
+    monkeypatch.setattr(_pool_mod, "check_health", lambda: {"running": True, "pid": 99999})
+
+    hook_input = {
+        "last_assistant_message": "决定采用 shadow_traces DB 隔离方案，因为全局文件存在 last-writer-wins 竞争",
+        "session_id": "test-enqueue-session",
+        "transcript_path": "",
+    }
+    result = _pool_mod.submit_extract_task(hook_input, "test-enqueue-project", "test-enqueue-session")
+    assert result is True, f"submit_extract_task should return True when pool healthy, got: {result}"
+
+    # 验证 ipc_msgq 中有对应消息
+    row = conn.execute(
+        "SELECT target_agent, msg_type, payload, status FROM ipc_msgq "
+        "WHERE msg_type='extract_task' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row is not None, "extract_task message should be in ipc_msgq"
+    target, msg_type, payload_str, status = row
+    assert target == "extractor_pool", f"target_agent should be 'extractor_pool', got: {target}"
+    assert status == "QUEUED", f"status should be QUEUED, got: {status}"
+
+    payload = json.loads(payload_str) if isinstance(payload_str, str) else payload_str
+    assert payload.get("session_id") == "test-enqueue-session", \
+        f"Wrong session_id in payload: {payload}"
+    assert payload.get("project") == "test-enqueue-project", \
+        f"Wrong project in payload: {payload}"
+    assert "shadow_traces" in payload.get("text", ""), \
+        f"Text not preserved in payload: {payload.get('text', '')[:80]}"
+
+
+# ── A20: dequeue_tasks — pool worker 从 ipc_msgq 取任务 ─────────────────────
+def test_A20_pool_dequeue_extract_task_from_ipc_msgq(fresh_db, monkeypatch):
+    """
+    extractor_pool 从 ipc_msgq 取 extract_task 后应标记 CONSUMED，
+    且第二次取应为空。
+
+    OS 类比：kworker 从 work_list 取出 work_struct 后将其从队列删除（list_del_init），
+    保证 work 只被执行一次（one-shot 语义）。
+
+    验证：
+    1. 手动插入 2 条 extract_task 消息
+    2. _dequeue_tasks() 取出 batch=2 → 返回 2 条
+    3. 再次取 → 返回 0 条（已 CONSUMED）
+    """
+    db_dir, db_path, conn = fresh_db
+
+    import store_vfs as _vfs
+    monkeypatch.setattr(_vfs, "STORE_DB", db_path)
+
+    from store_vfs import ipc_send
+    import hooks.extractor_pool as _pool_mod
+    monkeypatch.setattr(_pool_mod, "STORE_DB", db_path)
+
+    # 插入 2 条 extract_task
+    for i in range(2):
+        ipc_send(conn, source=f"session-{i}", target="extractor_pool",
+                 msg_type="extract_task",
+                 payload={"session_id": f"session-{i}", "project": "proj",
+                          "text": f"决策内容{i}", "transcript_path": ""},
+                 priority=5, ttl_seconds=300)
+    conn.commit()
+
+    # pool worker 取任务
+    tasks = _pool_mod._dequeue_tasks(conn, limit=10)
+    conn.commit()
+    assert len(tasks) == 2, f"Should dequeue 2 tasks, got {len(tasks)}"
+
+    # 验证 payload
+    for t in tasks:
+        payload = t.get("payload", {})
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        assert "session_id" in payload, f"payload missing session_id: {payload}"
+        assert payload.get("project") == "proj", f"Wrong project: {payload}"
+
+    # 第二次取应为空（已 CONSUMED）
+    tasks2 = _pool_mod._dequeue_tasks(conn, limit=10)
+    conn.commit()
+    assert len(tasks2) == 0, \
+        f"Second dequeue should be empty (CONSUMED), got: {len(tasks2)}"
+
+    # 验证数据库中状态
+    consumed_count = conn.execute(
+        "SELECT COUNT(*) FROM ipc_msgq WHERE msg_type='extract_task' AND status='CONSUMED'"
+    ).fetchone()[0]
+    assert consumed_count == 2, f"Should have 2 CONSUMED tasks, got: {consumed_count}"
