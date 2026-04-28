@@ -2011,6 +2011,20 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
     except Exception:
         pass  # enactment effect 写入失败不阻塞主流程
 
+    # iter450: Predictive Memory Encoding — 预期将来被测试增强编码（Roediger & Karpicke 2011）
+    try:
+        _pme_project = d.get("project", "")
+        _pme_chunk_type = d.get("chunk_type", "")
+        _pme_base_stability = d.get("stability", 1.0)
+        if _pme_project:
+            apply_predictive_memory_encoding(
+                conn, d["id"], _pme_project,
+                chunk_type=_pme_chunk_type,
+                base_stability=float(_pme_base_stability or 1.0)
+            )
+    except Exception:
+        pass  # PME 写入失败不阻塞主流程
+
 
 # ── iter403：Cue-Dependent Forgetting — Context-Sensitive Retrieval（Tulving 1974）──
 #
@@ -7791,6 +7805,68 @@ def apply_enactment_effect(
         if new_stability > stab + 0.001:
             conn.execute("UPDATE memory_chunks SET stability=? WHERE id=?", (new_stability, chunk_id))
         return new_stability
+    except Exception:
+        return base_stability
+
+
+def apply_predictive_memory_encoding(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    project: str,
+    chunk_type: str = "",
+    base_stability: float = 1.0,
+) -> float:
+    """
+    iter450: Predictive Memory Encoding — 预期将来被测试增强编码（Roediger & Karpicke 2011）。
+    近期同项目同 chunk_type 被频繁检索 → 大脑处于"测试预期"状态 →
+    新写入同类型 chunk 获得额外 initial_stability 加成（elaborative encoding）。
+    """
+    if not chunk_id or not project:
+        return base_stability
+    try:
+        import config as _config
+        if not _config.get("store_vfs.pme_enabled"):
+            return base_stability
+        row = conn.execute(
+            "SELECT stability, importance FROM memory_chunks WHERE id=?",
+            (chunk_id,)
+        ).fetchone()
+        if not row:
+            return base_stability
+        if hasattr(row, 'keys'):
+            stab = float(row["stability"] or base_stability)
+            importance = float(row["importance"] or 0.0)
+        else:
+            stab = float(row[0] or base_stability)
+            importance = float(row[1] or 0.0)
+        pme_min_importance = float(_config.get("store_vfs.pme_min_importance") or 0.45)
+        if importance < pme_min_importance:
+            return stab
+        pme_window_hours = float(_config.get("store_vfs.pme_window_hours") or 6.0)
+        pme_min_queries = int(_config.get("store_vfs.pme_min_queries") or 3)
+        pme_ref_count = int(_config.get("store_vfs.pme_ref_count") or 10)
+        pme_boost = float(_config.get("store_vfs.pme_boost") or 0.12)
+        cutoff = (datetime.now(timezone.utc) -
+                  timedelta(hours=pme_window_hours)).isoformat()
+        count_row = conn.execute(
+            """SELECT COUNT(*) FROM recall_traces
+               WHERE project=? AND timestamp >= ? AND injected > 0""",
+            (project, cutoff)
+        ).fetchone()
+        if count_row:
+            raw_count = int(count_row[0] if isinstance(count_row, (list, tuple)) else count_row[0])
+        else:
+            raw_count = 0
+        if raw_count < pme_min_queries:
+            return stab
+        pme_factor = min(1.0, raw_count / max(1, pme_ref_count))
+        new_stab = min(365.0, stab * (1.0 + pme_boost * pme_factor))
+        if new_stab > stab + 0.001:
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?",
+                (new_stab, chunk_id)
+            )
+        return new_stab
     except Exception:
         return base_stability
 
