@@ -725,6 +725,26 @@ _REGISTRY: dict = {
     "consolidation.max_chunks": (50, int, 5, 500, None,
         "每次 SessionStart 最多巩固的 chunk 数量（iter413，按 importance 排序取前 N 个）"),
 
+    # ── iter428: Event Segmentation — Session Boundary Consolidation Gate ───────────────────
+    # 认知科学依据：Zacks et al. (2007) Event Segmentation Theory (Psychological Science) —
+    #   人类将连续经验分割为离散事件单元，边界处记忆编码最强（boundary advantage）。
+    #   Radvansky & Copeland (2006) "Walking through doorways causes forgetting" —
+    #   穿越事件边界（空间/时间）触发短暂记忆抑制（doorway effect）：
+    #   旧情境末尾的信息被短暂压制（约 5 分钟），新情境开始后的信息获得额外编码加成。
+    # OS 类比：ext4 jbd2 journal commit boundary —
+    #   新 epoch 首批写入的 page（刚越过 commit point）= 最高一致性保证（boundary boost）；
+    #   commit 前的 dirty page（旧 epoch 末尾）= 不稳定窗口（doorway penalty）。
+    "consolidation.boundary_enabled": (True, bool, None, None, None,
+        "是否启用 iter428 Event Segmentation：session boundary 处分叉 sleep consolidation 逻辑"),
+    "consolidation.boundary_multiplier": (1.5, float, 1.0, 3.0, None,
+        "iter428: boundary boost 乘子 — boundary_proximity=+1.0 时 stability × (boost_factor + (multiplier-1)×proximity)，"
+        "默认 1.5：boundary chunk 比普通 chunk 多 +50% sleep consolidation 加成"),
+    "consolidation.boundary_grace_secs": (300, int, 30, 3600, None,
+        "iter428: session 开始后多少秒内写入的 chunk 被视为 boundary boost 候选（默认 5 分钟）"),
+    "consolidation.doorway_penalty": (0.05, float, 0.0, 0.3, None,
+        "iter428: doorway effect stability 惩罚系数（boundary_proximity < -0.5 时应用，"
+        "默认 0.05 = 最多 5% stability 惩罚，模拟 Radvansky 2006 doorway forgetting）"),
+
     # ── iter390: Prospective Memory — 展望记忆触发 ───────────────────────────
     # 认知科学依据：Einstein & McDaniel (1990) Prospective Memory —
     #   意图性记忆（"记得在X时做Y"）需要在未来条件满足时主动提取。

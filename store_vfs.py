@@ -400,6 +400,16 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     except Exception:
         pass
 
+    # ── iter428：boundary_proximity — 事件边界距离（Zacks et al. 2007 Event Segmentation）──
+    # OS 类比：ext4 jbd2 journal commit boundary —
+    #   刚越过 journal commit 的 page（新 epoch 首批写入）稳定性最高；
+    #   commit 前的 dirty page（旧 epoch 末尾）处于"不稳定窗口"（doorway effect）。
+    # boundary_proximity ∈ [-1.0, +1.0]：
+    #   +1.0 = 本 session 刚开始时写入（刚越过 session boundary → encoding boost）
+    #    0.0 = 中性（会话中间写入，无边界效应）
+    #   -1.0 = 上一 session 末尾写入（doorway effect → 短暂 retrieval penalty）
+    _safe_add_column(conn, "memory_chunks", "boundary_proximity", "REAL DEFAULT 0.0")
+
     # ── 迭代317：knowledge_versions — 前摄干扰控制（Proactive Interference）──
     # OS 类比：Linux kernel module versioning — 加载新模块版本时标记旧版本为
     #   MODULE_STATE_GOING，确保旧版本不再被新请求调用。
@@ -1956,6 +1966,25 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
                 pass  # column may not exist in older schemas
     except Exception:
         pass  # iter415 init 失败不阻塞主流程
+
+    # iter428: Event Segmentation — 写入时计算 boundary_proximity（Zacks et al. 2007）
+    # session_started_at 由 extractor 通过 chunk_dict 传入（可选）；缺省时无法计算边界亲近度
+    try:
+        _bp_session_started = d.get("session_started_at")
+        _bp_created = d.get("created_at")
+        if _bp_session_started and _bp_created:
+            _bp_val = compute_boundary_proximity(
+                created_at=_bp_created,
+                session_started_at=_bp_session_started,
+                prev_session_ended_at=d.get("prev_session_ended_at"),
+            )
+            if _bp_val != 0.0:
+                conn.execute(
+                    "UPDATE memory_chunks SET boundary_proximity=? WHERE id=?",
+                    (_bp_val, d["id"])
+                )
+    except Exception:
+        pass  # boundary_proximity 写入失败不阻塞主流程
 
 
 # ── iter403：Cue-Dependent Forgetting — Context-Sensitive Retrieval（Tulving 1974）──
@@ -4224,32 +4253,45 @@ def run_sleep_consolidation(
     conn: sqlite3.Connection,
     project: str,
     now_iso: str = None,
+    session_started_at: str = None,
 ) -> dict:
     """
     iter413: Sleep Consolidation — SessionStart 时对上一 session 的高重要性 chunk 应用离线巩固。
+    iter428: Event Segmentation Gate — 分叉 boundary_proximity 处理。
 
     Stickgold (2005): NREM 睡眠中海马重放最近学习的记忆 → stability 提升 20-30%。
-    memory-os 保守实现：× boost_factor（默认 1.06）模拟 "light sleep consolidation"。
+    Zacks et al. (2007) Event Segmentation: boundary 处记忆编码最强（boundary_proximity > 0）。
+    Radvansky (2006) doorway effect: 边界前的 chunk 受短暂抑制（boundary_proximity < -0.5）。
 
-    选择标准：
-      1. importance >= consolidation.min_importance（只有重要记忆值得 replay）
-      2. last_accessed within consolidation.window_hours（只对上一 session 访问的 chunk）
-      3. 按 importance 降序取前 max_chunks 个
+    iter428 分叉逻辑（基于 boundary_proximity 列）：
+      boundary_proximity > 0    → 边界加成：boost_factor × boundary_multiplier（刚越过 session boundary）
+      boundary_proximity < -0.5 → doorway 惩罚：stability -= stability × doorway_penalty（上一 session 末尾）
+      其余                      → 标准 sleep consolidation（× boost_factor）
 
-    返回 dict: {"consolidated": int, "project": str, "boost_factor": float}
+    返回 dict: {"consolidated": int, "project": str, "boost_factor": float,
+                "boundary_boosted": int, "doorway_penalized": int}
     """
     import config as _config
     if not _config.get("consolidation.enabled"):
-        return {"consolidated": 0, "project": project, "boost_factor": 1.0}
+        return {"consolidated": 0, "project": project, "boost_factor": 1.0,
+                "boundary_boosted": 0, "doorway_penalized": 0}
     if not project:
-        return {"consolidated": 0, "project": project, "boost_factor": 1.0}
+        return {"consolidated": 0, "project": project, "boost_factor": 1.0,
+                "boundary_boosted": 0, "doorway_penalized": 0}
 
     if now_iso is None:
         now_iso = datetime.now(timezone.utc).isoformat()
+    if session_started_at is None:
+        session_started_at = now_iso
+
     boost_factor = _config.get("consolidation.boost_factor")
     min_importance = _config.get("consolidation.min_importance")
     window_hours = _config.get("consolidation.window_hours")
     max_chunks = _config.get("consolidation.max_chunks")
+    # iter428 params
+    boundary_multiplier = _config.get("consolidation.boundary_multiplier")
+    doorway_penalty = _config.get("consolidation.doorway_penalty")
+    boundary_enabled = _config.get("consolidation.boundary_enabled")
 
     try:
         from datetime import timedelta as _td
@@ -4257,8 +4299,9 @@ def run_sleep_consolidation(
         _cutoff = (_now_dt - _td(hours=window_hours)).isoformat()
 
         # 选取：high-importance + recently accessed + this project
+        # iter428: 加上 boundary_proximity 列（若存在）
         rows = conn.execute(
-            "SELECT id, stability FROM memory_chunks "
+            "SELECT id, stability, COALESCE(boundary_proximity, 0.0) as bp FROM memory_chunks "
             "WHERE project=? AND importance >= ? AND last_accessed >= ? "
             "  AND COALESCE(stability, 0) < 365.0 "
             "ORDER BY importance DESC LIMIT ?",
@@ -4266,22 +4309,45 @@ def run_sleep_consolidation(
         ).fetchall()
 
         if not rows:
-            return {"consolidated": 0, "project": project, "boost_factor": boost_factor}
+            return {"consolidated": 0, "project": project, "boost_factor": boost_factor,
+                    "boundary_boosted": 0, "doorway_penalized": 0}
 
         consolidated = 0
+        boundary_boosted = 0
+        doorway_penalized = 0
+
         for row in rows:
             cid = row[0] if isinstance(row, (list, tuple)) else row["id"]
             stab = float(row[1] if isinstance(row, (list, tuple)) else row["stability"]) or 1.0
-            new_stab = min(365.0, stab * boost_factor)
+            bp = float(row[2] if isinstance(row, (list, tuple)) else row["bp"])
+
+            if boundary_enabled and bp > 0.0:
+                # iter428: Boundary encoding boost — 刚越过 session boundary
+                # 线性插值：proximity=1.0 时乘以 boundary_multiplier，proximity=0 时乘以 boost_factor
+                effective_factor = boost_factor + (boundary_multiplier - 1.0) * bp
+                new_stab = min(365.0, stab * effective_factor)
+                boundary_boosted += 1
+            elif boundary_enabled and bp < -0.5:
+                # iter428: Doorway effect — 上一 session 末尾，短暂抑制
+                # 惩罚强度随 |bp| 线性增加（bp=-1.0 时最大惩罚）
+                penalty_strength = doorway_penalty * abs(bp + 0.5) / 0.5  # 从 bp=-0.5 线性增到 bp=-1.0
+                new_stab = max(0.1, stab * (1.0 - penalty_strength))
+                doorway_penalized += 1
+            else:
+                # 标准 sleep consolidation
+                new_stab = min(365.0, stab * boost_factor)
+
             conn.execute(
                 "UPDATE memory_chunks SET stability=? WHERE id=?",
-                (new_stab, cid)
+                (round(new_stab, 4), cid)
             )
             consolidated += 1
 
-        return {"consolidated": consolidated, "project": project, "boost_factor": boost_factor}
+        return {"consolidated": consolidated, "project": project, "boost_factor": boost_factor,
+                "boundary_boosted": boundary_boosted, "doorway_penalized": doorway_penalized}
     except Exception:
-        return {"consolidated": 0, "project": project, "boost_factor": boost_factor}
+        return {"consolidated": 0, "project": project, "boost_factor": boost_factor,
+                "boundary_boosted": 0, "doorway_penalized": 0}
 
 
 # ── 迭代100：IPC 共享内存 API（OS 类比：shmget/shmat/shmdt + MESI 协议）────────
@@ -7107,6 +7173,64 @@ _EMOTIONAL_VALENCE_RE: list = [
     (re.compile(pat, re.IGNORECASE), val)
     for pat, val in _EMOTIONAL_VALENCE_RULES
 ]
+
+
+def compute_boundary_proximity(
+    created_at: str,
+    session_started_at: str,
+    prev_session_ended_at: str = None,
+    grace_secs: float = 300.0,
+    lookback_secs: float = 300.0,
+) -> float:
+    """
+    iter428: 计算 chunk 的会话边界亲近度（Zacks et al. 2007 Event Segmentation Theory）。
+
+    Zacks et al. (2007) — 人类将连续经验分割为离散"事件"单元，边界处记忆编码最强。
+    Radvansky & Copeland (2006) "Walking through doorways causes forgetting" —
+      穿越事件边界（空间/时间）后短暂抑制前一段落的记忆（doorway effect）。
+
+    OS 类比：ext4 jbd2 journal commit boundary —
+      刚提交后的 epoch 首批 page（新会话刚开始写入）= 最高一致性保证；
+      commit 前的 dirty page（旧会话末尾）= 不稳定窗口，doorway penalty 适用。
+
+    返回 boundary_proximity ∈ [-1.0, +1.0]:
+      +1.0 = 本 session 首 grace_secs 内写入（boundary encoding boost 候选）
+       0.0 = 中性（会话中间写入）
+      -1.0 = 上一 session 末 lookback_secs 内写入（doorway effect 候选）
+
+    参数：
+      created_at           — chunk 写入时间（ISO 格式）
+      session_started_at   — 当前 session 开始时间（ISO 格式）
+      prev_session_ended_at — 上一 session 结束时间（ISO 格式，可选）
+      grace_secs           — 被视为"session 开始后刚写入"的宽限窗口（秒）
+      lookback_secs        — 被视为"上一 session 末尾"的回溯窗口（秒）
+    """
+    try:
+        from datetime import timedelta as _td
+        _created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        _started = datetime.fromisoformat(session_started_at.replace("Z", "+00:00"))
+
+        # 计算 chunk 相对于 session 开始的偏移
+        _delta_start = (_created - _started).total_seconds()
+
+        # 情形1：chunk 在本 session 开始后写入（可能是 boundary boost 候选）
+        if 0 <= _delta_start <= grace_secs:
+            # 线性衰减：t=0 时 proximity=1.0，t=grace_secs 时 proximity=0.0
+            proximity = 1.0 - (_delta_start / grace_secs)
+            return round(max(0.0, proximity), 4)
+
+        # 情形2：chunk 在上一 session 末尾写入（doorway effect 候选）
+        if prev_session_ended_at is not None:
+            _ended = datetime.fromisoformat(prev_session_ended_at.replace("Z", "+00:00"))
+            _delta_end = (_ended - _created).total_seconds()
+            if 0 <= _delta_end <= lookback_secs:
+                # 线性衰减：t=0（session 刚结束时）时 proximity=-1.0，t=lookback_secs 时 proximity=0.0
+                proximity = -1.0 + (_delta_end / lookback_secs)
+                return round(min(0.0, proximity), 4)
+
+        return 0.0  # 中性：会话中间写入
+    except Exception:
+        return 0.0
 
 
 def compute_emotional_valence(text: str) -> float:
