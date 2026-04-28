@@ -769,6 +769,26 @@ _REGISTRY: dict = {
     "retriever.sa_max_hops": (2, int, 1, 4, None,
         "spreading activation 最大跳数（iter393，默认 2 跳；跳数越多计算越贵）"),
 
+    # ── iter423: Fan Effect — IDF加权 Spreading Activation（Anderson 1974）──
+    # 认知科学依据：Anderson (1974) Fan Effect —
+    #   与一个概念关联的事实越多（fan-out 越大），检索每条具体事实越慢越难。
+    #   高扇出节点（如"authentication"关联50个chunk）的激活传播效率低于
+    #   低扇出节点（如"port_8080"只关联1-2个chunk）。
+    # 实现：spreading activation 中，高 degree entity 的边贡献乘以 IDF 权重（降权）：
+    #   IDF_weight = log(1 + median_degree / (1 + entity_degree))，归一化到 [0,1]
+    #   entity_degree = 该 entity 在 entity_edges 中的总边数（in + out）
+    #   degree >= fan_min_degree 时才应用惩罚（低扇出 entity 不惩罚）
+    # OS 类比：Linux CPU cache set-associativity conflict —
+    #   太多 cache line 映射到同一 set（高扇出）→ 频繁 eviction → 命中率下降。
+    #   Fan Effect 惩罚 = 降低高扇出 entity 的"缓存命中率"（activation strength）。
+    "retriever.fan_effect_enabled": (True, bool, None, None, None,
+        "是否启用 Fan Effect IDF 加权（iter423：高扇出 entity 激活权重降低）"),
+    "retriever.fan_effect_min_degree": (3, int, 1, 50, None,
+        "iter423: Fan Effect 触发的最低 entity degree 阈值（低于此值的 entity 不惩罚）"),
+    "retriever.fan_effect_idf_weight": (0.5, float, 0.0, 1.0, None,
+        "iter423: IDF 权重混合系数：edge_score × (1 - fan_effect_idf_weight × (1 - idf_factor))，"
+        "0=不惩罚，1=完全 IDF 权重"),
+
     # ── iter394：Contextual Similarity Boost — 编码情境检索增强 ──
     # 认知科学：Tulving (1983) Encoding Specificity Principle +
     #   Godden & Baddeley (1975) Context-Dependent Memory —

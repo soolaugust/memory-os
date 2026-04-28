@@ -5666,6 +5666,38 @@ def spreading_activate(
         except Exception:
             return conf
 
+    # ── iter423: Fan Effect — IDF加权 Spreading Activation（Anderson 1974）──
+    # entity degree 越高（扇出越大），该 entity 传播的激活权重越低。
+    # 使用懒加载缓存：第一次遇到 entity 时查询其 degree，后续复用。
+    _fan_effect_enabled = False
+    _fan_min_degree = 3
+    _fan_idf_weight = 0.5
+    _entity_degree_cache: dict = {}  # entity_name → degree
+    try:
+        from config import get as _cfg_fan
+        _fan_effect_enabled = _cfg_fan("retriever.fan_effect_enabled")
+        _fan_min_degree = _cfg_fan("retriever.fan_effect_min_degree")
+        _raw_idf_w = _cfg_fan("retriever.fan_effect_idf_weight")
+        _fan_idf_weight = float(_raw_idf_w) if _raw_idf_w is not None else 0.5
+    except Exception:
+        pass
+
+    def _fan_idf_factor(entity: str, degree: int, median_deg: float) -> float:
+        """iter423: 计算 Fan Effect IDF 折扣系数。degree 越高，返回值越低（最低 0.1）。"""
+        if not _fan_effect_enabled or degree < _fan_min_degree:
+            return 1.0
+        # IDF = log(1 + median / (1 + degree)) / log(1 + median/1)
+        # 归一化：fan_min_degree 时 ≈ 1.0，degree→∞ 时 → 0.0
+        import math as _m
+        idf_raw = _m.log(1.0 + max(1.0, median_deg) / (1.0 + degree))
+        idf_norm_max = _m.log(1.0 + max(1.0, median_deg))
+        idf = idf_raw / idf_norm_max if idf_norm_max > 0 else 1.0
+        idf = max(0.1, min(1.0, idf))
+        # Mix: edge_score × (1 - idf_weight × (1 - idf))
+        return 1.0 - _fan_idf_weight * (1.0 - idf)
+
+    _fan_median_degree: float = 1.0  # 用于归一化，首次 BFS 后更新
+
     for hop in range(1, max_hops + 1):
         if decay ** hop < 0.05:  # 激活衰减至 5% 以下时停止
             break
@@ -5676,8 +5708,36 @@ def spreading_activate(
         _dist_decay = (distance_decay_factor ** hop) if distance_decay_enabled else 1.0
 
         next_frontier = {}
+
+        # ── iter423: Fan Effect — 批量查询当前 frontier entities 的 degree ──
+        if _fan_effect_enabled and frontier:
+            _uncached = [e for e in frontier if e not in _entity_degree_cache]
+            if _uncached:
+                try:
+                    _uc_ph = ",".join("?" * len(_uncached))
+                    _deg_rows = conn.execute(
+                        f"SELECT entity, COUNT(*) as deg FROM ("
+                        f"  SELECT from_entity as entity FROM entity_edges WHERE from_entity IN ({_uc_ph})"
+                        f"  UNION ALL"
+                        f"  SELECT to_entity as entity FROM entity_edges WHERE to_entity IN ({_uc_ph})"
+                        f") GROUP BY entity",
+                        _uncached + _uncached,
+                    ).fetchall()
+                    for _dr in _deg_rows:
+                        _entity_degree_cache[_dr[0]] = int(_dr[1])
+                except Exception:
+                    pass
+            # Update median degree for normalization
+            if _entity_degree_cache:
+                _sorted_degs = sorted(_entity_degree_cache.values())
+                _mid = len(_sorted_degs) // 2
+                _fan_median_degree = float(_sorted_degs[_mid]) if _sorted_degs else 1.0
+
         for entity, parent_score in frontier.items():
             proj_params = [entity] + ([project] if project else [])
+            # iter423: Fan Effect — 获取 entity 的扇出惩罚系数
+            _entity_deg = _entity_degree_cache.get(entity, 0)
+            _fan_factor = _fan_idf_factor(entity, _entity_deg, _fan_median_degree)
             try:
                 edges = conn.execute(
                     f"SELECT CASE WHEN from_entity=? THEN to_entity ELSE from_entity END as neighbor, "
@@ -5695,9 +5755,8 @@ def spreading_activate(
                 # iter387: 应用时间衰减
                 eff_conf = _effective_confidence(confidence, created_at)
                 # iter393: 每跳乘以语义距离衰减（_dist_decay = factor^hop）
-                # parent_score 已包含前序跳数的 decay 累积；
-                # _dist_decay 是本跳相对 seed 的绝对距离衰减（跨越语义鸿沟的代价）
-                edge_score = parent_score * eff_conf * decay * _dist_decay
+                # iter423: 乘以 Fan Effect IDF 惩罚（高扇出 entity 激活权重降低）
+                edge_score = parent_score * eff_conf * decay * _dist_decay * _fan_factor
                 if edge_score < 0.05:
                     continue
                 if neighbor not in next_frontier or next_frontier[neighbor] < edge_score:
