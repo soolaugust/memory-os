@@ -7200,6 +7200,14 @@ def sleep_consolidate(
     except Exception:
         pass
 
+    # ── 子操作 13（iter444）：Contextual Reinstatement Effect — session 活跃情境内的 chunk 额外巩固 ──
+    # OS 类比：Linux NUMA-aware khugepaged — 同 NUMA node 热页优先合并为 hugepage（情境局部性 → 高效整合）
+    try:
+        cre_result = apply_contextual_reinstatement_consolidation(conn, project)
+        result["cre_consolidated"] = cre_result.get("cre_consolidated", 0)
+    except Exception:
+        pass
+
     return result
 
 
@@ -9352,6 +9360,170 @@ def apply_sleep_targeted_reactivation(
         conn.commit()
 
     return {"rescued": rescued, "total_examined": total_examined}
+
+
+# ── iter444: Contextual Reinstatement Effect — 情境再现期活跃 chunk 的睡眠额外巩固（Smith 1979 / Tulving 1983）──
+# 认知科学依据：
+#   Smith (1979) "Remembering in and out of context" — 情境再现时记忆提取成功率高 40-50%（环境依赖记忆）。
+#   Tulving (1983) Encoding Specificity Principle — 检索线索与编码时情境越匹配，提取效率越高。
+# OS 类比：Linux NUMA-aware page consolidation (khugepaged) —
+#   khugepaged 优先合并同一 NUMA node 内热页为 hugepage；
+#   session 活跃情境 = 当前 NUMA node，情境高度重叠 chunk = 同 node 热页 → sleep consolidate 时优先加大 stability。
+
+def apply_contextual_reinstatement_consolidation(
+    conn: sqlite3.Connection,
+    project: str,
+    session_accessed_ids: list = None,
+) -> dict:
+    """
+    iter444: Contextual Reinstatement Effect (CRE) — sleep 时基于 session 活跃情境的额外巩固。
+
+    步骤：
+    1. 构建 session_active_entities：从本 session 被访问的 chunk 的 encode_context 合并 entity 集合。
+       若 session_accessed_ids 为空/None，则取最近 cre_max_session_entities 个被访问的 chunk。
+    2. 对所有 importance >= cre_min_importance 的 chunk，计算 encode_context 与 active_entities 的重叠：
+       overlap = |chunk_entities ∩ session_active_entities|
+       若 overlap >= cre_min_overlap：
+         overlap_ratio = min(1.0, overlap / max(1, len(chunk_entities)))
+         bonus_factor = cre_bonus × overlap_ratio
+         new_stab = min(365.0, stab × (1 + bonus_factor))
+    3. 返回 {"cre_consolidated": N, "total_examined": N}
+
+    情境再现逻辑：本 session 多次访问某个主题的知识 → session_active_entities 包含大量相关 entity
+    → 属于同一主题的 chunk 的 encode_context 与 active_entities 高度重叠 → 获得额外巩固加成。
+    这模拟了"在情境再现期间学习的记忆被优先巩固"的认知科学效应。
+
+    Returns:
+      {"cre_consolidated": N, "total_examined": N}
+    """
+    try:
+        import config as _cfg_cre
+    except ImportError:
+        return {"cre_consolidated": 0, "total_examined": 0}
+
+    try:
+        if not _cfg_cre.get("store_vfs.cre_enabled"):
+            return {"cre_consolidated": 0, "total_examined": 0}
+        cre_min_overlap = _cfg_cre.get("store_vfs.cre_min_overlap")       # 2
+        cre_min_importance = _cfg_cre.get("store_vfs.cre_min_importance") # 0.40
+        cre_bonus = _cfg_cre.get("store_vfs.cre_bonus")                   # 0.10
+        cre_max_session = _cfg_cre.get("store_vfs.cre_max_session_entities")  # 200
+    except Exception:
+        return {"cre_consolidated": 0, "total_examined": 0}
+
+    from datetime import datetime as _dt, timezone as _tz
+    now_iso = _dt.now(_tz.utc).isoformat()
+
+    # ── Step 1: 构建 session_active_entities 集合 ──
+    # 从本 session 被访问的 chunk 的 encode_context 中提取所有 entity。
+    # 使用 2 小时时间窗口（last_accessed >= now-2h），而非 LIMIT 取最新 N 条：
+    # 这避免了候选 chunk 自身 entity 污染 session 情境集合（自举偏差）。
+    from datetime import timedelta as _td_cre
+    session_cutoff = (_dt.now(_tz.utc) - _td_cre(hours=2)).isoformat()
+
+    try:
+        if session_accessed_ids:
+            # 有明确的 session 访问 ID 列表：精确构建（忽略时间窗口）
+            placeholders = ",".join("?" * len(session_accessed_ids[:200]))
+            session_rows = conn.execute(
+                f"""SELECT encode_context FROM memory_chunks
+                    WHERE project = ? AND id IN ({placeholders})
+                      AND encode_context IS NOT NULL AND encode_context != ''""",
+                [project] + list(session_accessed_ids[:200]),
+            ).fetchall()
+        else:
+            # 无明确 ID：取最近 2 小时内被访问的 chunk 作为 session 情境代理
+            session_rows = conn.execute(
+                """SELECT encode_context FROM memory_chunks
+                   WHERE project = ?
+                     AND encode_context IS NOT NULL AND encode_context != ''
+                     AND last_accessed >= ?
+                   ORDER BY last_accessed DESC
+                   LIMIT ?""",
+                (project, session_cutoff, cre_max_session),
+            ).fetchall()
+    except Exception:
+        return {"cre_consolidated": 0, "total_examined": 0}
+
+    # 构建 session 活跃 entity 集合
+    session_active_entities: set = set()
+    for srow in session_rows:
+        ec = srow[0] if isinstance(srow, (list, tuple)) else srow["encode_context"]
+        if ec:
+            for e in ec.split(","):
+                e = e.strip().lower()
+                if e:
+                    session_active_entities.add(e)
+
+    if len(session_active_entities) < cre_min_overlap:
+        # session 情境太稀疏，无法做有意义的情境匹配
+        return {"cre_consolidated": 0, "total_examined": 0}
+
+    # ── Step 2: 扫描 importance 足够的 chunk，计算情境重叠 ──
+    try:
+        rows = conn.execute(
+            """SELECT id, stability, importance, encode_context FROM memory_chunks
+               WHERE project = ?
+                 AND COALESCE(importance, 0.0) >= ?
+                 AND encode_context IS NOT NULL AND encode_context != ''
+                 AND COALESCE(stability, 0.1) > 0.1
+               ORDER BY COALESCE(importance, 0.0) DESC
+               LIMIT 500""",
+            (project, cre_min_importance),
+        ).fetchall()
+    except Exception:
+        return {"cre_consolidated": 0, "total_examined": 0}
+
+    total_examined = len(rows)
+    cre_consolidated = 0
+
+    for row in rows:
+        try:
+            cid = row[0] if isinstance(row, (list, tuple)) else row["id"]
+            stab = row[1] if isinstance(row, (list, tuple)) else row["stability"]
+            imp = row[2] if isinstance(row, (list, tuple)) else row["importance"]
+            ec = row[3] if isinstance(row, (list, tuple)) else row["encode_context"]
+
+            stab_f = float(stab or 0.1)
+            if stab_f <= 0.1:
+                continue
+
+            if not ec:
+                continue
+
+            # 提取 chunk entity 集合
+            chunk_entities = frozenset(e.strip().lower() for e in ec.split(",") if e.strip())
+            if not chunk_entities:
+                continue
+
+            # 计算与 session 活跃情境的重叠
+            overlap = len(chunk_entities & session_active_entities)
+            if overlap < cre_min_overlap:
+                continue
+
+            # overlap_ratio：归一化（以 chunk 自身 entity 数为基准，避免大 session entity 集偏差）
+            overlap_ratio = min(1.0, overlap / max(1, len(chunk_entities)))
+            bonus_factor = cre_bonus * overlap_ratio
+
+            if bonus_factor <= 0.0001:
+                continue
+
+            new_stab = min(365.0, stab_f * (1.0 + bonus_factor))
+            if new_stab <= stab_f + 0.0001:
+                continue
+
+            conn.execute(
+                "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=?",
+                (round(new_stab, 4), now_iso, cid),
+            )
+            cre_consolidated += 1
+        except Exception:
+            continue
+
+    if cre_consolidated > 0:
+        conn.commit()
+
+    return {"cre_consolidated": cre_consolidated, "total_examined": total_examined}
 
 
 # ── iter432: Cumulative Interference Effect — 累积干扰加速遗忘（Underwood 1957）──

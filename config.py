@@ -506,6 +506,43 @@ _REGISTRY: dict = {
         "retrievability=0.0 时最大 bonus=str_scale（默认 0.12 ≈ 12%），"
         "retrievability=0.40 时 bonus=0.072 ≈ 7.2%"),
 
+    # ── iter444: Contextual Reinstatement Effect — 情境再现期活跃 chunk 的睡眠额外巩固（Smith 1979 / Tulving 1983）──
+    # 认知科学依据：
+    #   Smith (1979) "Remembering in and out of context" (JEPLMC) —
+    #     在原始编码情境中测试的记忆，提取成功率比新情境高 40-50%（环境依赖记忆）。
+    #     机制：编码时的情境（背景线索）成为记忆的检索线索组成部分，情境再现 → 线索重激活 → 提取成功率↑。
+    #   Godden & Baddeley (1975) "Context-dependent memory in two natural environments" (BJEP) —
+    #     水下学习+水下回忆 vs 水上回忆：相同情境提取率比跨情境高约 40%（经典情境依赖记忆实验）。
+    #   Tulving (1983) "Elements of Episodic Memory" — 编码特异性原则（Encoding Specificity Principle）：
+    #     记忆的检索效率取决于检索时线索与编码时线索的匹配程度（"what is encoded ≈ what is retrieved"）。
+    #   Smith & Vela (2001) "Environmental context-dependent memory: A review and meta-analysis" —
+    #     情境依赖记忆效应的元分析：d=0.33，跨越多种情境类型（空间/语义/情绪/时间）。
+    #
+    # memory-os 等价：
+    #   sleep_consolidate 时，若 chunk 的 encode_context 与本 session 其他被访问 chunk 的
+    #   entity 合集（session_active_entities）有足够重叠（>= cre_min_overlap），
+    #   说明该 chunk 正处于"情境活跃期"——它的编码情境在本 session 中被反复激活，
+    #   给予额外 stability 加成（情境再现增强巩固）：
+    #     new_stab = min(365.0, stab × (1 + cre_bonus × cre_scale))
+    #   与 iter394 CSB（检索时情境匹配加分）区别：CSB = 检索阶段加分；CRE = sleep 巩固阶段加成。
+    #   与 iter440 PF（邻居锚定）区别：PF = 单个强邻居锚定；CRE = session 整体活跃情境的涌现效应。
+    #
+    # OS 类比：Linux NUMA-aware page consolidation (khugepaged) —
+    #   khugepaged 优先合并同一 NUMA node 内相邻的 4KB pages 为 2MB hugepage（情境局部性 = NUMA 局部性）；
+    #   本 session 活跃 entity 集合 = 当前 NUMA node，与该集合高度重叠的 chunk = 同 node 热页，
+    #   sleep consolidate 时优先合并（加大 stability），减少跨情境检索延迟。
+    "store_vfs.cre_enabled": (True, bool, None, None, None,
+        "iter444: 是否启用 Contextual Reinstatement Effect — session 活跃情境内的 chunk 在 sleep 时获得额外巩固"),
+    "store_vfs.cre_min_overlap": (2, int, 1, 10, None,
+        "iter444: 触发 CRE 巩固所需的最小 entity 重叠数（chunk.encode_context 与 session_active_entities 的交集，默认 2）"),
+    "store_vfs.cre_min_importance": (0.40, float, 0.0, 1.0, None,
+        "iter444: 触发 CRE 的最低 importance 阈值（低重要性 chunk 不受情境增强保护，默认 0.40）"),
+    "store_vfs.cre_bonus": (0.10, float, 0.0, 0.50, None,
+        "iter444: CRE stability 加成系数：bonus_factor = cre_bonus × overlap_ratio，"
+        "new_stab = min(365.0, stab × (1 + bonus_factor))，最大 bonus = cre_bonus（默认 0.10 = 10%）"),
+    "store_vfs.cre_max_session_entities": (200, int, 20, 2000, None,
+        "iter444: 构建 session_active_entities 时最多采样的 chunk 数量（按 last_accessed 排序，限制计算开销）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。
