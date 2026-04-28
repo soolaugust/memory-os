@@ -179,6 +179,29 @@ _REGISTRY: dict = {
     "scorer.freshness_grace_days": (7, int, 1, 30, None,
         "freshness_bonus 的 grace period 天数，超过后 bonus=0"),
 
+    # ── iter432: Cumulative Interference Effect — 累积干扰加速遗忘（Underwood 1957）──
+    # 认知科学依据：Underwood (1957) "Interference and forgetting" —
+    #   遗忘的主要原因是同类型知识的累积干扰（proactive interference from prior lists），
+    #   而非单纯时间流逝（decay theory）。同类型知识越多，每个 chunk 的遗忘越快。
+    #   Jenkins & Dallenbach (1924): 睡眠期间比清醒期间遗忘更少，因为睡眠减少了新干扰。
+    #   Underwood 1957 回归分析：24小时遗忘量与已学干扰列表数的相关 r=0.92（极强）。
+    # 应用：同项目同 chunk_type 数量越多（N_same_type）→ 单个 chunk 的 stability 衰减更快。
+    #   cumulative_interference_factor = 1 + scale × log(1+N) / log(1+N_median)
+    #   在 episodic_decay_scan 中额外乘以 1/factor（>1 = 加速衰减）。
+    # OS 类比：Linux CPU cache set-associativity conflict —
+    #   同一 cache set 中的 cache line 越多，每条 line 的平均留存时间越短
+    #   （more ways used = higher conflict miss rate = faster eviction）。
+    "scorer.cumulative_interference_enabled": (True, bool, None, None, None,
+        "iter432: 是否启用累积干扰效应——同类型 chunk 越多，每个 chunk 的 stability 衰减越快"),
+    "scorer.ci_scale": (0.30, float, 0.0, 1.0, None,
+        "iter432: 累积干扰强度系数：factor = 1 + scale × log(1+N)/log(1+N_med)，越大干扰越强"),
+    "scorer.ci_max_factor": (2.0, float, 1.0, 5.0, None,
+        "iter432: 累积干扰因子上限（最多让 stability 衰减 1/max_factor 倍，防止过激）"),
+    "scorer.ci_protect_types": ("design_constraint,procedure", str, None, None, None,
+        "iter432: 豁免累积干扰的 chunk_type 列表（逗号分隔；核心知识不受数量压制）"),
+    "scorer.ci_min_n_same_type": (5, int, 1, 50, None,
+        "iter432: 触发干扰效应的最低同类型 chunk 数量（N_same_type < 此值时不应用干扰）"),
+
     # ── iter431: Ribot's Law — 远期记忆稳定性梯度（Ribot 1882）──────────────────
     # 认知科学依据：Théodule Ribot (1882) "Diseases of Memory" —
     #   越早形成的记忆越能抵抗损伤（retrograde amnesia gradient）。

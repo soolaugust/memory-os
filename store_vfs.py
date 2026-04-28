@@ -6845,10 +6845,12 @@ def sleep_consolidate(
     # OS 类比：Linux cgroup memory.reclaim_ratio — per-group 内存回收压力。
     try:
         cutoff_stale = (now - _td(days=stale_days)).isoformat()
-        # iter400: per-type 衰减（覆盖全局 stability_decay 参数）
-        _decayed = decay_stability_by_type(conn, project, stale_days=stale_days,
-                                           now_iso=now_iso)
-        result["decayed"] = _decayed
+        # iter432: per-type 衰减 + Cumulative Interference Effect（超出 iter400）
+        _ci_result = decay_stability_by_type_with_ci(conn, project, stale_days=stale_days,
+                                                     now_iso=now_iso)
+        # _ci_result 是 dict {"total_decayed": N, "ci_factors": {...}}
+        # result["decayed"] 保持向后兼容的 int 语义
+        result["decayed"] = _ci_result.get("total_decayed", 0) if isinstance(_ci_result, dict) else _ci_result
     except Exception:
         # fallback: 使用全局统一衰减率（兼容旧 schema）
         try:
@@ -7852,6 +7854,175 @@ def decay_stability_by_type(
         pass
 
     return total_decayed
+
+
+# ── iter432: Cumulative Interference Effect — 累积干扰加速遗忘（Underwood 1957）──
+# 认知科学依据：Underwood (1957) "Interference and forgetting" —
+#   遗忘的主要原因是同类型知识的累积干扰，而非单纯时间流逝（decay theory 不足以解释）。
+#   同类型先行学习列表越多，后续学习的遗忘越快（proactive interference）。
+#   Underwood 1957 关键数据：24小时遗忘量 vs 已学干扰列表数的相关 r=0.92（极强正相关）。
+#   Jenkins & Dallenbach (1924)：睡眠减少新干扰 → 遗忘更少（佐证：干扰主导，非时间）。
+# OS 类比：Linux CPU cache set-associativity conflict —
+#   同一 cache set 中 N-way associativity 达到上限时，新 line 必须驱逐旧 line（LRU）；
+#   同 cache set 的 line 越多（more competition），每条 line 的平均留存时间越短。
+#   cumulative_interference_factor = 1 + scale × log(1+N) / log(1+N_median)
+#   → N 越大，factor > 1，stability 衰减更快（额外 × 1/factor 作为 penalty）。
+
+def compute_cumulative_interference_factor(
+    n_same_type: int,
+    n_median: int = 10,
+) -> float:
+    """
+    iter432: 计算累积干扰因子。
+
+    factor = 1 + scale × log(1 + n_same_type) / log(1 + n_median)
+    n_same_type < ci_min_n_same_type → factor = 1.0（无干扰）
+    factor 上限为 ci_max_factor。
+
+    在 decay_stability_by_type_with_ci() 中：
+      new_stability = stability × type_decay / factor
+
+    参数：
+      n_same_type — 当前项目中同 chunk_type 的 chunk 数量
+      n_median    — 参考中位数（用于规范化，默认 10）
+
+    Returns:
+      float >= 1.0 — 干扰因子（> 1 = 加速衰减）
+    """
+    import config as _config
+    import math
+    try:
+        if not _config.get("scorer.cumulative_interference_enabled"):
+            return 1.0
+        min_n = int(_config.get("scorer.ci_min_n_same_type") or 5)
+        if n_same_type < min_n:
+            return 1.0
+        scale = float(_config.get("scorer.ci_scale") or 0.30)
+        max_factor = float(_config.get("scorer.ci_max_factor") or 2.0)
+        if n_median <= 0:
+            n_median = 10
+        factor = 1.0 + scale * math.log(1 + n_same_type) / math.log(1 + n_median)
+        return min(max_factor, factor)
+    except Exception:
+        return 1.0
+
+
+def decay_stability_by_type_with_ci(
+    conn: sqlite3.Connection,
+    project: str = None,
+    stale_days: int = 30,
+    now_iso: str = None,
+) -> dict:
+    """
+    iter432: decay_stability_by_type 的扩展版，叠加 Cumulative Interference Effect。
+
+    在 decay_stability_by_type 基础上：
+      对每种 chunk_type，统计当前项目中该类型的 chunk 数量（N_same_type），
+      计算累积干扰因子 factor，对该类型的 stability 衰减乘以 1/factor（等效加速衰减）：
+        effective_decay = type_decay × (1/factor) ≡ type_decay / factor
+        new_stability = MAX(0.1, stability × effective_decay)
+
+    豁免类型（ci_protect_types，默认 design_constraint/procedure）不受干扰影响。
+    也尊重 Ribot floor：衰减结果不低于 ribot_floor。
+
+    Returns:
+      dict — {total_decayed: N, ci_factors: {chunk_type: factor}}
+    """
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    import config as _config
+    if now_iso is None:
+        now_iso = _dt.now(_tz.utc).isoformat()
+    cutoff = (_dt.now(_tz.utc) - _td(days=stale_days)).isoformat()
+
+    proj_filter = "AND project=?" if project else ""
+    proj_params = [project] if project else []
+
+    # 获取保护类型（不受干扰）
+    protect_types_str = _config.get("scorer.ci_protect_types") or ""
+    protect_types = frozenset(t.strip() for t in protect_types_str.split(",") if t.strip())
+
+    # 统计每种 chunk_type 的数量（per-project）
+    type_counts: dict = {}
+    try:
+        count_sql = "SELECT chunk_type, COUNT(*) FROM memory_chunks"
+        count_params = []
+        if project:
+            count_sql += " WHERE project=?"
+            count_params = [project]
+        count_sql += " GROUP BY chunk_type"
+        rows = conn.execute(count_sql, count_params).fetchall()
+        for r in rows:
+            ct = r[0] or ""
+            cnt = int(r[1] or 0)
+            type_counts[ct] = cnt
+    except Exception:
+        pass
+
+    # N_median：所有 chunk_type 数量的中位数（规范化分母）
+    counts_list = sorted(type_counts.values())
+    n_median = counts_list[len(counts_list) // 2] if counts_list else 10
+
+    total_decayed = 0
+    ci_factors: dict = {}
+
+    all_types = list(CHUNK_TYPE_DECAY.keys()) + [""]
+
+    for ctype, decay in CHUNK_TYPE_DECAY.items():
+        if ctype in protect_types:
+            # 豁免类型：不应用干扰，使用普通 type_decay
+            try:
+                conn.execute(
+                    f"UPDATE memory_chunks "
+                    f"SET stability=MAX(0.1, stability * ?), updated_at=? "
+                    f"WHERE chunk_type=? AND last_accessed < ? AND access_count < 2 {proj_filter}",
+                    [decay, now_iso, ctype, cutoff] + proj_params,
+                )
+                total_decayed += conn.execute("SELECT changes()").fetchone()[0]
+            except Exception:
+                pass
+            ci_factors[ctype] = 1.0
+            continue
+
+        n_ct = type_counts.get(ctype, 0)
+        factor = compute_cumulative_interference_factor(n_ct, n_median)
+        # effective_decay = type_decay / factor（factor >= 1 → 有效衰减 <= type_decay）
+        # 注意：decay 是 [0,1] 的乘子（越大衰减越慢），除以 factor > 1 → 更小的乘子 → 更快衰减
+        effective_decay = max(0.01, decay / factor)
+        ci_factors[ctype] = factor
+
+        try:
+            conn.execute(
+                f"UPDATE memory_chunks "
+                f"SET stability=MAX(0.1, stability * ?), updated_at=? "
+                f"WHERE chunk_type=? AND last_accessed < ? AND access_count < 2 {proj_filter}",
+                [effective_decay, now_iso, ctype, cutoff] + proj_params,
+            )
+            total_decayed += conn.execute("SELECT changes()").fetchone()[0]
+        except Exception:
+            pass
+
+    # 未列出的类型（使用默认衰减率）
+    unknown_n = type_counts.get("", 0) + sum(
+        v for k, v in type_counts.items() if k not in CHUNK_TYPE_DECAY
+    )
+    default_factor = compute_cumulative_interference_factor(unknown_n, n_median)
+    effective_default = max(0.01, _DEFAULT_TYPE_DECAY / default_factor)
+    ci_factors["_other"] = default_factor
+
+    known_types_ph = ",".join("?" * len(CHUNK_TYPE_DECAY))
+    try:
+        conn.execute(
+            f"UPDATE memory_chunks "
+            f"SET stability=MAX(0.1, stability * ?), updated_at=? "
+            f"WHERE (chunk_type NOT IN ({known_types_ph}) OR chunk_type IS NULL) "
+            f"AND last_accessed < ? AND access_count < 2 {proj_filter}",
+            [effective_default, now_iso] + list(CHUNK_TYPE_DECAY.keys()) + [cutoff] + proj_params,
+        )
+        total_decayed += conn.execute("SELECT changes()").fetchone()[0]
+    except Exception:
+        pass
+
+    return {"total_decayed": total_decayed, "ci_factors": ci_factors}
 
 
 # ── iter402：Schema Theory — Prior Knowledge Scaffolding（Bartlett 1932）────────
