@@ -366,6 +366,21 @@ _REGISTRY: dict = {
     "store_vfs.df_penalty_cap": (0.15, float, 0.0, 0.50, None,
         "iter418: Directed Forgetting stability 惩罚上限（从 base 减去 base × 此系数，默认 0.15）"),
 
+    # ── iter420: Spacing Effect — 分布式练习的记忆优势（间隔效应）────────────────────────
+    # 认知科学依据：Ebbinghaus (1885) Spacing Effect; Cepeda et al. (2006) Review (300+ studies) —
+    #   分布式练习（相同次数的学习，分散在多个时间间隔）比集中练习产生更强的长时记忆保留。
+    #   Glenberg (1979): 情境多样性（context diversity across repetitions）是间隔效应的核心机制。
+    #   间隔效应与 iter412 Testing Effect 相互增强（间隔越长 → 难度越高 → 双重加成）。
+    # 应用：update_accessed 时，若访问间隔 >= medium_gap_hours(24h)，spaced_access_count+1。
+    #   spacing_factor = spaced_access_count / max(1, access_count)；
+    #   SM-2 quality += round(spacing_factor × spacing_quality_scale)（最大 +2）。
+    # OS 类比：Linux MGLRU cross-generation promotion —
+    #   跨 aging cycle 的 page 访问比同 gen 内多次访问更快晋升（distributed > massed）。
+    "store_vfs.spacing_effect_enabled": (True, bool, None, None, None,
+        "是否启用 iter420 Spacing Effect：访问间隔 >= 24h 时递增 spaced_access_count，影响 SM-2 质量"),
+    "store_vfs.spacing_quality_scale": (2.0, float, 0.0, 4.0, None,
+        "iter420: Spacing Effect SM-2 quality 加成系数：quality_bonus = round(spacing_factor × scale)，最大 +2"),
+
     # ── iter419: Associative Memory — 新知识借助强关联记忆的编码优势 ────────────────────
     # 认知科学依据：Ebbinghaus (1885) Paired Associates Learning;
     #   Collins & Loftus (1975) Spreading Activation — 新知识与已有强记忆共享节点时

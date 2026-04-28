@@ -359,6 +359,19 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     # OS 类比：page 首次 mapped-in 的引用计数基线；后续跨进程引用增量代表多情境共享。
     _safe_add_column(conn, "memory_chunks", "original_ec_count", "INTEGER DEFAULT 0")
 
+    # ── iter420: spaced_access_count — 间隔访问计数（Spacing Effect）──
+    # 认知科学依据：Ebbinghaus (1885) Spacing Effect / Cepeda et al. (2006) Review —
+    #   分布在多个间隔时间段的练习（spaced practice）比集中练习（massed practice）
+    #   产生更强的长时记忆保留（间隔效应）。
+    # 存储 chunk 被"间隔访问"的次数（gap >= medium_gap_hours = 24h，代表新的"学习会话"）。
+    # 每次 update_accessed 时如果访问间隔 >= 24h，则递增此计数。
+    # spacing_factor = spaced_access_count / max(1, access_count) ∈ [0,1]：
+    #   1.0 = 完全分布式（每次都有足够间隔），0.0 = 全部集中（massed）
+    # OS 类比：Linux MGLRU cross-generation promotion —
+    #   跨 aging cycle 被访问的 page（distributed access）比在同一 gen 内被访问的
+    #   page（massed access）更快晋升到 younger generation（真正的热页）。
+    _safe_add_column(conn, "memory_chunks", "spaced_access_count", "INTEGER DEFAULT 0")
+
     # ── Task13：row_version — Optimistic Locking（CAS）──
     # OS 类比：Linux seqlock / atomic_cmpxchg — 读取 sequence number 后写入时验证未变化。
     # 多 agent 并发写：每次 update 递增 row_version，CAS 检查版本防止 ABA 问题。
@@ -4346,9 +4359,15 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
             # OS 类比：L3 cache miss → aggressive LRU promotion to L1/L2
             _testing_effect_enabled = _config.get("recon.testing_effect_enabled")
             _testing_effect_scale = _config.get("recon.testing_effect_scale")
+            # iter420: Spacing Effect — 分布式练习 quality 加成
+            # Ebbinghaus (1885) / Cepeda et al. (2006): spaced > massed practice
+            # OS 类比：MGLRU cross-generation promotion — distributed access > massed access
+            _spacing_effect_enabled = _config.get("store_vfs.spacing_effect_enabled")
+            _spacing_quality_scale = _config.get("store_vfs.spacing_quality_scale")
 
             # 构建 per-chunk quality map（使用 pre-update last_accessed），默认 quality=4
             _quality_map = {cid: 4 for cid in chunk_ids}
+            _spaced_increment_ids = []  # chunks that qualify for spaced_access_count increment
             for cid, la in _pre_access_map.items():
                 if la:
                     try:
@@ -4360,6 +4379,10 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
                             _quality_map[cid] = 4
                         else:
                             _quality_map[cid] = _long_q
+                            # iter420: gap >= medium_gap_hours (24h) → this is a "new session"
+                            # Increment spaced_access_count for this chunk
+                            if _spacing_effect_enabled:
+                                _spaced_increment_ids.append(cid)
                         # iter412: Testing Effect — boost quality if retrieval was difficult
                         if _testing_effect_enabled and _testing_effect_scale > 0:
                             import math as _math
@@ -4373,6 +4396,31 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
                                 _quality_map[cid] = min(5, _quality_map[cid] + _q_bonus)
                     except Exception:
                         pass
+            # iter420: Spacing Effect — increment spaced_access_count for long-gap accesses
+            if _spacing_effect_enabled and _spaced_increment_ids:
+                _sp_ph = ",".join("?" * len(_spaced_increment_ids))
+                conn.execute(
+                    f"UPDATE memory_chunks SET spaced_access_count=COALESCE(spaced_access_count,0)+1 "
+                    f"WHERE id IN ({_sp_ph})",
+                    _spaced_increment_ids,
+                )
+            # iter420: Spacing Effect — add quality bonus based on spacing_factor
+            if _spacing_effect_enabled and _spacing_quality_scale > 0:
+                # Read spaced_access_count and access_count after increment
+                _sp_rows = conn.execute(
+                    f"SELECT id, COALESCE(spaced_access_count,0), COALESCE(access_count,1) "
+                    f"FROM memory_chunks WHERE id IN ({placeholders})",
+                    chunk_ids,
+                ).fetchall()
+                for _sp_row in _sp_rows:
+                    _cid = _sp_row[0]
+                    _sac = int(_sp_row[1])  # spaced_access_count
+                    _ac = max(1, int(_sp_row[2]))   # access_count
+                    _spacing_factor = _sac / _ac  # ∈ [0, 1]
+                    if _spacing_factor > 0:
+                        _sq_bonus = round(_spacing_factor * _spacing_quality_scale)
+                        if _sq_bonus > 0:
+                            _quality_map[_cid] = min(5, _quality_map.get(_cid, 4) + _sq_bonus)
             # 按 quality 分组批量更新（避免 N 次单独 SQL）
             from collections import defaultdict as _defaultdict
             _by_quality = _defaultdict(list)
