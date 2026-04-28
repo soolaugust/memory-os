@@ -15,3 +15,6 @@ build/
 .env
 # Large benchmark data files
 benchmarks/longmemeval/data/
+
+# Local scripts (not for public repo)
+push-github.sh
