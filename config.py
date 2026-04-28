@@ -179,6 +179,32 @@ _REGISTRY: dict = {
     "scorer.freshness_grace_days": (7, int, 1, 30, None,
         "freshness_bonus 的 grace period 天数，超过后 bonus=0"),
 
+    # ── iter433: Reminiscence Bump Effect — 项目形成期记忆强化（Conway & Howe 1990）──────────────
+    # 认知科学依据：Conway & Howe (1990); Rubin et al. (1998) "A model of the autobiographical memory" —
+    #   人类自传体记忆中，15-25 岁（"形成期"）的事件比其他阶段记忆得更清晰（+50%~+100% recall rate），
+    #   即使间隔 60 年也保持优势（不受普通遗忘曲线约束）。
+    #   机制：形成期事件被编码进"核心自我叙事"（core self-narrative），
+    #     与身份认同绑定，获得额外的记忆巩固路径（hippocampal + cortical dual encoding）。
+    # 应用：chunk 在项目生命周期中的相对创建位置 position_pct <= bump_pct（默认 15%）
+    #   且 importance >= bump_min_importance → initial_stability × bump_factor（+30%）。
+    #   与 Primacy Effect（iter410）的区别：
+    #     Primacy：编码顺序的绝对位置效应（最早的 N 条）
+    #     Reminiscence Bump：项目生命周期的相对时间窗口效应（前 bump_pct% 的时间段内写入的 chunk）
+    # OS 类比：Linux early_boot firmware parameters / BIOS/UEFI cmdline —
+    #   早期引导阶段设置的核心参数（kernel cmdline、ACPI 表）在整个运行期保持不变，
+    #   比运行时 sysctl 更稳定（boot-immutable vs runtime-mutable）。
+    #   memory-os 中：项目创生期写入的 chunk = 启动参数，形成项目的"认知框架"。
+    "store_vfs.bump_enabled": (True, bool, None, None, None,
+        "iter433: 是否启用 Reminiscence Bump Effect：项目形成期 chunk 获得 stability 加成"),
+    "store_vfs.bump_pct": (0.15, float, 0.02, 0.50, None,
+        "iter433: 项目形成期时间窗口（占项目总年龄的比例，默认前 15%）"),
+    "store_vfs.bump_min_importance": (0.55, float, 0.0, 1.0, None,
+        "iter433: 应用 Reminiscence Bump 的最低 importance 阈值（低重要性早期 chunk 不受保护）"),
+    "store_vfs.bump_factor": (1.30, float, 1.0, 2.0, None,
+        "iter433: 形成期 chunk stability 加成系数（initial_stability × factor，默认 1.30）"),
+    "store_vfs.bump_min_project_age_days": (7.0, float, 1.0, 90.0, None,
+        "iter433: 应用 Reminiscence Bump 的最短项目年龄（天），项目太新时禁用（避免误判）"),
+
     # ── iter432: Cumulative Interference Effect — 累积干扰加速遗忘（Underwood 1957）──
     # 认知科学依据：Underwood (1957) "Interference and forgetting" —
     #   遗忘的主要原因是同类型知识的累积干扰（proactive interference from prior lists），

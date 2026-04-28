@@ -1544,10 +1544,20 @@ def damon_scan(conn: sqlite3.Connection, project: str) -> dict:
             )
             protected_hot += 1
 
+    # iter433: Reminiscence Bump — 批量扫描项目形成期 chunk 并应用 stability 加成
+    # OS 类比：Linux early_boot_params 在内核稳定后 confirm（创生期 chunk 回顾性加强）
+    bump_result = {"bumped": 0, "skipped": 0}
+    try:
+        from store_vfs import apply_reminiscence_bump_batch
+        bump_result = apply_reminiscence_bump_batch(conn, project, max_chunks=20)
+    except Exception:
+        pass
+
     actions = {
         "swapped_dead": swapped_dead,
         "marked_cold": marked_cold,
         "protected_hot": protected_hot,
+        "reminiscence_bumped": bump_result.get("bumped", 0),
     }
 
     duration_ms = (_time.time() - _t_start) * 1000
