@@ -353,6 +353,37 @@ _REGISTRY: dict = {
     "store_vfs.rif_max_neighbors": (5, int, 1, 20, None,
         "iter417: 每次检索最多影响的语义邻居数量（按 overlap 降序取前 N）"),
 
+    # ── iter418: Directed Forgetting — 主动弃置过时知识 ──────────────────────────────
+    # 认知科学依据：MacLeod (1998) Directed Forgetting —
+    #   主动指令"忘记"某信息时，记忆对该信息的保留显著下降（inhibition account）。
+    #   Johnson (1994): 认知系统主动抑制不再有用的记忆，释放认知资源。
+    # 应用：chunk 内容含 deprecated/obsolete/replaced by 等信号词 → 主动减少 stability，
+    #   加速 kswapd 自然淘汰（不强制删除，而是降低其竞争力）。
+    # OS 类比：Linux madvise(MADV_DONTNEED) —
+    #   显式通知内核该内存区域不再需要，内核加速回收（但不立即释放，等 kswapd 处理）。
+    "store_vfs.df_enabled": (True, bool, None, None, None,
+        "是否启用 iter418 Directed Forgetting：含过时信号词的 chunk 获得 stability 惩罚"),
+    "store_vfs.df_penalty_cap": (0.15, float, 0.0, 0.50, None,
+        "iter418: Directed Forgetting stability 惩罚上限（从 base 减去 base × 此系数，默认 0.15）"),
+
+    # ── iter419: Associative Memory — 新知识借助强关联记忆的编码优势 ────────────────────
+    # 认知科学依据：Ebbinghaus (1885) Paired Associates Learning;
+    #   Collins & Loftus (1975) Spreading Activation — 新知识与已有强记忆共享节点时
+    #   形成更强的记忆痕迹（associative encoding advantage, 类比"锚点记忆"）。
+    #   Anderson & Reder (1999): 高连接度节点的新关联比孤立节点更易编码（fan effect 逆向）。
+    # 应用：写入新 chunk 时，如果其 encode_context 与已有高 importance 的 chunk 重叠 ≥ 阈值，
+    #   给予 stability 加成（借助已有强记忆结构"搭架"）。
+    # OS 类比：Linux huge pages (THP) — small page adjacent to huge page shares same TLB entry
+    #   and benefits from the huge page's TLB locality (associative memory locality)。
+    "store_vfs.am_enabled": (True, bool, None, None, None,
+        "是否启用 iter419 Associative Memory：新 chunk 与高 importance 旧 chunk 共享实体 → stability 加成"),
+    "store_vfs.am_min_overlap": (2, int, 1, 10, None,
+        "iter419: 触发关联记忆加成的最小 encode_context token 重叠数"),
+    "store_vfs.am_min_importance": (0.75, float, 0.3, 1.0, None,
+        "iter419: 触发关联记忆加成的锚点 chunk 的最低 importance 阈值"),
+    "store_vfs.am_bonus_cap": (0.15, float, 0.0, 0.40, None,
+        "iter419: 关联记忆加成上限（base × 此系数，默认 0.15）"),
+
     # ── Deadline I/O Scheduler（迭代41）──
     "retriever.deadline_ms": (50.0, float, 5.0, 200.0, None,
         "检索截止时间（ms），超过时跳过低优先级阶段（从30ms调整为50ms，适应VFS+PSI开销）"),

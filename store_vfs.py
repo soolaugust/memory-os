@@ -1877,6 +1877,24 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
     except Exception:
         pass  # zeigarnik effect 写入失败不阻塞主流程
 
+    # iter418: Directed Forgetting — 过时/已完成信号词 → stability 惩罚（MacLeod 1998）
+    try:
+        _df_base_stability = d.get("stability", 1.0)
+        apply_directed_forgetting(conn, d["id"], base_stability=_df_base_stability)
+    except Exception:
+        pass  # directed forgetting 写入失败不阻塞主流程
+
+    # iter419: Associative Memory — 与强关联 chunk 共享实体 → stability 加成（Ebbinghaus 1885）
+    try:
+        _am_project = d.get("project", "")
+        _am_base_stability = d.get("stability", 1.0)
+        if _am_project:
+            apply_associative_memory_bonus(
+                conn, d["id"], _am_project, base_stability=_am_base_stability
+            )
+    except Exception:
+        pass  # associative memory 写入失败不阻塞主流程
+
     # iter415: store original encode_context token count for variability tracking
     # This count is used by apply_encoding_variability at access time to measure enrichment
     try:
@@ -3818,6 +3836,183 @@ def apply_retrieval_induced_forgetting(
         return inhibited
     except Exception:
         return 0
+
+
+# ── iter418: Directed Forgetting — 主动弃置过时知识（MacLeod 1998）──────────────
+# 认知科学依据：MacLeod (1998) Directed Forgetting — 主动指令"忘记"使记忆加速衰减。
+# OS 类比：Linux madvise(MADV_DONTNEED) — 通知内核不再需要该内存区域，加速回收。
+
+_DIRECTED_FORGETTING_MARKERS = frozenset([
+    "deprecated", "obsolete", "outdated", "old version", "replaced by",
+    "superseded", "no longer", "not anymore", "was removed", "has been removed",
+    "has been replaced", "legacy", "remove this", "to be removed", "will be removed",
+    "already done", "completed", "resolved", "closed", "done", "finished",
+    # Chinese deprecated markers
+    "已废弃", "已过时", "已替换", "已完成", "已解决", "已关闭", "已删除",
+    "不再使用", "替换为", "被替换", "旧版本",
+])
+
+
+def compute_directed_forgetting_score(content: str, chunk_type: str = "") -> float:
+    """
+    iter418: 计算内容的"主动遗忘"分数 [0.0, 1.0]。
+
+    检测过时/已完成/已废弃信号词，返回应被主动弃置的程度。
+
+    Returns:
+      float — directed forgetting 分数 [0.0, 1.0]
+    """
+    if not content:
+        return 0.0
+    try:
+        content_lower = content.lower()
+        total_matches = 0
+        for marker in _DIRECTED_FORGETTING_MARKERS:
+            if marker.lower() in content_lower:
+                total_matches += 1
+
+        # 1 match = 0.5 score (significant signal), 2+ = capped at 1.0
+        return min(1.0, total_matches * 0.5) if total_matches > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
+def directed_forgetting_penalty(score: float, base_stability: float,
+                                 penalty_cap: float = 0.15) -> float:
+    """
+    iter418: 根据 directed forgetting score 计算 stability 惩罚量。
+
+    penalty = score × base × penalty_cap（线性比例，最大为 base × cap）
+    """
+    if score <= 0.0 or base_stability <= 0.0:
+        return 0.0
+    return min(base_stability * penalty_cap, score * base_stability * penalty_cap)
+
+
+def apply_directed_forgetting(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    base_stability: float = 1.0,
+) -> float:
+    """
+    iter418: 检测 chunk 的过时/完成信号，给予 stability 惩罚（加速自然淘汰）。
+
+    在 insert_chunk 管线中调用（Zeigarnik Effect 之后）。
+
+    Returns:
+      float — 更新后的 stability
+    """
+    if not chunk_id:
+        return base_stability
+    import config as _config
+    if not _config.get("store_vfs.df_enabled"):
+        return base_stability
+    try:
+        row = conn.execute(
+            "SELECT content, chunk_type, stability FROM memory_chunks WHERE id=?",
+            (chunk_id,)
+        ).fetchone()
+        if not row:
+            return base_stability
+
+        content = row[0] if isinstance(row, (list, tuple)) else row["content"]
+        chunk_type = row[1] if isinstance(row, (list, tuple)) else row["chunk_type"]
+        stab = float(row[2] if isinstance(row, (list, tuple)) else row["stability"]) or 1.0
+
+        penalty_cap = _config.get("store_vfs.df_penalty_cap")
+        score = compute_directed_forgetting_score(content or "", chunk_type or "")
+        penalty = directed_forgetting_penalty(score, stab, penalty_cap)
+        new_stability = max(0.1, stab - penalty)  # floor at 0.1
+        if penalty > 0.001:
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?",
+                (new_stability, chunk_id)
+            )
+        return new_stability
+    except Exception:
+        return base_stability
+
+
+# ── iter419: Associative Memory — 新知识借助强关联记忆的编码优势 ────────────────────
+# 认知科学依据：Ebbinghaus (1885) Paired Associates; Collins & Loftus (1975) —
+#   新知识与已有强记忆共享节点时形成更强记忆痕迹（associative encoding advantage）。
+# OS 类比：Linux huge pages — small page adjacent to huge page shares TLB entry (associative locality)。
+
+
+def apply_associative_memory_bonus(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    project: str,
+    base_stability: float = 1.0,
+) -> float:
+    """
+    iter419: 写入新 chunk 时，若与已有高重要性 chunk 共享 encode_context token，
+    给予 stability 加成（关联记忆锚点效应）。
+
+    在 insert_chunk 管线中调用（Directed Forgetting 之后）。
+
+    Returns:
+      float — 更新后的 stability
+    """
+    if not chunk_id or not project:
+        return base_stability
+    import config as _config
+    if not _config.get("store_vfs.am_enabled"):
+        return base_stability
+    try:
+        # Get new chunk's encode_context tokens
+        new_row = conn.execute(
+            "SELECT encode_context, stability FROM memory_chunks WHERE id=?",
+            (chunk_id,)
+        ).fetchone()
+        if not new_row:
+            return base_stability
+
+        new_ec = new_row[0] if isinstance(new_row, (list, tuple)) else new_row["encode_context"]
+        stab = float(new_row[1] if isinstance(new_row, (list, tuple)) else new_row["stability"]) or 1.0
+
+        new_tokens = frozenset(t.strip() for t in (new_ec or "").split(",") if t.strip())
+        if not new_tokens:
+            return stab  # no tokens, no associative bonus
+
+        min_overlap = _config.get("store_vfs.am_min_overlap")
+        min_imp = _config.get("store_vfs.am_min_importance")
+        bonus_cap = _config.get("store_vfs.am_bonus_cap")
+
+        # Find existing high-importance chunks in same project (excluding self)
+        anchors = conn.execute(
+            "SELECT id, encode_context, importance FROM memory_chunks "
+            "WHERE project=? AND id!=? AND importance >= ? AND encode_context IS NOT NULL",
+            (project, chunk_id, min_imp)
+        ).fetchall()
+
+        # Find max overlap with any anchor chunk
+        max_overlap = 0
+        for anchor_row in anchors:
+            a_ec = anchor_row[1] if isinstance(anchor_row, (list, tuple)) else anchor_row["encode_context"]
+            a_tokens = frozenset(t.strip() for t in (a_ec or "").split(",") if t.strip())
+            if not a_tokens:
+                continue
+            overlap = len(new_tokens & a_tokens)
+            if overlap > max_overlap:
+                max_overlap = overlap
+
+        if max_overlap < min_overlap:
+            return stab  # no sufficient overlap with strong anchors
+
+        # Compute bonus: overlap-scaled, capped at base × bonus_cap
+        # More overlap = stronger associative encoding
+        overlap_factor = min(1.0, (max_overlap - min_overlap + 1) / 4.0)  # scale: 0.25 per extra overlap
+        bonus = stab * bonus_cap * overlap_factor
+        new_stability = min(365.0, stab + bonus)
+        if bonus > 0.001:
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?",
+                (new_stability, chunk_id)
+            )
+        return new_stability
+    except Exception:
+        return base_stability
 
 
 # ── iter413: Sleep Consolidation — 离线记忆巩固（Stickgold 2005）───────────────
