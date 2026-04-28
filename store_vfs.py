@@ -1811,6 +1811,16 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
     except Exception:
         pass  # generation effect 写入失败不阻塞主流程
 
+    # iter407: Von Restorff Effect — 孤立 chunk 得到 stability bonus（von Restorff 1933）
+    # 在均匀背景中，语义独特/孤立的 chunk 比普通 chunk 有更强的记忆留存率
+    try:
+        _vr_project = d.get("project", "")
+        _vr_base_stability = d.get("stability", 1.0)
+        if _vr_project:
+            apply_isolation_effect(conn, d["id"], _vr_project, base_stability=_vr_base_stability)
+    except Exception:
+        pass  # von restorff 效应写入失败不阻塞主流程
+
 
 # ── iter403：Cue-Dependent Forgetting — Context-Sensitive Retrieval（Tulving 1974）──
 #
@@ -2584,6 +2594,191 @@ def apply_generation_effect(
     try:
         score = compute_generation_score(content, summary, source_type)
         bonus = generation_stability_bonus(score, base_stability)
+        new_stability = base_stability + bonus
+        if bonus > 0.001:
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?",
+                (new_stability, chunk_id)
+            )
+        return new_stability
+    except Exception:
+        return base_stability
+
+
+# ── iter407: Von Restorff Effect — 孤立 chunk 的 stability 加成（von Restorff 1933）──────
+# 认知科学依据：von Restorff (1933) "Über die Wirkung von Bereichsbildungen im Spurenfeld"
+#   在均匀背景中，孤立/突出的项目（与背景在质上不同）比普通项目保留率显著更高。
+#   Klein & Saltz (1976): isolation 效应在语义上独特的项目中最强（不仅限于物理外观）。
+#   Wallace (1965): 效应强度与孤立程度正相关（越独特 → 记忆越好）。
+#
+# OS 类比：Linux perf_event outlier detection / NUMA distant access warning
+#   perf stat 输出中，远离均值的异常值被标记和报警；
+#   NUMA 拓扑中，与主工作集差异大的内存地址访问触发 distant-node access penalty。
+#   memory-os 类比：在语义空间中"孤立"的 chunk（与同项目邻居语义距离大）
+#   → 稀有信息 → 更值得保留 → stability bonus。
+#
+# 认知机制：孤立效应（von Restorff）的神经机制是 LTP（长时程增强）差异激活：
+#   孤立项目打破了神经激活的均匀背景，引发更强的海马体编码，形成更持久的突触权重。
+#
+# 实现策略：
+#   encode_context（逗号分隔的关键词串）作为语义代理向量
+#   Jaccard 相似度计算 chunk 与同项目邻居的平均语义相似度
+#   isolation_score = 1.0 - avg_similarity（孤立度）
+#   只在邻居数 >= 3 时计算（数据不足时保守处理，不给 bonus）
+
+def _parse_ec_to_set(ctx_str: str) -> frozenset:
+    """将 encode_context 字符串（逗号分隔）解析为词集合。"""
+    if not ctx_str:
+        return frozenset()
+    return frozenset(w.strip().lower() for w in ctx_str.split(',') if w.strip())
+
+
+def _jaccard_ec(a: frozenset, b: frozenset) -> float:
+    """计算两个词集合的 Jaccard 相似度。"""
+    if not a or not b:
+        return 0.0
+    union = len(a | b)
+    return len(a & b) / union if union > 0 else 0.0
+
+
+def compute_isolation_score(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    project: str,
+    context_window: int = 20,
+    min_neighbors: int = 3,
+) -> float:
+    """
+    iter407: 计算 chunk 在同项目中的语义孤立度（Von Restorff Effect）。
+
+    孤立度 = 1.0 - 平均语义相似度（与最近 context_window 个邻居的平均 Jaccard）
+
+    Args:
+      conn: SQLite 连接
+      chunk_id: 目标 chunk ID
+      project: 项目标识
+      context_window: 考察的邻居数量（最近创建的 N 个 chunk，排除自己）
+      min_neighbors: 最少需要多少邻居才计算（< min 时返回 0.0，数据不足）
+
+    Returns:
+      float ∈ [0.0, 1.0]：孤立度。0.0=完全不孤立，1.0=完全孤立（无语义重叠）
+    """
+    if not chunk_id or not project:
+        return 0.0
+    try:
+        # 获取目标 chunk 的 encode_context
+        row = conn.execute(
+            "SELECT encode_context FROM memory_chunks WHERE id=? AND project=?",
+            (chunk_id, project)
+        ).fetchone()
+        if not row:
+            return 0.0
+        target_ctx = _parse_ec_to_set(row[0] or "")
+        if not target_ctx:
+            # 无 encode_context → 无法计算相似度，返回 0（保守处理）
+            return 0.0
+
+        # 获取同项目中最近的 context_window 个 chunk（排除自己）
+        neighbors = conn.execute(
+            """SELECT encode_context FROM memory_chunks
+               WHERE project=? AND id != ? AND encode_context IS NOT NULL
+                 AND encode_context != ''
+               ORDER BY created_at DESC
+               LIMIT ?""",
+            (project, chunk_id, context_window)
+        ).fetchall()
+
+        if len(neighbors) < min_neighbors:
+            return 0.0  # 数据不足，保守处理
+
+        # 计算平均 Jaccard 相似度
+        similarities = []
+        for (nb_ctx_str,) in neighbors:
+            nb_set = _parse_ec_to_set(nb_ctx_str or "")
+            if nb_set:
+                sim = _jaccard_ec(target_ctx, nb_set)
+                similarities.append(sim)
+
+        if not similarities:
+            return 0.0
+
+        avg_sim = sum(similarities) / len(similarities)
+        isolation_score = max(0.0, 1.0 - avg_sim)
+        return min(1.0, isolation_score)
+
+    except Exception:
+        return 0.0
+
+
+def isolation_stability_bonus(
+    isolation_score: float,
+    base_stability: float,
+) -> float:
+    """
+    iter407: Von Restorff Isolation Bonus — 孤立度越高 stability bonus 越大。
+
+    设计（Wallace 1965 效应强度正相关于孤立程度）：
+      isolation >= 0.85（极孤立）: factor = 0.20 → bonus = base × 0.20
+      isolation [0.65, 0.85): linear interp 0.10 → 0.20
+      isolation [0.45, 0.65): linear interp 0.00 → 0.10
+      isolation < 0.45（不突出）: 0
+
+    上限: base × 0.20（比 Generation Effect 小，因为孤立是被动属性，生成是主动行为）
+
+    OS 类比：perf 异常值标记 — 异常程度越大，标记权重越高，优先级越高。
+    """
+    try:
+        isolation_score = float(isolation_score)
+        base_stability = float(base_stability)
+    except (TypeError, ValueError):
+        return 0.0
+    if isolation_score <= 0.0 or base_stability <= 0.0:
+        return 0.0
+
+    _VRSTOFF_STRONG = 0.85
+    _VRSTOFF_MED    = 0.65
+    _VRSTOFF_WEAK   = 0.45
+    _VRSTOFF_MAX_FACTOR = 0.20
+    _VRSTOFF_MED_FACTOR = 0.10
+
+    if isolation_score >= _VRSTOFF_STRONG:
+        factor = _VRSTOFF_MAX_FACTOR
+    elif isolation_score >= _VRSTOFF_MED:
+        t = (isolation_score - _VRSTOFF_MED) / (_VRSTOFF_STRONG - _VRSTOFF_MED)
+        factor = _VRSTOFF_MED_FACTOR + t * (_VRSTOFF_MAX_FACTOR - _VRSTOFF_MED_FACTOR)
+    elif isolation_score >= _VRSTOFF_WEAK:
+        t = (isolation_score - _VRSTOFF_WEAK) / (_VRSTOFF_MED - _VRSTOFF_WEAK)
+        factor = 0.0 + t * _VRSTOFF_MED_FACTOR
+    else:
+        return 0.0
+
+    bonus = base_stability * factor
+    # 上限保护
+    max_bonus = base_stability * _VRSTOFF_MAX_FACTOR
+    return min(bonus, max_bonus)
+
+
+def apply_isolation_effect(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    project: str,
+    base_stability: float = 1.0,
+    context_window: int = 20,
+) -> float:
+    """
+    iter407: 计算孤立效应并更新 chunk 的 stability。
+
+    Returns:
+      float — 更新后的 stability（= base + bonus）
+    """
+    if not chunk_id or not project:
+        return base_stability
+    try:
+        isolation = compute_isolation_score(
+            conn, chunk_id, project,
+            context_window=context_window,
+        )
+        bonus = isolation_stability_bonus(isolation, base_stability)
         new_stability = base_stability + bonus
         if bonus > 0.001:
             conn.execute(

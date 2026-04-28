@@ -256,6 +256,14 @@ _REGISTRY: dict = {
     "store_vfs.generation_effect_source_direct_bypass": (True, bool, None, None, None,
         "source_type='direct' 时跳过生成效应检测（人直接输入=被动录入，非 agent 生成），默认 True"),
 
+    # ── iter407: Von Restorff Effect — Isolation Stability Bonus ─────────────────
+    "store_vfs.isolation_effect_enabled": (True, bool, None, None, None,
+        "是否启用 iter407 Von Restorff Effect：孤立 chunk（encode_context 语义独特）得到 stability 加成"),
+    "store_vfs.isolation_context_window": (20, int, 5, 100, None,
+        "iter407: 计算语义孤立度时对比的最近邻居数量（基于 created_at 排序）"),
+    "store_vfs.isolation_min_neighbors": (3, int, 1, 20, None,
+        "iter407: 邻居少于此数时返回 0.0 孤立度（避免项目初期误判所有 chunk 为孤立）"),
+
     # ── Deadline I/O Scheduler（迭代41）──
     "retriever.deadline_ms": (50.0, float, 5.0, 200.0, None,
         "检索截止时间（ms），超过时跳过低优先级阶段（从30ms调整为50ms，适应VFS+PSI开销）"),
