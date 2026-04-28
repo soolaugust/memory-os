@@ -547,6 +547,41 @@ _REGISTRY: dict = {
     "recon.enabled": (True, bool, None, None, None,
         "是否启用再巩固窗口动态 SM-2 quality（False 时回退到固定 quality=4）"),
 
+    # ── iter412: Testing Effect — 高难度检索强化记忆巩固 ─────────────────────────
+    # 认知科学依据：Roediger & Karpicke (2006) "Test-Enhanced Learning" —
+    #   主动检索（而非被动重读）显著提升长期保留率（+50%）。
+    #   Bjork (1994) "Desirable Difficulties" — 需要努力的检索（retrieval difficulty 高）
+    #   形成更强、更持久的记忆痕迹（elaborative encoding 更深）。
+    #   Kornell et al. (2011) — 难但成功的检索比容易的检索巩固效果更强。
+    # 实现：R_at_recall = exp(-gap_hours / (stability × 24))，
+    #   difficulty = max(0, 1 - R_at_recall)，
+    #   quality_bonus = round(difficulty × scale)（仅在 recall_quality=None 时生效）
+    # OS 类比：Linux L3 cache miss → aggressive LRU promotion —
+    #   L1 命中（容易检索）不改变 LRU 位置；L3 miss（困难检索）→ 强制 cache line 晋升到 L1/L2
+    "recon.testing_effect_enabled": (True, bool, None, None, None,
+        "是否启用 iter412 Testing Effect：低 retrievability 时的检索难度 → 增加 SM-2 quality bonus"),
+    "recon.testing_effect_scale": (2.0, float, 0.0, 4.0, None,
+        "Testing Effect 难度-质量转换系数：quality_bonus = round(difficulty × scale)，最大 +2（iter412）"),
+
+    # ── iter413: Sleep Consolidation — 离线记忆巩固 ──────────────────────────
+    # 认知科学依据：Stickgold (2005) "Sleep-dependent memory consolidation" —
+    #   NREM 睡眠中海马体重放最近学习的记忆，将其转移到新皮层（系统巩固理论）。
+    #   Walker & Stickgold (2004) — 学习后睡眠使次日表现提升 20-30%。
+    #   Diekelmann & Born (2010) — SWS 期间的主动系统巩固降低干扰敏感性。
+    # 实现：SessionStart 时对上一 session（过去 24hr）访问的高重要性 chunk 应用轻微 stability 加成
+    # OS 类比：Linux pdflush/writeback daemon — session 间隙（idle period）后台巩固 dirty pages，
+    #   类比海马-新皮层离线重放（sleep replay）将 working memory → long-term storage
+    "consolidation.enabled": (True, bool, None, None, None,
+        "是否启用 iter413 Sleep Consolidation：SessionStart 时对上一 session 的高重要性 chunk 应用离线巩固"),
+    "consolidation.boost_factor": (1.06, float, 1.0, 1.30, None,
+        "离线巩固稳定性加成系数：stability × boost_factor（iter413，保守值 1.06 ≈ 6%）"),
+    "consolidation.min_importance": (0.70, float, 0.3, 1.0, None,
+        "触发离线巩固的重要性阈值：importance >= 此值的 chunk 才参与 sleep replay（iter413）"),
+    "consolidation.window_hours": (24, int, 1, 168, None,
+        "离线巩固的时间窗口（小时）：只对过去 N 小时内被访问的 chunk 进行巩固（iter413）"),
+    "consolidation.max_chunks": (50, int, 5, 500, None,
+        "每次 SessionStart 最多巩固的 chunk 数量（iter413，按 importance 排序取前 N 个）"),
+
     # ── iter390: Prospective Memory — 展望记忆触发 ───────────────────────────
     # 认知科学依据：Einstein & McDaniel (1990) Prospective Memory —
     #   意图性记忆（"记得在X时做Y"）需要在未来条件满足时主动提取。

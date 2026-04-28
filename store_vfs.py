@@ -3360,6 +3360,75 @@ def apply_depth_effect(
         return base_stability
 
 
+# ── iter413: Sleep Consolidation — 离线记忆巩固（Stickgold 2005）───────────────
+# 认知科学依据：NREM 睡眠中海马体重放最近学习的记忆，将其转移到新皮层。
+# OS 类比：Linux pdflush/writeback daemon — session 间 idle period 内后台巩固 dirty pages。
+
+
+def run_sleep_consolidation(
+    conn: sqlite3.Connection,
+    project: str,
+    now_iso: str = None,
+) -> dict:
+    """
+    iter413: Sleep Consolidation — SessionStart 时对上一 session 的高重要性 chunk 应用离线巩固。
+
+    Stickgold (2005): NREM 睡眠中海马重放最近学习的记忆 → stability 提升 20-30%。
+    memory-os 保守实现：× boost_factor（默认 1.06）模拟 "light sleep consolidation"。
+
+    选择标准：
+      1. importance >= consolidation.min_importance（只有重要记忆值得 replay）
+      2. last_accessed within consolidation.window_hours（只对上一 session 访问的 chunk）
+      3. 按 importance 降序取前 max_chunks 个
+
+    返回 dict: {"consolidated": int, "project": str, "boost_factor": float}
+    """
+    import config as _config
+    if not _config.get("consolidation.enabled"):
+        return {"consolidated": 0, "project": project, "boost_factor": 1.0}
+    if not project:
+        return {"consolidated": 0, "project": project, "boost_factor": 1.0}
+
+    if now_iso is None:
+        now_iso = datetime.now(timezone.utc).isoformat()
+    boost_factor = _config.get("consolidation.boost_factor")
+    min_importance = _config.get("consolidation.min_importance")
+    window_hours = _config.get("consolidation.window_hours")
+    max_chunks = _config.get("consolidation.max_chunks")
+
+    try:
+        from datetime import timedelta as _td
+        _now_dt = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+        _cutoff = (_now_dt - _td(hours=window_hours)).isoformat()
+
+        # 选取：high-importance + recently accessed + this project
+        rows = conn.execute(
+            "SELECT id, stability FROM memory_chunks "
+            "WHERE project=? AND importance >= ? AND last_accessed >= ? "
+            "  AND COALESCE(stability, 0) < 365.0 "
+            "ORDER BY importance DESC LIMIT ?",
+            (project, min_importance, _cutoff, max_chunks)
+        ).fetchall()
+
+        if not rows:
+            return {"consolidated": 0, "project": project, "boost_factor": boost_factor}
+
+        consolidated = 0
+        for row in rows:
+            cid = row[0] if isinstance(row, (list, tuple)) else row["id"]
+            stab = float(row[1] if isinstance(row, (list, tuple)) else row["stability"]) or 1.0
+            new_stab = min(365.0, stab * boost_factor)
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?",
+                (new_stab, cid)
+            )
+            consolidated += 1
+
+        return {"consolidated": consolidated, "project": project, "boost_factor": boost_factor}
+    except Exception:
+        return {"consolidated": 0, "project": project, "boost_factor": boost_factor}
+
+
 # ── 迭代100：IPC 共享内存 API（OS 类比：shmget/shmat/shmdt + MESI 协议）────────
 
 def shm_attach(conn: sqlite3.Connection, chunk_id: str, agent_id: str,
@@ -3571,12 +3640,13 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
     if now_iso is None:
         now_iso = datetime.now(timezone.utc).isoformat()
     placeholders = ",".join("?" * len(chunk_ids))
-    # iter389: Read last_accessed BEFORE update (needed for reconsolidation gap calc)
+    # iter389: Read last_accessed + stability BEFORE update (needed for reconsolidation gap calc + iter412 Testing Effect)
     _pre_access_rows = conn.execute(
-        f"SELECT id, last_accessed FROM memory_chunks WHERE id IN ({placeholders})",
+        f"SELECT id, last_accessed, COALESCE(stability,1.0) FROM memory_chunks WHERE id IN ({placeholders})",
         chunk_ids,
     ).fetchall()
     _pre_access_map = {row[0]: row[1] for row in _pre_access_rows}
+    _pre_stability_map = {row[0]: float(row[2]) for row in _pre_access_rows}
     conn.execute(
         f"UPDATE memory_chunks SET last_accessed=?, access_count=COALESCE(access_count,0)+1 "
         f"WHERE id IN ({placeholders})",
@@ -3616,6 +3686,12 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
             _medium_gap_secs = _config.get("recon.medium_gap_hours") * 3600.0
             _long_q = _config.get("recon.long_gap_quality")
             _now_ts = datetime.fromisoformat(now_iso.replace("Z", "+00:00")).timestamp()
+            # iter412: Testing Effect — 高难度检索强化记忆巩固
+            # Roediger & Karpicke (2006): 难检索 → R_at_recall 低 → quality_bonus 高
+            # OS 类比：L3 cache miss → aggressive LRU promotion to L1/L2
+            _testing_effect_enabled = _config.get("recon.testing_effect_enabled")
+            _testing_effect_scale = _config.get("recon.testing_effect_scale")
+
             # 构建 per-chunk quality map（使用 pre-update last_accessed），默认 quality=4
             _quality_map = {cid: 4 for cid in chunk_ids}
             for cid, la in _pre_access_map.items():
@@ -3629,6 +3705,17 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
                             _quality_map[cid] = 4
                         else:
                             _quality_map[cid] = _long_q
+                        # iter412: Testing Effect — boost quality if retrieval was difficult
+                        if _testing_effect_enabled and _testing_effect_scale > 0:
+                            import math as _math
+                            _stab = _pre_stability_map.get(cid, 1.0)
+                            # R_at_recall = exp(-gap_hours / (stability × 24))
+                            _gap_hours = _gap / 3600.0
+                            _r_at_recall = _math.exp(-_gap_hours / max(0.01, _stab * 24.0))
+                            _difficulty = max(0.0, 1.0 - _r_at_recall)
+                            _q_bonus = round(_difficulty * _testing_effect_scale)
+                            if _q_bonus > 0:
+                                _quality_map[cid] = min(5, _quality_map[cid] + _q_bonus)
                     except Exception:
                         pass
             # 按 quality 分组批量更新（避免 N 次单独 SQL）

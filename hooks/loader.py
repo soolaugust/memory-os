@@ -779,6 +779,18 @@ def main():
         except Exception:
             pass
 
+        # ── iter413: Sleep Consolidation — 离线记忆巩固 ──
+        # OS 类比：Linux pdflush/writeback — session 间 idle period 内后台巩固 dirty pages
+        # Stickgold (2005): 海马重放最近学习的记忆 → stability 提升（light sleep consolidation）
+        consolidation_result = {"consolidated": 0}
+        try:
+            from store_vfs import run_sleep_consolidation
+            consolidation_result = run_sleep_consolidation(_log_conn, project)
+            if consolidation_result.get("consolidated", 0) > 0:
+                _log_conn.commit()
+        except Exception:
+            pass
+
         # ── 迭代44：MGLRU aging — 推进 generation clock ──
         # OS 类比：MGLRU lru_gen_inc() — SessionStart 时推进所有 chunk 的 gen
         # 被访问的 chunk 在 retriever 中 promote 回 gen 0，未访问的逐渐变老
@@ -857,8 +869,12 @@ def main():
         if gc_swap_result.get("deleted_count", 0) > 0:
             gc_swap_summary = f" gc_swap={gc_swap_result['deleted_count']}del({gc_swap_result['freed_pct']}%freed)"
 
+        consolidation_summary = ""
+        if consolidation_result.get("consolidated", 0) > 0:
+            consolidation_summary = f" sleep_consol={consolidation_result['consolidated']}chunks"
+
         dmesg_log(_log_conn, DMESG_INFO, "loader",
-                  f"session_start latest={'Y' if has_latest else 'N'} working_set={len(working_set)} ctx_len={len(context_text)} watchdog={wd_status}{autotune_summary}{criu_summary}{damon_summary}{mglru_summary}{gc_summary}{gc_swap_summary}",
+                  f"session_start latest={'Y' if has_latest else 'N'} working_set={len(working_set)} ctx_len={len(context_text)} watchdog={wd_status}{autotune_summary}{criu_summary}{damon_summary}{mglru_summary}{gc_summary}{gc_swap_summary}{consolidation_summary}",
                   session_id=_session_id, project=project)
         _log_conn.commit()
         _log_conn.close()
