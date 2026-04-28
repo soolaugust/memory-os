@@ -7208,6 +7208,14 @@ def sleep_consolidate(
     except Exception:
         pass
 
+    # ── 子操作 14（iter445）：Reward-Tagged Memory Consolidation — 高访问×近期访问的 chunk 获得奖励巩固 ──
+    # OS 类比：Linux workingset_activation — refcount × recency = 工作集优先级 → sleep 时优先强化
+    try:
+        rtmc_result = apply_reward_tagged_memory_consolidation(conn, project)
+        result["rtmc_boosted"] = rtmc_result.get("rtmc_boosted", 0)
+    except Exception:
+        pass
+
     return result
 
 
@@ -9524,6 +9532,148 @@ def apply_contextual_reinstatement_consolidation(
         conn.commit()
 
     return {"cre_consolidated": cre_consolidated, "total_examined": total_examined}
+
+
+# ── iter445: Reward-Tagged Memory Consolidation — 奖励标签记忆的睡眠优先巩固（Murty & Adcock 2014）──
+# 认知科学依据：
+#   Murty & Adcock (2014) "Enriching experiences via prior associative learning facilitates memory" —
+#     多巴胺奖励信号在慢波睡眠期（SWS）激活 VTA-海马投射，选择性强化高奖励预期的记忆痕迹。
+#   Hennies et al. (2015) "Closed-loop memory reactivation during sleep" (Current Biology) —
+#     高奖励标签 + 睡眠 = 最强记忆保留：reward × sleep 的交互效应显著大于单独效应之和。
+# OS 类比：Linux workingset_activation（工作集激活标记）——
+#   kswapd 扫描时，reference bit=1 的页获得 second chance（不立即回收）；
+#   page refcount × recency = 工作集优先级（高频近期访问 page = 最高 protection）；
+#   类比：access_count × recency_factor = 记忆奖励优先级 → sleep 时优先强化。
+
+def apply_reward_tagged_memory_consolidation(
+    conn: sqlite3.Connection,
+    project: str,
+) -> dict:
+    """
+    iter445: Reward-Tagged Memory Consolidation (RTMC) — sleep 时基于访问频率×近期性的奖励巩固。
+
+    数学模型：
+      reward_signal = min(1.0, log(1 + access_count) / log(1 + rtmc_acc_ref))
+      recency_factor = max(0.0, 1.0 - hours_since_access / rtmc_recency_hours)
+      priority = reward_signal × recency_factor
+      bonus = priority × rtmc_scale
+      new_stab = min(365.0, stab × (1 + bonus))
+
+    触发条件：
+      - rtmc_enabled = True
+      - access_count >= rtmc_min_access（至少被检索 N 次 = 有奖励历史）
+      - hours_since_access <= rtmc_recency_hours（最近仍有访问 = 奖励信号新鲜）
+      - importance >= rtmc_min_importance（低重要性 chunk 不参与）
+
+    Returns:
+      {"rtmc_boosted": N, "total_examined": N}
+    """
+    try:
+        import config as _cfg_rtmc
+    except ImportError:
+        return {"rtmc_boosted": 0, "total_examined": 0}
+
+    try:
+        if not _cfg_rtmc.get("store_vfs.rtmc_enabled"):
+            return {"rtmc_boosted": 0, "total_examined": 0}
+        rtmc_min_access = _cfg_rtmc.get("store_vfs.rtmc_min_access")       # 3
+        rtmc_acc_ref = _cfg_rtmc.get("store_vfs.rtmc_acc_ref")             # 10
+        rtmc_recency_hours = _cfg_rtmc.get("store_vfs.rtmc_recency_hours") # 48.0
+        rtmc_scale = _cfg_rtmc.get("store_vfs.rtmc_scale")                 # 0.08
+        rtmc_min_importance = _cfg_rtmc.get("store_vfs.rtmc_min_importance")  # 0.35
+    except Exception:
+        return {"rtmc_boosted": 0, "total_examined": 0}
+
+    import math as _math_rtmc
+    from datetime import datetime as _dt_rtmc, timezone as _tz_rtmc
+    now_dt = _dt_rtmc.now(_tz_rtmc.utc)
+    now_iso = now_dt.isoformat()
+
+    # 计算时间窗口截止点：rtmc_recency_hours 之前
+    from datetime import timedelta as _td_rtmc
+    recency_cutoff = (now_dt - _td_rtmc(hours=rtmc_recency_hours)).isoformat()
+
+    try:
+        rows = conn.execute(
+            """SELECT id, stability, access_count, last_accessed, importance
+               FROM memory_chunks
+               WHERE project = ?
+                 AND COALESCE(access_count, 0) >= ?
+                 AND COALESCE(importance, 0.0) >= ?
+                 AND last_accessed IS NOT NULL
+                 AND last_accessed >= ?
+                 AND COALESCE(stability, 0.1) > 0.1
+               ORDER BY COALESCE(access_count, 0) DESC
+               LIMIT 500""",
+            (project, rtmc_min_access, rtmc_min_importance, recency_cutoff),
+        ).fetchall()
+    except Exception:
+        return {"rtmc_boosted": 0, "total_examined": 0}
+
+    total_examined = len(rows)
+    rtmc_boosted = 0
+    log_ref = _math_rtmc.log(1 + rtmc_acc_ref)  # precompute denominator
+
+    for row in rows:
+        try:
+            cid = row[0] if isinstance(row, (list, tuple)) else row["id"]
+            stab = row[1] if isinstance(row, (list, tuple)) else row["stability"]
+            acc = row[2] if isinstance(row, (list, tuple)) else row["access_count"]
+            last_accessed = row[3] if isinstance(row, (list, tuple)) else row["last_accessed"]
+
+            stab_f = float(stab or 0.1)
+            if stab_f <= 0.1:
+                continue
+
+            acc_f = float(acc or 0)
+            if acc_f < rtmc_min_access:
+                continue
+
+            # 计算 hours_since_access
+            try:
+                if last_accessed.endswith("Z"):
+                    last_accessed = last_accessed[:-1] + "+00:00"
+                from datetime import datetime as _dt2_rtmc, timezone as _tz2_rtmc
+                la_dt = _dt2_rtmc.fromisoformat(last_accessed)
+                if la_dt.tzinfo is None:
+                    la_dt = la_dt.replace(tzinfo=_tz2_rtmc.utc)
+                hours_since = (now_dt - la_dt).total_seconds() / 3600.0
+            except Exception:
+                continue
+
+            if hours_since > rtmc_recency_hours:
+                continue
+
+            # 奖励信号：对数归一化访问次数（acc=rtmc_acc_ref 时 reward_signal=1.0）
+            reward_signal = min(1.0, _math_rtmc.log(1 + acc_f) / log_ref)
+
+            # 近期因子：访问越新鲜，recency_factor 越接近 1.0
+            recency_factor = max(0.0, 1.0 - hours_since / rtmc_recency_hours)
+
+            priority = reward_signal * recency_factor
+            if priority < 0.001:
+                continue
+
+            bonus = priority * rtmc_scale
+            if bonus < 0.0001:
+                continue
+
+            new_stab = min(365.0, stab_f * (1.0 + bonus))
+            if new_stab <= stab_f + 0.0001:
+                continue
+
+            conn.execute(
+                "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=?",
+                (round(new_stab, 4), now_iso, cid),
+            )
+            rtmc_boosted += 1
+        except Exception:
+            continue
+
+    if rtmc_boosted > 0:
+        conn.commit()
+
+    return {"rtmc_boosted": rtmc_boosted, "total_examined": total_examined}
 
 
 # ── iter432: Cumulative Interference Effect — 累积干扰加速遗忘（Underwood 1957）──

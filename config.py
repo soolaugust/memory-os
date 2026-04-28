@@ -543,6 +543,53 @@ _REGISTRY: dict = {
     "store_vfs.cre_max_session_entities": (200, int, 20, 2000, None,
         "iter444: 构建 session_active_entities 时最多采样的 chunk 数量（按 last_accessed 排序，限制计算开销）"),
 
+    # ── iter445: Reward-Tagged Memory Consolidation — 奖励标签记忆的睡眠优先巩固（Murty & Adcock 2014）──
+    # 认知科学依据：
+    #   Murty & Adcock (2014) "Enriching experiences via prior associative learning facilitates memory" —
+    #     多巴胺奖励信号在慢波睡眠期（SWS）激活 VTA-海马投射，选择性强化高奖励预期的记忆痕迹。
+    #     高奖励记忆（被频繁强化的记忆）在睡眠巩固期间比低奖励记忆获得更强的海马重放（replay）。
+    #   Hennies et al. (2015) "Closed-loop memory reactivation during sleep" (Current Biology) —
+    #     高奖励标签 + 睡眠 = 最强记忆保留：reward × sleep 的交互效应显著大于单独效应之和。
+    #   Patil et al. (2017) "Imagining the future: the importance of cued memory" —
+    #     反复被提取的记忆被视为"高价值"（access_count 代理 dopaminergic reward signal），
+    #     睡眠期海马优先回放此类记忆（frequency-weighted replay）。
+    #
+    # memory-os 等价：
+    #   access_count 高（被频繁检索 = 高奖励证明）+ 近期仍有访问（last_accessed 在 window 内）
+    #   = 高奖励标签 + 奖励信号新鲜 → sleep 期额外巩固：
+    #     reward_signal = min(1.0, log(1 + access_count) / log(1 + rtmc_acc_ref))
+    #     recency_factor = max(0.0, 1.0 - hours_since_access / rtmc_recency_hours)
+    #     priority = reward_signal × recency_factor
+    #     bonus = priority × rtmc_scale
+    #     new_stab = min(365.0, stab × (1 + bonus))
+    #   与 iter413 Sleep Consolidation 的区别：
+    #     SC(413) = importance >= 0.70 的 chunk 一律加成（importance-based gate）
+    #     RTMC(445) = access_count × recency 的乘积奖励信号（behavior-based reward）
+    #     两者不相互排斥：高重要性高访问的 chunk 会同时受两个机制保护
+    #   与 iter437 Hypermnesia 的区别：
+    #     Hypermnesia = spaced_access_count 跨阈值触发一次性较大 boost（threshold-triggered）
+    #     RTMC = 每次 sleep 基于当前 access_count × recency 的持续性小奖励（continuous）
+    #
+    # OS 类比：Linux workingset_activation（工作集激活标记）——
+    #   kswapd 扫描时，reference bit=1 的页获得 second chance（不立即回收）；
+    #   page refcount × recency = 工作集优先级（高频近期访问 page = 最高 protection）；
+    #   类比：access_count × recency_factor = 记忆奖励优先级 → sleep 时优先强化。
+    "store_vfs.rtmc_enabled": (True, bool, None, None, None,
+        "iter445: 是否启用 Reward-Tagged Memory Consolidation — 高访问×近期访问的 chunk 在 sleep 时获得额外巩固"),
+    "store_vfs.rtmc_min_access": (3, int, 1, 50, None,
+        "iter445: 触发 RTMC 的最低 access_count 阈值（默认 3，至少被检索 3 次才视为高奖励）"),
+    "store_vfs.rtmc_acc_ref": (10, int, 3, 100, None,
+        "iter445: 奖励信号参考访问次数：reward_signal = log(1+acc)/log(1+rtmc_acc_ref)，"
+        "acc=rtmc_acc_ref 时 reward_signal=1.0（默认 10）"),
+    "store_vfs.rtmc_recency_hours": (48.0, float, 6.0, 168.0, None,
+        "iter445: 奖励信号新鲜度窗口（小时）：last_accessed 在此窗口内才应用 recency_factor，"
+        "超过此时间 recency_factor=0.0 → 不触发（默认 48h = 2 天内仍有访问才算'新鲜'）"),
+    "store_vfs.rtmc_scale": (0.08, float, 0.0, 0.30, None,
+        "iter445: RTMC 奖励加成系数：bonus = priority × scale，new_stab = stab × (1 + bonus)，"
+        "priority=1.0（最高奖励 + 最新访问）时 bonus=rtmc_scale（默认 0.08 ≈ 8%）"),
+    "store_vfs.rtmc_min_importance": (0.35, float, 0.0, 1.0, None,
+        "iter445: 触发 RTMC 的最低 importance 阈值（默认 0.35，低重要性 chunk 不参与奖励巩固）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。
