@@ -3172,6 +3172,49 @@ def main():
             except Exception:
                 pass
 
+        # ── iter427: Serial Position Effect — 注入顺序优化（Murdock 1962）──────────
+        # OS 类比：Linux BFQ/CFQ front-merge — 最高优先级 I/O 请求置于 dispatch queue 头部；
+        #   类比首因锚（primacy anchor）；recency anchor 在 queue 尾部确保最后被读取。
+        # 认知科学依据：Murdock (1962) 序列位置曲线 — 首位和末位项目记忆最佳：
+        #   首因效应（primacy）：首项经过多次 rehearsal，进入长期记忆
+        #   近因效应（recency）：末项驻留 STM，即时可用
+        #   中间项目受"输出干扰"（Roediger & McDermott 1995）抑制，记忆最差
+        # 策略：将非约束 top_k 中 importance >= threshold 或特定 chunk_type 的 chunk
+        #   重排到首位（primacy）和末位（recency），避免高价值 chunk 埋在中间。
+        # 约束类型（design_constraint）已通过前置 header 机制获得首因位置，不参与此排序。
+        if _sysctl("retriever.serial_position_enabled") and len(top_k) >= 3:
+            try:
+                _spe_threshold = _sysctl("retriever.serial_position_imp_threshold") or 0.85
+                _spe_types = set((_sysctl("retriever.serial_position_recency_types") or "").split(","))
+                # 分离约束和普通 chunk（约束已有首因优势，只对 normal 重排）
+                _spe_constraints = [(s, c) for s, c in top_k if c.get("chunk_type") == "design_constraint"]
+                _spe_normal = [(s, c) for s, c in top_k if c.get("chunk_type") != "design_constraint"]
+                if len(_spe_normal) >= 3:
+                    # 分出高价值候选（primacy/recency 锚点候选）
+                    _spe_high = [(s, c) for s, c in _spe_normal
+                                 if float(c.get("importance") or 0) >= _spe_threshold
+                                 or c.get("chunk_type", "") in _spe_types]
+                    _spe_mid = [(s, c) for s, c in _spe_normal
+                                if (s, c) not in _spe_high]
+                    if _spe_high:
+                        # 首因锚：高价值 chunk 中最高 score → 首位
+                        _spe_high_sorted = sorted(_spe_high, key=lambda x: x[0], reverse=True)
+                        _primacy = _spe_high_sorted[:1]
+                        _recency = _spe_high_sorted[1:2]  # 次高 → 末位
+                        _spe_remaining_high = _spe_high_sorted[2:]
+                        # 重排：[primacy] + mid + remaining_high + [recency]
+                        # 中间保持 score 降序（BFQ 中优先级次高请求在 dispatch 中间位置）
+                        _mid_ordered = sorted(_spe_mid + _spe_remaining_high,
+                                              key=lambda x: x[0], reverse=True)
+                        _spe_reordered = _primacy + _mid_ordered + _recency
+                        top_k = _spe_constraints + _spe_reordered
+                        _deferred.log(DMESG_DEBUG, "retriever",
+                                      f"iter427 serial_position: primacy={_primacy[0][1].get('id','')[:8]} "
+                                      f"recency={_recency[0][1].get('id','')[:8] if _recency else 'none'}",
+                                      session_id=session_id, project=project)
+            except Exception:
+                pass  # serial position 失败不阻塞主流程
+
         constraint_items = []
         normal_items = []
         for _, c in top_k:

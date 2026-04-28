@@ -884,6 +884,17 @@ _REGISTRY: dict = {
     "retriever.exclude_types": ("prompt_context", str, None, None, None,
         "逗号分隔的 chunk_type 列表，从检索候选中排除（OS 类比：Linux ZONE_RESERVED）"),
 
+    # ── iter427：Serial Position Effect（Murdock 1962）──
+    # OS 类比：BFQ front-merge — 高优先级 I/O 置于 dispatch queue 首/尾位置
+    "retriever.serial_position_enabled": (True, bool, None, None, None,
+        "是否启用序列位置效应注入顺序优化（Murdock 1962 primacy+recency），"
+        "将高价值 chunk 置于注入块首/尾，避免 LLM 输出干扰效应。"),
+    "retriever.serial_position_imp_threshold": (0.85, float, 0.0, 1.0, None,
+        "importance >= 此值的 chunk 视为 primacy/recency 候选（默认 0.85）"),
+    "retriever.serial_position_recency_types": ("decision,design_constraint,reasoning_chain",
+        str, None, None, None,
+        "逗号分隔的 chunk_type 列表，这些类型的 chunk 优先候选 primacy/recency 位置"),
+
     # ── 迭代359：Session Injection Deduplication ──
     "retriever.session_dedup_threshold": (2, int, 1, 10, None,
         "同一 session 内 chunk 被注入 >= 此次数后从输出中去重（OS 类比：copy-on-write lazy page dedup，"
