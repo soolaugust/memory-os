@@ -16,7 +16,7 @@ os.environ["CLAUDE_SESSION_ID"] = "test-conn-scope"
 
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "hooks"))
+sys.path.insert(0, str(ROOT.parent / "hooks"))
 
 import tmpfs  # noqa: F401 — tmpfs isolation (iter54), must precede store import
 from store import open_db, ensure_schema, insert_chunk, fts_search, get_chunks
@@ -165,7 +165,7 @@ def test_6_perf_single_vs_multi():
 def test_7_retriever_syntax_check():
     """T7: retriever.py 语法正确（无 NameError/SyntaxError）"""
     import py_compile
-    retriever_path = ROOT / "hooks" / "retriever.py"
+    retriever_path = ROOT.parent / "hooks" / "retriever.py"
     try:
         py_compile.compile(str(retriever_path), doraise=True)
         print(f"  T7 PASS: retriever.py syntax OK")
@@ -177,7 +177,7 @@ def test_7_retriever_syntax_check():
 def test_8_kr_syntax_check():
     """T8: knowledge_router.py 语法正确"""
     import py_compile
-    kr_path = ROOT / "hooks" / "knowledge_router.py"
+    kr_path = ROOT.parent / "hooks" / "knowledge_router.py"
     try:
         py_compile.compile(str(kr_path), doraise=True)
         print(f"  T8 PASS: knowledge_router.py syntax OK")

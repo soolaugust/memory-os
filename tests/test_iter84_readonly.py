@@ -113,7 +113,7 @@ class TestDeferredLogs(unittest.TestCase):
     def test_buffer_and_flush(self):
         """日志先缓冲到内存，flush 后写入 DB。"""
         # 模拟 retriever.py 的 _DeferredLogs
-        sys.path.insert(0, str(Path(__file__).parent / "hooks"))
+        sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
         # 手动实现 DeferredLogs（与 retriever.py 中一致）
         buf = []
         buf.append((DMESG_INFO, "retriever", "test msg 1", "s1", "p1", None))
@@ -285,7 +285,7 @@ class TestRetrieverCodePaths(unittest.TestCase):
 
     def test_no_direct_dmesg_on_readonly_conn(self):
         """retriever.py 中 dmesg_log 调用不使用只读 conn 变量。"""
-        retriever_path = Path(__file__).parent / "hooks" / "retriever.py"
+        retriever_path = Path(__file__).parent.parent / "hooks" / "retriever.py"
         source = retriever_path.read_text()
 
         # 在 main() 函数体内，dmesg_log 的第一个参数不应该是 conn
@@ -308,7 +308,7 @@ class TestRetrieverCodePaths(unittest.TestCase):
 
     def test_no_update_accessed_on_readonly(self):
         """retriever.py main() 中 update_accessed 不直接使用 conn。"""
-        retriever_path = Path(__file__).parent / "hooks" / "retriever.py"
+        retriever_path = Path(__file__).parent.parent / "hooks" / "retriever.py"
         source = retriever_path.read_text()
 
         import re

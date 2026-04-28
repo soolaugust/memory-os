@@ -303,6 +303,26 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     # 存储 chunk 写入时的情境特征 JSON，检索时与 query_context 比对计算匹配度。
     _safe_add_column(conn, "memory_chunks", "encoding_context", "TEXT DEFAULT '{}'")
 
+    # ── Task13：row_version — Optimistic Locking（CAS）──
+    # OS 类比：Linux seqlock / atomic_cmpxchg — 读取 sequence number 后写入时验证未变化。
+    # 多 agent 并发写：每次 update 递增 row_version，CAS 检查版本防止 ABA 问题。
+    _safe_add_column(conn, "memory_chunks", "row_version", "INTEGER DEFAULT 1")
+
+    # ── Task12：chunk_state — Lifecycle FSM（ACTIVE/COLD/DEAD/SWAP/GHOST）──
+    # OS 类比：Linux page state machine — PG_active/PG_referenced/PG_lru/PG_swapcache
+    #   ACTIVE  = PG_active + PG_referenced   — 最近访问，热数据
+    #   COLD    = PG_lru (inactive list)       — 可回收候选，7-30天无访问
+    #   DEAD    = DAMON DEAD region            — 极少访问，可 swap_out 或 evict
+    #   SWAP    = PG_swapcache                 — 已 swap_out，在 swap_chunks
+    #   GHOST   = 待 GC，evict 前短暂标记态
+    _safe_add_column(conn, "memory_chunks", "chunk_state", "TEXT DEFAULT 'ACTIVE'")
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mc_state ON memory_chunks(chunk_state)"
+        )
+    except Exception:
+        pass
+
     # ── 迭代317：knowledge_versions — 前摄干扰控制（Proactive Interference）──
     # OS 类比：Linux kernel module versioning — 加载新模块版本时标记旧版本为
     #   MODULE_STATE_GOING，确保旧版本不再被新请求调用。
@@ -2133,6 +2153,123 @@ def get_pinned_ids(conn: sqlite3.Connection, project: str,
     return {r[0] for r in rows}
 
 
+# ── 迭代356：Pin Decay + Pin Cap ────────────────────────────────────────────
+# OS 类比：Linux RLIMIT_MEMLOCK + memcg pin_user_pages 上限
+#
+# 问题根因（v5 audit, 2026-04-28）：
+#   chunk_pins 表无过期机制。chunk 被 pin 后永久不可被 LRU 驱逐。
+#   实测 47/105 chunk（45%）处于 pin 状态，仅剩 55% 参与正常 LRU 循环，
+#   导致高 importance chunk 被迫 swap out（LRU 逼出），同时 swap 无法恢复（swap dead zone）。
+#
+# 修复方案：
+#   pin_decay()  — 扫描 soft pin，last_accessed 超过 decay_days 天的自动解除
+#   _enforce_pin_cap() — 新增 pin 时检查上限，超限时驱逐最旧 soft pin
+
+def pin_decay(conn: sqlite3.Connection, project: str,
+              decay_days: int = None) -> int:
+    """
+    迭代356：Soft pin 衰减 — 长期未访问的 soft pin 自动解除。
+
+    OS 类比：munlock_vma_pages_range() 在进程 exit_mm 时解除 mlock 区域；
+    这里模拟一个周期性 GC：soft pin 超过 decay_days 天未访问 → 解除 pin，
+    允许重新参与 LRU eviction 和 swap out。
+
+    Hard pin（design_constraint 等核心架构知识）不受衰减影响。
+
+    返回解除的 pin 数量。
+    """
+    from config import get as _cfg
+    if not _cfg("pin.decay_enabled"):
+        return 0
+    if decay_days is None:
+        decay_days = _cfg("pin.decay_days")
+
+    # 找出 soft pin 且 chunk 的 last_accessed 超过 decay_days 天的条目
+    # 若 last_accessed 为 NULL，以 pinned_at 为准
+    stale_rows = conn.execute(
+        """SELECT cp.chunk_id
+           FROM chunk_pins cp
+           LEFT JOIN memory_chunks mc ON mc.id = cp.chunk_id
+           WHERE cp.project = ?
+             AND cp.pin_type = 'soft'
+             AND (
+               datetime(COALESCE(mc.last_accessed, cp.pinned_at)) <
+               datetime('now', ? || ' days')
+             )""",
+        (project, f"-{decay_days}"),
+    ).fetchall()
+
+    if not stale_rows:
+        return 0
+
+    stale_ids = [r[0] for r in stale_rows]
+    for cid in stale_ids:
+        conn.execute(
+            "DELETE FROM chunk_pins WHERE chunk_id=? AND project=? AND pin_type='soft'",
+            (cid, project),
+        )
+    return len(stale_ids)
+
+
+def enforce_pin_cap(conn: sqlite3.Connection, project: str,
+                    cap_pct: int = None) -> int:
+    """
+    迭代356：Pin 上限执行 — 超过 cap_pct% 时驱逐最旧 soft pin。
+
+    OS 类比：RLIMIT_MEMLOCK 在 mlock() 时检查当前 locked_vm，
+    超限则 EAGAIN（或主动释放）。
+
+    策略：
+      1. 计算当前项目总 chunk 数
+      2. 计算当前 pin 数量（hard + soft）
+      3. 若 pin_count > cap_pct% × total → 按 pinned_at ASC 驱逐最旧 soft pin
+      注：hard pin 不被驱逐（架构约束必须保留）
+
+    返回驱逐的 soft pin 数量。
+    """
+    from config import get as _cfg
+    if not _cfg("pin.cap_apply_on_pin"):
+        return 0
+    if cap_pct is None:
+        cap_pct = _cfg("pin.cap_pct")
+
+    total = conn.execute(
+        "SELECT COUNT(*) FROM memory_chunks WHERE project=?", (project,)
+    ).fetchone()[0]
+    if total == 0:
+        return 0
+
+    cap_limit = max(1, int(total * cap_pct / 100))
+    pin_count = conn.execute(
+        "SELECT COUNT(*) FROM chunk_pins WHERE project=?", (project,)
+    ).fetchone()[0]
+
+    if pin_count <= cap_limit:
+        return 0
+
+    # 超限：驱逐最旧的 soft pin（按 pinned_at 升序）
+    excess = pin_count - cap_limit
+    oldest_soft = conn.execute(
+        """SELECT cp.chunk_id FROM chunk_pins cp
+           WHERE cp.project = ? AND cp.pin_type = 'soft'
+           ORDER BY cp.pinned_at ASC
+           LIMIT ?""",
+        (project, excess),
+    ).fetchall()
+
+    if not oldest_soft:
+        return 0
+
+    evicted = 0
+    for row in oldest_soft:
+        conn.execute(
+            "DELETE FROM chunk_pins WHERE chunk_id=? AND project=? AND pin_type='soft'",
+            (row[0], project),
+        )
+        evicted += 1
+    return evicted
+
+
 # ── 迭代304：知识图谱关系边 API ────────────────────────────────────────────
 # OS 类比：Linux 内核模块依赖图（module_kobject + sysfs /sys/module/<mod>/holders/）
 #   insert_edge  ≈ modprobe 写入依赖条目
@@ -3509,3 +3646,52 @@ def reap_ghosts(conn: sqlite3.Connection,
     except Exception as e:
         return {"reaped_count": 0, "ghost_ids": [], "projects_stats": {}, "dry_run": dry_run,
                 "error": str(e)}
+
+
+# ── 迭代360：FTS5 Auto-Optimize（降低 P95 延迟）────────────────────────────────
+# OS 类比：ext4 e2fsck online defrag — 合并碎片化的 b-tree segment，
+#   减少 FTS5 查询时需要扫描的 segment 数量（O(S×logN) → O(logN)）。
+#
+# 问题根因（v5 audit, 2026-04-28）：
+#   SQLite FTS5 在每次 insert/delete/update 后生成新的 b-tree segment。
+#   当 segment 数量 S 增大时，FTS5 查询需要合并 S 个 posting list，
+#   时间复杂度从 O(logN) 退化为 O(S×logN)。
+#   实测：352 次历史写入（105 chunk）→ 产生大量碎片化 segment → P95=273ms。
+#   FTS5 optimize 命令：强制合并所有 segment → 单 segment → O(logN)。
+#
+# 冷却保护：至少间隔 _FTS_OPTIMIZE_INTERVAL 秒（默认 3600 秒 = 1 小时），
+#   避免高频写入场景下 optimize 本身成为性能瓶颈（optimize 是重写操作）。
+#   OS 类比：e4defrag 的 min_defrag_interval — 防止 defrag 自我拖累。
+
+_FTS_OPTIMIZE_INTERVAL: float = 3600.0  # 冷却时间（秒），最少 1 小时间隔
+_fts_last_optimize: float = 0.0  # 上次 optimize 的 monotonic 时间戳
+
+
+def fts_optimize(conn: sqlite3.Connection, force: bool = False) -> bool:
+    """
+    迭代360：触发 FTS5 segment 合并优化，降低查询 P95 延迟。
+    OS 类比：ext4 online defrag (e4defrag) — 在线整理碎片，不需要 unmount。
+
+    SQLite FTS5 在每次 insert 后生成新 segment；累积多个 segment 后，
+    查询需要扫描所有 segment（O(S × log N)），S 增大导致 P95 上升。
+    optimize 命令将所有 segment 合并为 1 个（O(log N)）。
+
+    Args:
+      conn:  SQLite 连接
+      force: True = 跳过冷却时间检查，强制执行
+
+    Returns:
+      True  = 执行了 optimize
+      False = 冷却期内跳过，或执行失败
+    """
+    global _fts_last_optimize
+    import time as _time
+    now = _time.monotonic()
+    if not force and (now - _fts_last_optimize) < _FTS_OPTIMIZE_INTERVAL:
+        return False
+    try:
+        conn.execute("INSERT INTO memory_chunks_fts(memory_chunks_fts) VALUES('optimize')")
+        _fts_last_optimize = now
+        return True
+    except Exception:
+        return False

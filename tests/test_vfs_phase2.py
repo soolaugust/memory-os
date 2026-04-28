@@ -160,9 +160,17 @@ class TestSQLiteBackend:
 
     def test_search_returns_results(self):
         """测试搜索返回结果"""
+        import sqlite3 as _sq
         db_path = Path.home() / ".claude" / "memory-os" / "store.db"
         if not db_path.exists():
             pytest.skip("Store DB not found")
+        # 校验 SQLite 文件头（magic: "SQLite format 3\000"）
+        try:
+            with open(db_path, "rb") as _f:
+                if _f.read(16)[:6] != b"SQLite":
+                    pytest.skip("Store DB is not a valid SQLite file")
+        except OSError:
+            pytest.skip("Store DB not readable")
 
         backend = SQLiteBackend(db_path=db_path, readonly=True)
         results = backend.search("BM25", top_k=5)

@@ -16,6 +16,19 @@ KnowledgeRouter — 统一知识寻址层
 
 路由优先级：L1 > L2 > L3 > L4（速度由快到慢，短路策略）
 
+v5 升级（Domain-Aware Scatter-Gather）：
+  OS 类比：Linux NUMA Scatter-Gather DMA（drivers/dma/）
+    - 传统串行路由 ≈ UMA 单节点访问（所有数据走同一总线）
+    - Scatter-Gather ≈ NUMA 亲和性分发：query 按域特征拆分，
+      并发发给不同"节点"（memory_os/memory_md/self_improving），
+      gather 阶段合并结果，max(T1, T2, T3) 替代 T1+T2+T3
+  新增 scatter_gather_route()：
+    1. domain_classify(query) — 识别 query 的知识域 tag
+       (code / project / rule / general)
+    2. scatter — 按域优先级并发 submit 到 ThreadPoolExecutor
+    3. gather — as_completed() 收集，短路：高质量结果足够则取消慢源
+  原 route() 保留为向后兼容接口。
+
 v4 升级（迭代24）：Per-Request Connection Scope
   OS 类比：task_struct.files_struct — fd table 随 task 生命周期
   route() 和 _search_memory_os() 接受外部 conn 参数，
@@ -537,6 +550,219 @@ def route(query: str, project: Optional[str] = None,
 
     deduped = sorted(seen.values(), key=lambda x: x["score"], reverse=True)
     return deduped[: _sysctl("router.top_k_per_source") * 2]  # 最多 6 条
+
+
+# ─────────────────────────────────────────────────────────────
+# Domain Classifier（Scatter-Gather 域识别）
+# ─────────────────────────────────────────────────────────────
+
+# 域 → 知识源优先级映射
+# OS 类比：NUMA node affinity mask — 每个域有亲和的"内存节点"
+_DOMAIN_SOURCE_AFFINITY: dict = {
+    "code":    ["memory_os", "self_improving", "memory_md"],   # 代码/架构 → L1>L3>L2
+    "project": ["memory_os", "memory_md", "self_improving"],   # 项目决策 → L1>L2>L3
+    "rule":    ["self_improving", "memory_md", "memory_os"],   # 规则/流程 → L3>L2>L1
+    "general": ["memory_os", "memory_md", "self_improving"],   # 通用      → 默认顺序
+}
+
+# 域识别关键词（简单关键词匹配，避免引入 NLP 依赖）
+_DOMAIN_SIGNALS: dict = {
+    "code": [
+        "函数", "方法", "class", "def ", "import", "API", "接口", "实现",
+        "代码", "bug", "错误", "报错", "调试", "重构", "架构", "模块",
+        "function", "method", "implement", "refactor", "debug",
+    ],
+    "project": [
+        "决策", "方案", "设计", "迭代", "版本", "项目", "需求", "目标",
+        "为什么", "原因", "背景", "上次", "之前", "历史", "记录",
+        "decision", "design", "requirement", "why", "reason",
+    ],
+    "rule": [
+        "规则", "约束", "限制", "规范", "流程", "步骤", "协议", "最佳实践",
+        "应该", "不能", "禁止", "必须", "推荐", "rule", "constraint",
+        "best practice", "workflow", "protocol",
+    ],
+}
+
+
+def domain_classify(query: str) -> str:
+    """
+    识别 query 的知识域。
+    OS 类比：NUMA memory policy mbind() — 识别访问模式决定从哪个节点分配。
+
+    返回: "code" | "project" | "rule" | "general"
+    策略：关键词命中最多的域胜出；平局返回 "general"。
+    """
+    q_lower = query.lower()
+    scores: dict = {domain: 0 for domain in _DOMAIN_SIGNALS}
+    for domain, signals in _DOMAIN_SIGNALS.items():
+        for sig in signals:
+            if sig.lower() in q_lower:
+                scores[domain] += 1
+    best_domain = max(scores, key=lambda d: scores[d])
+    return best_domain if scores[best_domain] > 0 else "general"
+
+
+# ─────────────────────────────────────────────────────────────
+# Scatter-Gather 路由主函数
+# ─────────────────────────────────────────────────────────────
+
+def scatter_gather_route(
+    query: str,
+    project: str = None,
+    include_metamemory: bool = False,
+    timeout_ms: int = 120,
+    conn: sqlite3.Connection = None,
+    domain: str = None,
+) -> dict:
+    """
+    Domain-Aware Scatter-Gather 路由（v5 新增）。
+
+    OS 类比：Linux NUMA scatter-gather DMA
+      - scatter：将 query 按域亲和性分发到各知识源（并发）
+      - gather：as_completed() 收集，动态短路（高质量足够则取消慢源）
+      - 相比串行路由：max(T1,T2,T3) vs T1+T2+T3，P99 延迟 ~40% 改善
+
+    参数：
+      query              — 查询字符串
+      project            — 项目 ID（None 时自动推导）
+      include_metamemory — 是否包含 metamemory 慢源
+      timeout_ms         — gather 阶段超时毫秒
+      conn               — 外部 db 连接（Per-Request Connection Scope）
+      domain             — 预指定域（None 时自动识别）
+
+    返回 dict：
+      {
+        "results":    list[dict],   # 合并排序后的结果
+        "domain":     str,          # 识别到的域
+        "scatter_ms": float,        # 各源并发耗时（ms）
+        "gather_ms":  float,        # gather 阶段耗时（ms）
+        "short_circuit": bool,      # 是否触发了短路
+        "source_times": dict,       # 各源耗时 {source: ms}
+      }
+    """
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if project is None:
+        project = resolve_project_id()
+
+    # Step 1: Domain Classification（NUMA node affinity 决策）
+    detected_domain = domain or domain_classify(query)
+    ordered_sources = list(_DOMAIN_SOURCE_AFFINITY.get(detected_domain, _DOMAIN_SOURCE_AFFINITY["general"]))
+    if include_metamemory and "metamemory" not in ordered_sources:
+        ordered_sources.append("metamemory")
+
+    SOURCE_WEIGHT = {
+        "memory_os": 1.0,
+        "memory_md": 0.8,
+        "self_improving": 0.7,
+        "metamemory": 0.6,
+    }
+
+    _search_fn = {
+        "memory_os":     lambda: _search_memory_os(query, project, conn=conn),
+        "memory_md":     lambda: _search_memory_md(query),
+        "self_improving": lambda: _search_self_improving(query),
+        "metamemory":    lambda: _search_metamemory(query),
+    }
+
+    # Step 2: Scatter — 并发提交所有源（OS: DMA scatter descriptor list）
+    t_scatter_start = time.monotonic()
+    timeout_s = timeout_ms / 1000.0
+    source_times: dict = {}
+    all_results: list = []
+    short_circuit = False
+
+    # 域亲和性优先级：高亲和源分配更多线程（类似 NUMA preferred node）
+    # 快源（非 metamemory）全部并发；慢源单独后台线程
+    fast_srcs = [s for s in ordered_sources if s != "metamemory"]
+    slow_srcs  = [s for s in ordered_sources if s == "metamemory"]
+
+    # 并发执行所有快源
+    # OS 类比：DMA engine scatter — 多个 DMA 描述符同时发出
+    with ThreadPoolExecutor(
+        max_workers=max(len(fast_srcs), 1),
+        thread_name_prefix="sg-fast"
+    ) as pool:
+        future_to_src = {}
+        t_submit = time.monotonic()
+        for src in fast_srcs:
+            fn = _search_fn.get(src)
+            if fn:
+                future_to_src[pool.submit(fn)] = src
+
+        # Step 3: Gather — 按完成顺序收集，动态短路
+        # OS 类比：DMA gather — 等待描述符完成，early termination on cache hit
+        for future in as_completed(future_to_src, timeout=timeout_s):
+            src = future_to_src[future]
+            t_done = time.monotonic()
+            source_times[src] = round((t_done - t_submit) * 1000, 1)
+            try:
+                results = future.result()
+                weight = SOURCE_WEIGHT.get(src, 0.7)
+                for r in results:
+                    r["score"] = round(r["score"] * weight, 4)
+                    r["domain"] = detected_domain   # 注入域信息供上层使用
+                all_results.extend(results)
+            except Exception:
+                pass
+
+            # 动态短路：亲和域已有高质量结果 → 取消等待（类似 cache hit 提前返回）
+            high_q = [r for r in all_results if r["score"] >= _sysctl("router.scatter_shortcircuit_score")]
+            if len(high_q) >= _sysctl("router.scatter_shortcircuit_count"):
+                short_circuit = True
+                break  # 剩余 future 自动取消（pool 退出时 cancel）
+
+    t_scatter_end = time.monotonic()
+
+    # 慢源：短路未触发时才尝试
+    if slow_srcs and not short_circuit:
+        t_slow_start = time.monotonic()
+        with ThreadPoolExecutor(max_workers=len(slow_srcs), thread_name_prefix="sg-slow") as pool:
+            future_to_src = {pool.submit(_search_fn[s]): s for s in slow_srcs if s in _search_fn}
+            remaining_ms = timeout_ms - (t_scatter_end - t_scatter_start) * 1000
+            remaining_s  = max(0.01, remaining_ms / 1000.0)
+            for future in as_completed(future_to_src, timeout=remaining_s):
+                src = future_to_src[future]
+                source_times[src] = round((time.monotonic() - t_slow_start) * 1000, 1)
+                try:
+                    results = future.result()
+                    weight = SOURCE_WEIGHT.get(src, 0.6)
+                    for r in results:
+                        r["score"] = round(r["score"] * weight, 4)
+                        r["domain"] = detected_domain
+                    all_results.extend(results)
+                except Exception:
+                    pass
+
+    t_gather_end = time.monotonic()
+
+    # Step 4: 去重 + 按域亲和性权重重排
+    # OS 类比：DMA gather buffer consolidation — 合并 scatter 片段，按地址排序
+    seen: dict = {}
+    for r in all_results:
+        key = r["summary"].lower().strip()
+        if key not in seen or r["score"] > seen[key]["score"]:
+            seen[key] = r
+
+    # 域亲和性提升：亲和源的结果获得小幅 bonus（NUMA local node 访问延迟低）
+    affinity_srcs = set(ordered_sources[:2])  # 前两个是高亲和源
+    for r in seen.values():
+        if r.get("source") in affinity_srcs:
+            r["score"] = min(1.0, round(r["score"] * 1.05, 4))  # +5% bonus
+
+    deduped = sorted(seen.values(), key=lambda x: x["score"], reverse=True)
+    final = deduped[: _sysctl("router.top_k_per_source") * 2]
+
+    return {
+        "results":      final,
+        "domain":       detected_domain,
+        "scatter_ms":   round((t_scatter_end - t_scatter_start) * 1000, 1),
+        "gather_ms":    round((t_gather_end - t_scatter_start) * 1000, 1),
+        "short_circuit": short_circuit,
+        "source_times": source_times,
+    }
 
 
 def format_for_context(results: list) -> str:

@@ -143,7 +143,7 @@ def test_zone_low():
         print("  T2 ZONE_LOW ⚠ skipped (global baseline too high, isolation issue)")
         return
 
-    _fill_project(conn, project, fill_count, importance=0.4)
+    _fill_project(conn, project, fill_count, importance=0.4, days_ago=1)  # 绕过10分钟 grace period
 
     count_before = get_project_chunk_count(conn, project)
     result = kswapd_scan(conn, project, incoming_count=1)
@@ -174,7 +174,7 @@ def test_zone_min():
     global_base = conn.execute("SELECT COUNT(*) FROM memory_chunks").fetchone()[0]
     target_global = int(quota * pages_min_pct / 100) + 5
     fill_count = max(5, target_global - global_base)
-    _fill_project(conn, project, fill_count, importance=0.4)
+    _fill_project(conn, project, fill_count, importance=0.4, days_ago=1)  # 绕过10分钟 grace period
 
     result = kswapd_scan(conn, project, incoming_count=1)
     count_after = get_project_chunk_count(conn, project)
@@ -344,7 +344,7 @@ def test_sysctl_tunables():
 # ── T9: Writer integration ──
 def test_writer_uses_kswapd():
     """writer.py 使用 kswapd_scan 而非旧 OOM handler。"""
-    writer_path = _ROOT / "hooks" / "writer.py"
+    writer_path = _ROOT.parent / "hooks" / "writer.py"
     code = writer_path.read_text()
     assert "kswapd_scan" in code, "writer.py should import kswapd_scan"
     assert "kswapd_scan(conn" in code, "writer.py should call kswapd_scan"
@@ -357,7 +357,7 @@ def test_writer_uses_kswapd():
 # ── T10: Extractor integration ──
 def test_extractor_uses_kswapd():
     """extractor.py 使用 kswapd_scan 而非旧 OOM handler。"""
-    ext_path = _ROOT / "hooks" / "extractor.py"
+    ext_path = _ROOT.parent / "hooks" / "extractor.py"
     code = ext_path.read_text()
     assert "kswapd_scan" in code, "extractor.py should import kswapd_scan"
     assert "kswapd_scan(conn" in code, "extractor.py should call kswapd_scan"

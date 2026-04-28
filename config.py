@@ -114,6 +114,20 @@ _REGISTRY: dict = {
         "最低 BM25 分数阈值"),
     "router.cache_ttl_secs": (300, int, 0, 3600, None,
         "进程内缓存 TTL（秒）"),
+    "router.scatter_shortcircuit_score": (0.75, float, 0.0, 1.0, None,
+        "Scatter-Gather 短路触发分数阈值（高质量结果 score >= 此值时短路）"),
+    "router.scatter_shortcircuit_count": (3, int, 1, 10, None,
+        "Scatter-Gather 短路触发最少结果数（>= N 条高质量结果时短路）"),
+    "working_set.max_chunks": (200, int, 50, 2000, None,
+        "Per-Agent Working Set 最大 chunk 数（超出时 LRU 驱逐）"),
+    "working_set.flush_dirty_on_exit": (True, bool, None, None, None,
+        "Session 结束时是否 flush dirty chunks 回 store.db"),
+    "prefetch.enabled": (True, bool, None, None, None,
+        "是否启用 PreTool 预取引擎"),
+    "prefetch.max_chunks": (10, int, 1, 50, None,
+        "每次 PreTool 预取的最大 chunk 数"),
+    "prefetch.timeout_ms": (80, int, 10, 500, None,
+        "预取操作超时毫秒数（不阻塞主路径）"),
 
     # ── scheduler（迭代28）──
     "scheduler.skip_max_chars": (8, int, 3, 30, None,
@@ -427,6 +441,39 @@ _REGISTRY: dict = {
     "retriever.max_forced_constraints": (3, int, 1, 16, None,
         "design_constraint 强制注入的最大数量（迭代128：防止约束膨胀，按 BM25 相关性择优注入）"),
 
+    # ── Proactive Swap Probe（迭代355）──
+    # OS 类比：Linux MGLRU (Multi-Generation LRU) 主动提升 swap 热页
+    # 即使 FTS5 已有结果，仍检查 swap 中高 importance chunk 是否更相关
+    "retriever.proactive_swap_enabled": (True, bool, None, None, None,
+        "主动 swap 探针：即使 top_k 非空，仍检查 swap 中高 importance 的 chunk（迭代355）"),
+    "retriever.proactive_swap_imp_threshold": (0.80, float, 0.5, 1.0, None,
+        "proactive swap 探针的 importance 阈值：只恢复 importance >= 此值的 chunk"),
+    "retriever.proactive_swap_max_restore": (3, int, 1, 10, None,
+        "每次查询最多从 swap 恢复多少个 chunk（限制写连接切换开销）"),
+
+    # ── Pin Decay + Cap（迭代356）──
+    # OS 类比：Linux memcg pin_user_pages_lock + RLIMIT_MEMLOCK
+    # 问题：chunk_pins 无过期机制，45% pin rate（47/105）阻塞 LRU 驱逐空间
+    "pin.decay_enabled": (True, bool, None, None, None,
+        "Pin 衰减开关：长期未访问的 soft pin 自动解除（迭代356）"),
+    "pin.decay_days": (30, int, 7, 180, None,
+        "soft pin 衰减阈值（天）：soft pin 的 chunk 超过 N 天未访问则自动解除"),
+    "pin.cap_pct": (15, int, 5, 50, None,
+        "项目 pin 上限（%）：pinned chunk 占项目总量不超过此比例（hard+soft 合计）"),
+    "pin.cap_apply_on_pin": (True, bool, None, None, None,
+        "新增 pin 时立即检查 cap，超限则驱逐最旧 soft pin（类比 RLIMIT_MEMLOCK enforcement）"),
+
+    # ── Cross-Session KSM（迭代358）──
+    # OS 类比：Linux KSM (Kernel Samepage Merging) ksmd 线程周期扫描
+    # 问题：项目的 17 个 session 各自从 cold start 重新加载相同 chunk，
+    # 无法共享跨 session 热点知识（KSM 缺失导致 knowledge locality 低）
+    "ksm.enabled": (True, bool, None, None, None,
+        "跨 Session KSM：扫描多 session working set 共享热点 chunk（迭代358）"),
+    "ksm.min_access_count": (3, int, 1, 20, None,
+        "chunk 在单 session 中的最低访问次数（才被视为热点候选）"),
+    "ksm.min_sessions": (2, int, 2, 10, None,
+        "chunk 必须出现在至少 N 个 session 才被提升（防止单 session 噪音）"),
+
     # ── TLB v2（迭代64）──
     "retriever.tlb_max_entries": (8, int, 1, 64, None,
         "TLB 最大 slot 数量（类比 CPU TLB 通常 64-1024 entries）"),
@@ -434,6 +481,11 @@ _REGISTRY: dict = {
     # ── Memory Zones（迭代82）──
     "retriever.exclude_types": ("prompt_context", str, None, None, None,
         "逗号分隔的 chunk_type 列表，从检索候选中排除（OS 类比：Linux ZONE_RESERVED）"),
+
+    # ── 迭代359：Session Injection Deduplication ──
+    "retriever.session_dedup_threshold": (2, int, 1, 10, None,
+        "同一 session 内 chunk 被注入 >= 此次数后从输出中去重（OS 类比：copy-on-write lazy page dedup，"
+        "只有同一页被重复 mapped 达到阈值才触发物理页合并）。design_constraint 类型豁免。"),
 
     # ── Context Pressure Governor（迭代55）──
     "governor.turns_low": (5, int, 1, 20, None,

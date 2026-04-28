@@ -20,7 +20,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 sys.path.insert(0, str(Path(__file__).parent))
-sys.path.insert(0, str(Path(__file__).parent / "hooks"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 import tmpfs  # noqa
 
@@ -57,7 +57,7 @@ def _make_chunk(cid, chunk_type, summary, content, project="test"):
 
 
 # 复用 backfill 工具函数
-sys.path.insert(0, str(Path(__file__).parent / "tools"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "tools"))
 from backfill_content import _is_rich_content, _build_rich_content
 
 

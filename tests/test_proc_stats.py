@@ -46,7 +46,7 @@ def _assert(cond, msg):
 
 
 def _make_chunk(project, chunk_type, summary, importance=0.5,
-                access_count=0, age_days=0):
+                access_count=0, age_days=1):  # age_days=1 绕过10分钟 grace period
     """创建测试 chunk，可指定 age（通过调整 last_accessed）。"""
     ts = datetime.now(timezone.utc) - timedelta(days=age_days)
     ts_iso = ts.isoformat()

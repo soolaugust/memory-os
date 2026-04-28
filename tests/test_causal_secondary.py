@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-sys.path.insert(0, str(Path(__file__).parent / "hooks"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 import tmpfs  # noqa
 

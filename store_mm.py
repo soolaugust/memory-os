@@ -108,6 +108,28 @@ def kswapd_scan(conn: sqlite3.Connection, project: str,
         except Exception:
             pass  # compaction 失败不影响主流程
 
+    # ── Phase 0.5: Pin Decay + Cap（迭代356）──
+    # OS 类比：memcg 的 RLIMIT_MEMLOCK enforcement — 在 kswapd 扫描前先释放
+    # 过期的 mlock 区域，让 LRU 有更多可驱逐目标。
+    # 这里：soft pin 超期自动解除 → 参与正常 LRU eviction；
+    #       pin count > cap → 驱逐最旧 soft pin。
+    try:
+        from store_vfs import pin_decay as _pin_decay, enforce_pin_cap as _enforce_pin_cap
+        _pin_decay(conn, project)
+        _enforce_pin_cap(conn, project)
+    except Exception:
+        pass  # pin decay 失败不阻塞 kswapd
+
+    # ── Phase 0.6: FTS5 Auto-Optimize（迭代360）──
+    # OS 类比：kswapd 附带触发 ext4 online defrag — 后台维护 FTS5 索引健康度，
+    #   合并碎片化 segment，使 FTS5 查询从 O(S×logN) 降回 O(logN)。
+    # 有冷却保护（默认 1h），不频繁触发；kswapd 是低频后台路径，适合承载此任务。
+    try:
+        from store_vfs import fts_optimize as _fts_optimize
+        _fts_optimize(conn)
+    except Exception:
+        pass  # FTS5 optimize 失败不阻塞 kswapd
+
     # ── Phase 1: Stale page reclaim（过期 chunk 回收）──
     # OS 类比：kswapd 优先回收 inactive_list 尾部（长时间未访问的页面）
     stale_evicted = _reclaim_stale_chunks(conn, project, stale_days, batch_size)
@@ -3209,3 +3231,116 @@ def _governor_save_state(state: dict):
         )
     except Exception:
         pass
+
+
+# ── 迭代362：Swap Warmup — 会话启动时预热高价值 swap chunk ───────────────────
+# OS 类比：Linux MGLRU proactive reclaim (5.17+) 反向操作 — 在进程首次访问页面之前，
+#   kswapd 已根据访问历史将热 swap page 提前 swap_in 到 inactive_list。
+#   传统模型：page fault → swap_in（每次 query 都付 swap_fault 检测开销）
+#   MGLRU 模型：后台 scan 热 swap page → 提前 swap_in → 首次访问命中 page cache
+#
+# memory-os 等价问题：
+#   swap_chunks 中有高 importance（avg=0.885）的 chunk，0 次 swap_fault 被触发，
+#   因为 swap_fault 只在 FTS5 完全 miss（use_fts=False）时才执行。
+#   这些高价值 chunk 在新会话中永远不被找到（dead cold start）。
+#
+# 解决：会话启动时（loader/session_start hook）调用一次 warmup_swap_cache：
+#   1. 查询 swap_chunks 中 importance >= threshold 的高价值 chunk
+#   2. swap_in 恢复到主表（memory_chunks）
+#   3. 后续 retriever 正常 FTS5 路径即可召回这些 chunk
+#   4. 有每会话冷却（_WARMUP_COOLDOWN_FILE）防止重复执行
+
+_WARMUP_COOLDOWN_FILE = MEMORY_OS_DIR / ".last_swap_warmup.json"
+_WARMUP_SESSION_COOLDOWN = 300.0  # 同一 session 内最多每 5 分钟执行一次
+
+
+def warmup_swap_cache(conn: sqlite3.Connection, project: str,
+                      importance_threshold: float = 0.8,
+                      max_warmup: int = 10,
+                      session_id: str = "") -> dict:
+    """
+    迭代362：会话启动预热 — 将 swap_chunks 中高 importance chunk 恢复到主表。
+
+    Args:
+        conn: 写连接（swap_in 需要修改主表）
+        project: 项目 ID
+        importance_threshold: 最低 importance 阈值（默认 0.8）
+        max_warmup: 最多恢复 chunk 数（防止冷启动加速过度）
+        session_id: 当前 session ID（用于冷却判断）
+
+    Returns:
+        {restored_count, skipped_cooldown, chunk_ids}
+    """
+    import time as _wt
+
+    # ── 冷却检查：同一 session 内防止重复执行 ──
+    try:
+        if _WARMUP_COOLDOWN_FILE.exists():
+            cooldown_data = json.loads(_WARMUP_COOLDOWN_FILE.read_text("utf-8"))
+            last_session = cooldown_data.get("session_id", "")
+            last_ts = cooldown_data.get("timestamp", 0.0)
+            now_ts = _wt.time()
+            if (last_session == session_id and session_id
+                    and (now_ts - last_ts) < _WARMUP_SESSION_COOLDOWN):
+                return {"restored_count": 0, "skipped_cooldown": True, "chunk_ids": []}
+    except Exception:
+        pass  # 冷却文件读取失败，继续执行
+
+    try:
+        from store_core import swap_in as _swap_in, swap_fault as _swap_fault
+    except Exception:
+        return {"restored_count": 0, "skipped_cooldown": False, "chunk_ids": []}
+
+    # ── 查询 swap_chunks 中高价值 chunk ──
+    # swap_chunks 表字段：id, swapped_at, project, chunk_type, original_importance,
+    #   access_count_at_swap, compressed_data（无 resolved 字段）
+    try:
+        rows = conn.execute(
+            """SELECT id, original_importance FROM swap_chunks
+               WHERE project = ?
+                 AND original_importance >= ?
+               ORDER BY original_importance DESC
+               LIMIT ?""",
+            (project, importance_threshold, max_warmup),
+        ).fetchall()
+    except Exception:
+        return {"restored_count": 0, "skipped_cooldown": False, "chunk_ids": []}
+
+    if not rows:
+        return {"restored_count": 0, "skipped_cooldown": False, "chunk_ids": []}
+
+    swap_ids = [r[0] for r in rows]
+
+    # ── 执行 swap_in ──
+    try:
+        result = _swap_in(conn, swap_ids)
+        restored_count = result.get("restored_count", 0)
+
+        if restored_count > 0:
+            conn.commit()
+            try:
+                dmesg_log(conn, DMESG_INFO, "warmup",
+                          f"swap_warmup: restored={restored_count} "
+                          f"imp>={importance_threshold:.2f} project={project}",
+                          session_id=session_id, project=project)
+            except Exception:
+                pass
+
+        # ── 更新冷却文件 ──
+        try:
+            MEMORY_OS_DIR.mkdir(parents=True, exist_ok=True)
+            _WARMUP_COOLDOWN_FILE.write_text(
+                json.dumps({"session_id": session_id,
+                            "timestamp": _wt.time(),
+                            "restored_count": restored_count},
+                           ensure_ascii=False),
+                encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+        return {"restored_count": restored_count, "skipped_cooldown": False,
+                "chunk_ids": swap_ids[:restored_count]}
+
+    except Exception:
+        return {"restored_count": 0, "skipped_cooldown": False, "chunk_ids": []}

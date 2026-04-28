@@ -331,3 +331,518 @@ def dmesg_clear(conn) -> int:
     count = conn.execute("SELECT COUNT(*) FROM dmesg").fetchone()[0]
     conn.execute("DELETE FROM dmesg")
     return count
+
+
+# ── 迭代359/Task11：memory_profile() — Per-Project Memory Profiler ──────────
+# OS 类比：/proc/[pid]/smaps — per-VMA 精细内存映射统计
+#   smaps 是 /proc/[pid]/maps 的增强版，给出每个 VMA 的 RSS/PSS/Private/Shared 细分。
+#   memory_profile(project) 等价于对单个 project（进程）的 smaps 深度分析：
+#     chunk 分布 ≈ RSS（实际占用）
+#     pin_rate ≈ Locked（mlock'd 页比例）
+#     swap_ratio ≈ SwapPss（已 swap out 比例）
+#     ksm_boost ≈ KSMPages（被 KSM 合并/提升的页数）
+#     dedup_rate ≈ KSM dedup savings（注入去重节省率）
+
+def memory_profile(conn=None, project: str = None) -> dict:
+    """
+    迭代359/Task11：Per-project memory profiler。
+    OS 类比：/proc/[pid]/smaps — 进程级精细内存分析。
+
+    参数：
+      conn — SQLite 连接（None 时自动打开）
+      project — 目标项目（None 时返回全局汇总）
+
+    返回 dict，包含：
+      summary — 快照摘要（total/active/pinned/swapped/zero_access）
+      pin_analysis — pin 类型分布（hard/soft/unpinned）
+      swap_analysis — swap 统计（total_swapped/swap_ratio）
+      ksm_analysis — KSM/知识提升统计（high_retrievability/ksm_candidates）
+      access_distribution — access_count 分布（buckets：0/1-5/6-20/21+）
+      importance_distribution — importance 分布
+      session_dedup — 注入去重效率估算
+      type_breakdown — 各 chunk_type 的细粒度分析
+      recommendations — 基于指标的优化建议列表
+    """
+    own_conn = conn is None
+    if own_conn:
+        if not STORE_DB.exists():
+            return {"error": "store.db not found"}
+        conn = open_db()
+        ensure_schema(conn)
+
+    try:
+        where = "WHERE project=?" if project else ""
+        params = (project,) if project else ()
+        where_and = ("AND project=?" if project else "")
+
+        # ── summary ──
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM memory_chunks {where}", params
+        ).fetchone()[0]
+
+        stale_7d = conn.execute(
+            f"SELECT COUNT(*) FROM memory_chunks {where} "
+            f"{'AND' if project else 'WHERE'} "
+            f"datetime(last_accessed) < datetime('now', '-7 days')",
+            params,
+        ).fetchone()[0]
+
+        zero_access = conn.execute(
+            f"SELECT COUNT(*) FROM memory_chunks {where} "
+            f"{'AND' if project else 'WHERE'} "
+            f"COALESCE(access_count, 0) = 0",
+            params,
+        ).fetchone()[0]
+
+        # ── pin analysis ──
+        pin_counts = {"hard": 0, "soft": 0}
+        try:
+            pin_sql = (
+                "SELECT pin_type, COUNT(*) FROM chunk_pins WHERE project=? GROUP BY pin_type"
+                if project else
+                "SELECT pin_type, COUNT(*) FROM chunk_pins GROUP BY pin_type"
+            )
+            pin_params = (project,) if project else ()
+            for ptype, cnt in conn.execute(pin_sql, pin_params).fetchall():
+                pin_counts[ptype] = cnt
+        except Exception:
+            pass
+        total_pinned = pin_counts["hard"] + pin_counts["soft"]
+        pin_rate = round(total_pinned / total * 100, 1) if total > 0 else 0.0
+
+        # ── swap analysis ──
+        swap_total = 0
+        try:
+            swap_sql = (
+                "SELECT COUNT(*) FROM swap_chunks WHERE project=?"
+                if project else
+                "SELECT COUNT(*) FROM swap_chunks"
+            )
+            swap_total = conn.execute(swap_sql, params).fetchone()[0]
+        except Exception:
+            pass
+        swap_ratio = round(swap_total / max(1, total + swap_total) * 100, 1)
+
+        # ── KSM / retrievability analysis ──
+        high_ret = conn.execute(
+            f"SELECT COUNT(*) FROM memory_chunks {where} "
+            f"{'AND' if project else 'WHERE'} "
+            f"COALESCE(retrievability, 0.3) >= 0.7",
+            params,
+        ).fetchone()[0]
+        avg_retrievability = conn.execute(
+            f"SELECT AVG(COALESCE(retrievability, 0.3)) FROM memory_chunks {where}",
+            params,
+        ).fetchone()[0]
+
+        # ── access_count distribution ──
+        ac_dist = {"zero": 0, "low_1_5": 0, "mid_6_20": 0, "high_21plus": 0}
+        for label, lo, hi in [
+            ("zero", 0, 0), ("low_1_5", 1, 5), ("mid_6_20", 6, 20), ("high_21plus", 21, 999999)
+        ]:
+            op_lo = "=" if lo == hi else ">="
+            if lo == hi:
+                cond = f"COALESCE(access_count, 0) = {lo}"
+            elif hi == 999999:
+                cond = f"COALESCE(access_count, 0) >= {lo}"
+            else:
+                cond = f"COALESCE(access_count, 0) BETWEEN {lo} AND {hi}"
+            cnt = conn.execute(
+                f"SELECT COUNT(*) FROM memory_chunks {where} "
+                f"{'AND' if project else 'WHERE'} {cond}",
+                params,
+            ).fetchone()[0]
+            ac_dist[label] = cnt
+
+        # ── importance distribution ──
+        imp_dist = {"low_0_0.3": 0, "mid_0.3_0.6": 0, "high_0.6_0.8": 0, "critical_0.8plus": 0}
+        for label, lo, hi in [
+            ("low_0_0.3", 0.0, 0.3), ("mid_0.3_0.6", 0.3, 0.6),
+            ("high_0.6_0.8", 0.6, 0.8), ("critical_0.8plus", 0.8, 1.1)
+        ]:
+            cnt = conn.execute(
+                f"SELECT COUNT(*) FROM memory_chunks {where} "
+                f"{'AND' if project else 'WHERE'} "
+                f"COALESCE(importance, 0.5) >= {lo} AND COALESCE(importance, 0.5) < {hi}",
+                params,
+            ).fetchone()[0]
+            imp_dist[label] = cnt
+
+        # ── type breakdown ──
+        type_rows = conn.execute(
+            f"SELECT chunk_type, COUNT(*), AVG(importance), AVG(COALESCE(access_count,0)) "
+            f"FROM memory_chunks {where} GROUP BY chunk_type ORDER BY COUNT(*) DESC",
+            params,
+        ).fetchall()
+        type_breakdown = {}
+        for ctype, cnt, avg_imp, avg_acc in type_rows:
+            type_breakdown[ctype] = {
+                "count": cnt,
+                "avg_importance": round(avg_imp or 0, 3),
+                "avg_access_count": round(avg_acc or 0, 1),
+                "pct": round(cnt / total * 100, 1) if total > 0 else 0.0,
+            }
+
+        # ── session dedup estimation ──
+        # 高 access_count（>= threshold × 2）的 chunk 是潜在重复注入目标
+        dedup_threshold = 2
+        try:
+            from config import get as _cfg
+            dedup_threshold = _cfg("retriever.session_dedup_threshold")
+        except Exception:
+            pass
+        dedup_candidates = conn.execute(
+            f"SELECT COUNT(*) FROM memory_chunks {where} "
+            f"{'AND' if project else 'WHERE'} "
+            f"COALESCE(access_count, 0) >= {dedup_threshold * 3}",
+            params,
+        ).fetchone()[0]
+        # 估算 tokens saved：每个候选 chunk ~10 tokens/call
+        estimated_tokens_saved_per_call = dedup_candidates * 10
+
+        # ── recommendations ──
+        recommendations = []
+        if zero_access / max(1, total) > 0.3:
+            recommendations.append(
+                f"⚠️ {zero_access}/{total} chunks ({round(zero_access/total*100)}%) 零访问 — "
+                "考虑降低 kswapd.stale_days 或 evict_lowest_retention"
+            )
+        if pin_rate > 20.0:
+            recommendations.append(
+                f"⚠️ pin 率 {pin_rate}% 偏高 — 检查是否过度 pin，考虑 unpin 低价值 chunks"
+            )
+        if swap_ratio > 30.0:
+            recommendations.append(
+                f"⚠️ swap 比 {swap_ratio}% 偏高 — 考虑增加 extractor.chunk_quota 或清理 swap"
+            )
+        if dedup_candidates > 3:
+            recommendations.append(
+                f"💡 {dedup_candidates} 个高频 chunk 可被注入去重，预计节省 "
+                f"~{estimated_tokens_saved_per_call} tokens/call"
+            )
+        if high_ret / max(1, total) < 0.1:
+            recommendations.append(
+                "💡 high-retrievability chunk 占比 < 10% — KSM/close_session 提升较少，"
+                "考虑手动运行 bulk_ksm_scan()"
+            )
+        if not recommendations:
+            recommendations.append("✅ 内存健康，无明显优化建议")
+
+        return {
+            "project": project or "*all*",
+            "summary": {
+                "total": total,
+                "active_7d": total - stale_7d,
+                "stale_7d": stale_7d,
+                "zero_access": zero_access,
+                "pinned": total_pinned,
+                "swapped": swap_total,
+                "pin_rate_pct": pin_rate,
+                "swap_ratio_pct": swap_ratio,
+            },
+            "pin_analysis": {
+                "hard": pin_counts["hard"],
+                "soft": pin_counts["soft"],
+                "total_pinned": total_pinned,
+                "unpinned": total - total_pinned,
+                "pin_rate_pct": pin_rate,
+            },
+            "swap_analysis": {
+                "total_swapped": swap_total,
+                "swap_ratio_pct": swap_ratio,
+                "active_in_memory": total,
+            },
+            "ksm_analysis": {
+                "high_retrievability": high_ret,
+                "avg_retrievability": round(avg_retrievability or 0.3, 3),
+                "ksm_boost_pct": round(high_ret / max(1, total) * 100, 1),
+            },
+            "access_distribution": ac_dist,
+            "importance_distribution": imp_dist,
+            "session_dedup": {
+                "dedup_threshold": dedup_threshold,
+                "dedup_candidates": dedup_candidates,
+                "estimated_tokens_saved_per_call": estimated_tokens_saved_per_call,
+            },
+            "type_breakdown": type_breakdown,
+            "recommendations": recommendations,
+        }
+    finally:
+        if own_conn:
+            conn.close()
+
+
+# ── Task12：Chunk Lifecycle FSM ────────────────────────────────────────────
+# OS 类比：Linux Page State Machine (mm/page_alloc.c, mm/vmscan.c)
+#   物理页在分配/使用/回收过程中穿越多个状态：
+#   PageActive → PageLRU(inactive) → PageSwapCache → PageFree
+#
+# chunk 等价状态机：
+#   ACTIVE  (热数据，≤7天有访问)
+#   ↓ [7天无访问 → mark_cold()]
+#   COLD    (温数据，7-30天无访问)
+#   ↓ [30天无访问 OR DAMON DEAD → mark_dead()]
+#   DEAD    (冷数据，可 swap_out 或 evict)
+#   ↓ [swap_out]           ↓ [evict/gc]
+#   SWAP                   GHOST
+#   ↑ [swap_in]
+#   COLD/ACTIVE（根据 importance 决定）
+#
+# 状态转换：
+#   ACTIVE → COLD        : mark_cold(conn, project, stale_days=7)
+#   COLD   → DEAD        : mark_dead(conn, project, dead_days=30)
+#   DEAD   → GHOST       : mark_ghost(conn, ids)  [evict 前]
+#   any    → ACTIVE      : mark_active(conn, ids)  [update_accessed]
+#   *      → SWAP        : 由 swap_out() 处理（state='SWAP'）
+#   SWAP   → COLD        : 由 swap_in()  处理（state='COLD'）
+
+# 有效状态集合
+CHUNK_STATES = frozenset(["ACTIVE", "COLD", "DEAD", "SWAP", "GHOST"])
+
+
+def mark_active(conn, chunk_ids: list) -> int:
+    """
+    Task12：ACTIVE 转换 — 任意状态 → ACTIVE（update_accessed 触发）。
+    OS 类比：mark_page_accessed() — 设置 PageActive/PageReferenced。
+    返回更新的 chunk 数。
+    """
+    if not chunk_ids:
+        return 0
+    ph = ",".join("?" * len(chunk_ids))
+    result = conn.execute(
+        f"UPDATE memory_chunks SET chunk_state='ACTIVE' WHERE id IN ({ph}) AND chunk_state != 'SWAP'",
+        chunk_ids,
+    )
+    return result.rowcount
+
+
+def mark_cold(conn, project: str = None, stale_days: int = 7) -> int:
+    """
+    Task12：COLD 转换 — ACTIVE → COLD（7天无访问）。
+    OS 类比：shrink_active_list() → inactive list（PG_lru inactive）。
+    返回转换的 chunk 数。
+    """
+    where = "WHERE chunk_state='ACTIVE'"
+    params = []
+    if project:
+        where += " AND project=?"
+        params.append(project)
+    where += f" AND datetime(last_accessed) < datetime('now', '-{stale_days} days')"
+    result = conn.execute(
+        f"UPDATE memory_chunks SET chunk_state='COLD' {where.replace('WHERE', '')}",
+        params,
+    )
+    # 重新构造——SQLite UPDATE syntax
+    where_clause = "chunk_state='ACTIVE'"
+    if project:
+        where_clause += " AND project=?"
+    where_clause += f" AND datetime(last_accessed) < datetime('now', '-{stale_days} days')"
+    conn.execute("UPDATE memory_chunks SET chunk_state='COLD' WHERE " + where_clause, params)
+    return conn.execute(
+        "SELECT changes()"
+    ).fetchone()[0]
+
+
+def mark_dead(conn, project: str = None, dead_days: int = 30) -> int:
+    """
+    Task12：DEAD 转换 — COLD → DEAD（30天无访问 或 importance<0.3 的 COLD chunk）。
+    OS 类比：DAMON DEAD region detection — 长期无访问的内存区域标记为可回收。
+    返回转换的 chunk 数。
+    """
+    where_clause = "chunk_state='COLD'"
+    params = []
+    if project:
+        where_clause += " AND project=?"
+        params.append(project)
+    where_clause += f" AND datetime(last_accessed) < datetime('now', '-{dead_days} days')"
+    conn.execute(
+        "UPDATE memory_chunks SET chunk_state='DEAD' WHERE " + where_clause,
+        params,
+    )
+    return conn.execute("SELECT changes()").fetchone()[0]
+
+
+def mark_ghost(conn, chunk_ids: list) -> int:
+    """
+    Task12：GHOST 转换 — DEAD → GHOST（evict 前短暂标记）。
+    OS 类比：ghost entry in inactive list — 保留 PFN 但清除内容，供下次加速 swap-in。
+    返回转换的 chunk 数。
+    """
+    if not chunk_ids:
+        return 0
+    ph = ",".join("?" * len(chunk_ids))
+    conn.execute(
+        f"UPDATE memory_chunks SET chunk_state='GHOST' WHERE id IN ({ph})",
+        chunk_ids,
+    )
+    return conn.execute("SELECT changes()").fetchone()[0]
+
+
+def fsm_transition(conn, project: str = None,
+                   cold_days: int = 7, dead_days: int = 30) -> dict:
+    """
+    Task12：批量执行 FSM 状态转换（ACTIVE→COLD→DEAD）。
+    OS 类比：Linux kswapd + DAMON 协同驱动页面老化：
+      kswapd 周期性将 inactive list 页面 swap out；
+      DAMON 识别长期无访问区域标记为 DEAD。
+    返回 {cold: n, dead: n} 转换统计。
+    """
+    # Step 1: ACTIVE → COLD（cold_days 天无访问）
+    where_cold = "chunk_state='ACTIVE'"
+    params_cold = []
+    if project:
+        where_cold += " AND project=?"
+        params_cold.append(project)
+    where_cold += f" AND datetime(last_accessed) < datetime('now', '-{cold_days} days')"
+    conn.execute(
+        "UPDATE memory_chunks SET chunk_state='COLD' WHERE " + where_cold, params_cold
+    )
+    cold_count = conn.execute("SELECT changes()").fetchone()[0]
+
+    # Step 2: COLD → DEAD（dead_days 天无访问）
+    where_dead = "chunk_state='COLD'"
+    params_dead = []
+    if project:
+        where_dead += " AND project=?"
+        params_dead.append(project)
+    where_dead += f" AND datetime(last_accessed) < datetime('now', '-{dead_days} days')"
+    conn.execute(
+        "UPDATE memory_chunks SET chunk_state='DEAD' WHERE " + where_dead, params_dead
+    )
+    dead_count = conn.execute("SELECT changes()").fetchone()[0]
+
+    return {"cold": cold_count, "dead": dead_count, "project": project or "*all*"}
+
+
+def get_state_distribution(conn, project: str = None) -> dict:
+    """
+    Task12：查询 chunk_state 分布统计。
+    OS 类比：/proc/meminfo MemActive/MemInactive/MemSwapCached
+    """
+    where = "WHERE project=?" if project else ""
+    params = (project,) if project else ()
+    rows = conn.execute(
+        f"SELECT COALESCE(chunk_state, 'ACTIVE'), COUNT(*) FROM memory_chunks {where} "
+        f"GROUP BY chunk_state",
+        params,
+    ).fetchall()
+    dist = {"ACTIVE": 0, "COLD": 0, "DEAD": 0, "SWAP": 0, "GHOST": 0}
+    for state, cnt in rows:
+        dist[state] = cnt
+    dist["total"] = sum(dist.values())
+    return dist
+
+
+# ── Task13：Optimistic Locking — Compare-And-Swap ──────────────────────────
+# OS 类比：Linux seqlock + atomic_cmpxchg (arch/x86/include/asm/atomic.h)
+#   读路径：read_seqbegin() → 记录 seq_begin
+#   写路径：cmpxchg(ptr, old_val, new_val) → 仅当 *ptr == old_val 时写入
+#   冲突时：返回实际值（caller 决定重试还是放弃）
+#
+# memory-os 多 agent 场景：
+#   Agent A 和 B 同时读到 chunk.row_version=5，都准备更新。
+#   Agent A 先写成功 → row_version=6。
+#   Agent B 写时发现版本已变 (expected=5 but actual=6) → 返回失败。
+#   Agent B 可选择重新读取后重试（optimistic retry）。
+
+def cas_update(conn, chunk_id: str, expected_version: int,
+               updates: dict) -> dict:
+    """
+    Task13：Compare-And-Swap 更新。
+    OS 类比：atomic_cmpxchg — 仅当 row_version == expected_version 时执行更新。
+
+    参数：
+      conn — SQLite 连接
+      chunk_id — 目标 chunk ID
+      expected_version — 调用者上次读取时的 row_version
+      updates — 要更新的字段 dict（不含 id/row_version，会自动递增）
+
+    返回 dict：
+      {"ok": True, "new_version": n}     — 写入成功
+      {"ok": False, "actual_version": n, "reason": "version_conflict"} — 版本冲突
+      {"ok": False, "reason": "not_found"} — chunk 不存在
+    """
+    if not updates:
+        return {"ok": False, "reason": "empty_updates"}
+
+    # 先读当前版本（SELECT FOR UPDATE 语义，SQLite 用事务保证）
+    row = conn.execute(
+        "SELECT row_version FROM memory_chunks WHERE id=?", (chunk_id,)
+    ).fetchone()
+    if row is None:
+        return {"ok": False, "reason": "not_found"}
+
+    actual_version = row[0] or 1
+    if actual_version != expected_version:
+        return {"ok": False, "actual_version": actual_version, "reason": "version_conflict"}
+
+    # 构建 UPDATE 语句
+    allowed_keys = {
+        "summary", "content", "importance", "chunk_type", "tags",
+        "retrievability", "confidence_score", "verification_status",
+        "last_accessed", "updated_at", "raw_snippet", "chunk_state",
+        "oom_adj", "info_class", "stability", "encoding_context",
+    }
+    safe_updates = {k: v for k, v in updates.items() if k in allowed_keys}
+    if not safe_updates:
+        return {"ok": False, "reason": "no_safe_fields"}
+
+    set_parts = [f"{k}=?" for k in safe_updates]
+    set_parts.append("row_version=row_version+1")
+    set_parts.append("updated_at=datetime('now')")
+    sql = f"UPDATE memory_chunks SET {', '.join(set_parts)} WHERE id=? AND row_version=?"
+    values = list(safe_updates.values()) + [chunk_id, expected_version]
+
+    conn.execute(sql, values)
+    changed = conn.execute("SELECT changes()").fetchone()[0]
+    if changed == 0:
+        # 另一个 agent 在我们读取和写入之间抢先写入了
+        actual = conn.execute(
+            "SELECT row_version FROM memory_chunks WHERE id=?", (chunk_id,)
+        ).fetchone()
+        actual_version = actual[0] if actual else None
+        return {"ok": False, "actual_version": actual_version, "reason": "version_conflict"}
+
+    new_version = conn.execute(
+        "SELECT row_version FROM memory_chunks WHERE id=?", (chunk_id,)
+    ).fetchone()[0]
+    return {"ok": True, "new_version": new_version}
+
+
+def get_chunk_version(conn, chunk_id: str) -> int | None:
+    """
+    Task13：获取 chunk 当前 row_version。
+    用于 optimistic locking 的读阶段：先获取版本，再做 cas_update。
+    返回版本号，不存在则返回 None。
+    """
+    row = conn.execute(
+        "SELECT COALESCE(row_version, 1) FROM memory_chunks WHERE id=?", (chunk_id,)
+    ).fetchone()
+    return row[0] if row else None
+
+
+def broadcast_invalidate(conn, chunk_ids: list, agent_id: str = "") -> int:
+    """
+    Task13：广播失效通知 — 向所有共享 chunk 的 agent 发送 IPC 消息。
+    OS 类比：cache coherency protocol broadcast invalidate (MESI protocol)
+      修改方发出 Invalidate 消息，所有持有该缓存行的 CPU 将状态标记为 Invalid。
+    通过 ipc_msgq 表广播，目标 agent='*'（全局广播）。
+    返回广播的消息数。
+    """
+    if not chunk_ids:
+        return 0
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    count = 0
+    try:
+        for cid in chunk_ids:
+            conn.execute(
+                """INSERT INTO ipc_msgq
+                   (source_agent, target_agent, msg_type, payload, created_at, ttl_seconds)
+                   VALUES (?, '*', 'INVALIDATE', ?, ?, 60)""",
+                (agent_id or "system", json.dumps({"chunk_id": cid}), now),
+            )
+            count += 1
+    except Exception:
+        pass
+    return count

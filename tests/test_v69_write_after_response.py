@@ -30,7 +30,7 @@ class TestWriteAfterResponseOrder(unittest.TestCase):
 
     def test_print_before_commit_pattern(self):
         """主路径源码中 print+flush 应在 commit 之前"""
-        retriever_path = _MOS_ROOT / "hooks" / "retriever.py"
+        retriever_path = _MOS_ROOT.parent / "hooks" / "retriever.py"
         lines = retriever_path.read_text("utf-8").splitlines()
 
         # 找到主路径的 Write-After-Response 注释（非 hard deadline）
@@ -43,7 +43,7 @@ class TestWriteAfterResponseOrder(unittest.TestCase):
 
         # 在注释之后的代码行中查找（只看非注释行）
         print_line = flush_line = commit_line = None
-        for i in range(war_line, min(war_line + 60, len(lines))):
+        for i in range(war_line, min(war_line + 100, len(lines))):
             stripped = lines[i].lstrip()
             if stripped.startswith("#"):
                 continue  # 跳过注释行
@@ -51,7 +51,7 @@ class TestWriteAfterResponseOrder(unittest.TestCase):
                 print_line = i
             if "sys.stdout.flush()" in lines[i] and flush_line is None:
                 flush_line = i
-            if "conn.commit()" in lines[i] and commit_line is None:
+            if ("conn.commit()" in lines[i] or "wconn.commit()" in lines[i]) and commit_line is None:
                 commit_line = i
 
         self.assertIsNotNone(print_line, "应找到 print 代码行")
@@ -66,7 +66,7 @@ class TestWriteAfterResponseOrder(unittest.TestCase):
 
     def test_hard_deadline_print_before_commit(self):
         """hard deadline 路径源码中 print+flush 应在 commit 之前"""
-        retriever_path = _MOS_ROOT / "hooks" / "retriever.py"
+        retriever_path = _MOS_ROOT.parent / "hooks" / "retriever.py"
         source = retriever_path.read_text("utf-8")
 
         # 找到 hard deadline 路径的标记
@@ -221,7 +221,7 @@ class TestSourceCodeStructure(unittest.TestCase):
 
     def test_no_print_after_commit_in_main_path(self):
         """主路径中 commit 之后不应有 print（old pattern）"""
-        retriever_path = _MOS_ROOT / "hooks" / "retriever.py"
+        retriever_path = _MOS_ROOT.parent / "hooks" / "retriever.py"
         source = retriever_path.read_text("utf-8")
 
         war_marker = "# ── 迭代69：Write-After-Response — 输出前置，写入后置"
@@ -236,7 +236,7 @@ class TestSourceCodeStructure(unittest.TestCase):
 
     def test_two_flush_points(self):
         """应有恰好 2 个 sys.stdout.flush() 代码行（非注释）"""
-        retriever_path = _MOS_ROOT / "hooks" / "retriever.py"
+        retriever_path = _MOS_ROOT.parent / "hooks" / "retriever.py"
         lines = retriever_path.read_text("utf-8").splitlines()
         code_flush_count = 0
         for line in lines:
@@ -250,7 +250,7 @@ class TestSourceCodeStructure(unittest.TestCase):
 
     def test_write_after_response_comments(self):
         """两个输出点都应有迭代69注释"""
-        retriever_path = _MOS_ROOT / "hooks" / "retriever.py"
+        retriever_path = _MOS_ROOT.parent / "hooks" / "retriever.py"
         source = retriever_path.read_text("utf-8")
 
         self.assertIn("迭代69：Write-After-Response — 输出前置，写入后置", source)

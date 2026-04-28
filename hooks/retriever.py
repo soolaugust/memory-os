@@ -1474,6 +1474,14 @@ def main():
         # 持久化到 .last_session_injections.json（跨请求维护 session 内计数）
         _SESSION_INJ_FILE = os.path.join(MEMORY_OS_DIR, ".last_session_injections.json")
         _session_injection_counts = {}
+        # ── 迭代361：Session FULL-Injected Set — 本 session 已 FULL 注入过的 chunk ID 集合 ──
+        # OS 类比：Linux page cache dirty bit — 已写入页面标记，重复写入时走快路径（LITE format）
+        # 原理：同 session 第一次 FULL 注入 chunk（summary + raw_snippet）后，
+        #   chunk 内容已在 LLM 的工作记忆中，后续注入时 raw_snippet 的边际价值为 0。
+        #   降级为 LITE 格式（仅 summary）节省 ~30-80 tokens/chunk，
+        #   长 session 中可节省 150-400 tokens（假设 3-5 个 chunk 被重复 FULL 注入）。
+        # 实现：与 _session_injection_counts 共存于同一 JSON 文件（zero extra I/O）。
+        _session_full_injected: set = set()
         try:
             if os.path.exists(_SESSION_INJ_FILE):
                 with open(_SESSION_INJ_FILE, encoding="utf-8") as _sif:
@@ -1481,6 +1489,8 @@ def main():
                     # 只保留同一 session 的注入记录（session 切换时重置）
                     if _sij_data.get("session_id") == session_id:
                         _session_injection_counts = _sij_data.get("counts", {})
+                        # 迭代361：恢复 full_injected 集合
+                        _session_full_injected = set(_sij_data.get("full_injected", []))
         except Exception:
             pass
 
@@ -1636,6 +1646,57 @@ def main():
                 score *= 0.70
             return score
 
+        # ── 迭代357：Working Set TLB Probe（pre-FTS5 热数据快速命中）──
+        # OS 类比：CPU TLB lookup before PTW (Page Table Walk)
+        #   命中 TLB → 直接返回物理地址（~1ns，跳过完整页表 walk ~100ns）
+        #   命中 Working Set → 直接返回缓存 chunk（~0.1ms，跳过 FTS5 ~5ms）
+        #
+        # 策略：对 session working set 做 in-memory BM25 快速扫描，
+        #   结果作为高置信度候选并入 FTS5 final 列表（而非替代），
+        #   避免 cold start 时 working set 为空导致召回降级。
+        _ws_hits = []
+        if priority == "FULL" and session_id:
+            try:
+                from agent_working_set import registry as _ws_registry
+                from bm25 import bm25_normalized as _ws_bm25
+                _ws = _ws_registry.get(session_id)
+                if _ws is not None and _ws.size() > 0:
+                    with _ws._lock:
+                        _ws_cached = [(cid, e.chunk, e) for cid, e in _ws._lru.items()]
+                    if _ws_cached:
+                        _ws_docs = [f"{c.summary} {c.content[:80]}" for _, c, _ in _ws_cached]
+                        _ws_scores_raw = _ws_bm25(query, _ws_docs)
+                        _ws_threshold = _sysctl("router.min_score")
+                        for i, (cid, chunk, entry) in enumerate(_ws_cached):
+                            if _ws_scores_raw[i] >= _ws_threshold:
+                                # 转成 retriever 内部 chunk dict 格式
+                                _ws_chunk_dict = {
+                                    "id": chunk.id,
+                                    "project": chunk.project,
+                                    "chunk_type": chunk.chunk_type,
+                                    "content": chunk.content,
+                                    "summary": chunk.summary,
+                                    "importance": chunk.importance,
+                                    "retrievability": chunk.retrievability,
+                                    "stability": chunk.stability,
+                                    "last_accessed": chunk.last_accessed or "",
+                                    "created_at": chunk.created_at or "",
+                                    "access_count": entry.access_count,
+                                    "lru_gen": 0,
+                                    "info_class": getattr(chunk, "info_class", "world") or "world",
+                                    "tags": ",".join(chunk.tags) if chunk.tags else "",
+                                    "oom_adj": 0,
+                                    "fts_rank": 1.0,
+                                }
+                                _ws_score = _score_chunk(_ws_chunk_dict, _ws_scores_raw[i])
+                                _ws_hits.append((_ws_score, _ws_chunk_dict))
+                                # Mark accessed
+                                entry.accessed = True
+                                entry.access_count += 1
+                                _ws._stats["hits"] += 1
+            except Exception:
+                _ws_hits = []  # TLB probe 失败不阻塞主路径
+
         if use_fts:
             candidates_count = len(fts_results)
             max_rank = max(c["fts_rank"] for c in fts_results) if fts_results else 1.0
@@ -1649,6 +1710,12 @@ def main():
                 score = _score_chunk(chunk, relevance)
                 final.append((score, chunk))
                 fts_ids.add(chunk.get("id", ""))
+
+            # 合并 Working Set TLB hits（去重）
+            for _ws_score, _ws_chunk in _ws_hits:
+                if _ws_chunk.get("id", "") not in fts_ids:
+                    final.append((_ws_score, _ws_chunk))
+                    fts_ids.add(_ws_chunk.get("id", ""))
 
             # ── 迭代310：Spreading Activation — 关联激活扩散补充 ──────────────
             # OS 类比：CPU L2 prefetch — FTS5 命中 chunk A 后，沿 entity_edges
@@ -2268,6 +2335,72 @@ def main():
                 if _c_words:
                     _top_k_token_sets.append(_c_words)
 
+        # ── 迭代355：Proactive Swap Probe（主动 swap 探针）──
+        # OS 类比：Linux MGLRU (Multi-Generation LRU, 5.17+) 主动提升 swap 中的热页：
+        #   即使当前 active_list 非空，kswapd 仍扫描 swap 中高频访问的匿名页，
+        #   提前 swap_in 到 inactive_list，避免下次 page fault 时才恢复。
+        #
+        # 问题根因（v5 audit, 2026-04-28）：
+        #   swap_chunks 中有 100 个 chunk（avg_importance=0.885），0 次 swap fault。
+        #   原因：swap_fault 只在 `if not top_k:` 分支触发（FTS5 完全 miss 时），
+        #   但 FTS5 几乎总有结果（即使低相关），导致这 100 个高价值 chunk 永远被跳过。
+        #
+        # 修复策略：
+        #   top_k 非空时，仍检查 swap 中高 importance（>= imp_threshold）的匹配 chunk，
+        #   恢复后合并到 top_k（不超过 max_restore 个）。
+        if (priority == "FULL"
+                and _sysctl("retriever.proactive_swap_enabled")
+                and top_k
+                and not _check_deadline("swap_fault")):
+            try:
+                _probe_imp_threshold = _sysctl("retriever.proactive_swap_imp_threshold")
+                _probe_max_restore   = _sysctl("retriever.proactive_swap_max_restore")
+
+                # swap_fault 已按 hit_ratio * importance 排序
+                _probe_matches = swap_fault(conn, query, project)
+                # 只处理高 importance 的 chunk
+                _probe_matches = [m for m in _probe_matches
+                                  if m.get("importance", 0) >= _probe_imp_threshold]
+
+                if _probe_matches:
+                    _probe_ids = [m["id"] for m in _probe_matches[:_probe_max_restore]]
+                    # 切换到写连接执行 swap_in
+                    conn.close()
+                    conn = open_db()
+                    ensure_schema(conn)
+                    _probe_result = swap_in(conn, _probe_ids)
+                    if _probe_result.get("restored_count", 0) > 0:
+                        _deferred.log(DMESG_INFO, "retriever",
+                                      f"proactive_swap: restored={_probe_result['restored_count']} "
+                                      f"imp>={_probe_imp_threshold:.2f}",
+                                      session_id=session_id, project=project)
+                        conn.commit()
+                        conn.close()
+                        conn = _open_db_readonly()
+                        # 补充检索已恢复的 chunk（通过 ID 直接获取，避免重跑完整 FTS5）
+                        _already_ids = {c.get("id", "") for _, c in top_k}
+                        for _pmatch in _probe_matches[:_probe_max_restore]:
+                            _pid = _pmatch.get("id", "")
+                            if _pid and _pid not in _already_ids:
+                                _prow = conn.execute(
+                                    "SELECT * FROM memory_chunks WHERE id=? LIMIT 1",
+                                    (_pid,)
+                                ).fetchone()
+                                if _prow:
+                                    _pc = dict(_prow)
+                                    _pscore = _score_chunk(_pc, _pmatch.get("hit_ratio", 0.5))
+                                    top_k.append((_pscore, _pc))
+                                    _already_ids.add(_pid)
+                        # 重排序（新注入的 chunk 按 score 排序合并）
+                        top_k.sort(key=lambda x: x[0], reverse=True)
+                        top_k = top_k[:effective_top_k]
+                    else:
+                        # swap_in 无结果，切回只读
+                        conn.close()
+                        conn = _open_db_readonly()
+            except Exception:
+                pass  # proactive swap 探针失败不阻塞主流程
+
         if not top_k:
             # ── 迭代33：Swap Fault — 检查 swap 分区是否有匹配的被换出 chunk ──
             # 迭代41：swap_fault 受 soft deadline 约束（低优先级）
@@ -2404,6 +2537,37 @@ def main():
             "causal_chain": "🔗 [因果]",
         }
 
+        # ── 迭代359：Session Injection Deduplication ──────────────────────
+        # OS 类比：Linux copy-on-write page dedup（KSM kernel samepage merging）
+        #   同一物理页被多次 map → 只在达到阈值后合并为单一只读页，避免重复 I/O。
+        #   同一 chunk 在同一 session 被注入 >= threshold 次 → 从输出中剔除，
+        #   避免 agent 每轮都收到已内化的知识（边际价值趋零）。
+        #
+        # 豁免：design_constraint 永远注入（系统级约束，不可去重）。
+        # 预期收益：-30~50 tokens/call（长 session 中 3~5 个重复 chunk × 8~12 tokens/chunk）
+        _iter359_dedup_threshold = _sysctl("retriever.session_dedup_threshold")
+        _iter359_dedup_count = 0
+        if _iter359_dedup_threshold > 0 and _session_injection_counts:
+            _dedup_top_k = []
+            for _score, _chunk in top_k:
+                _cid = _chunk.get("id", "")
+                _ctype = _chunk.get("chunk_type", "")
+                _inj_cnt = _session_injection_counts.get(_cid, 0)
+                # design_constraint 豁免（约束知识不去重）
+                if _ctype == "design_constraint":
+                    _dedup_top_k.append((_score, _chunk))
+                elif _inj_cnt >= _iter359_dedup_threshold:
+                    _iter359_dedup_count += 1
+                    # 迭代29 dmesg 延迟日志
+                    _deferred.log(DMESG_DEBUG, "retriever",
+                                  f"iter359 dedup chunk {_cid[:8]} inj_count={_inj_cnt}",
+                                  session_id=session_id, project=project)
+                else:
+                    _dedup_top_k.append((_score, _chunk))
+            if _iter359_dedup_count > 0:
+                top_k = _dedup_top_k
+        # ─────────────────────────────────────────────────────────────────────
+
         # 迭代100：置信度标识（OS 类比：ECC status bit per cache line）
         def _conf_tag(c):
             vs = c.get("verification_status", "pending")
@@ -2438,8 +2602,9 @@ def main():
             conf = _conf_tag(c)
             line = f"{conf}{prefix} {c['summary']}".strip()
             # 迭代306：importance >= 0.75 且有 raw_snippet → 附加原文（≤150字）
+            # 迭代361：已 FULL 注入过的 chunk 降级为 LITE（跳过 raw_snippet，节省 ~30-80 tokens）
             rs = _raw_snippets.get(c["id"], "")
-            if rs:
+            if rs and c["id"] not in _session_full_injected:
                 rs_short = rs[:150]
                 line = f"{line}（原文：{rs_short}）"
             if c.get("chunk_type") == "design_constraint":
@@ -2476,16 +2641,40 @@ def main():
         # 迭代B4：VFS LITE Fast Path — LITE 模式也查 VFS，用短 timeout（10ms）
         #   防止 LITE 路径错过 self-improving/wiki 和 MEMORY.md 知识。
         #   FULL: timeout=100ms（默认），LITE: timeout=10ms（快速失败不阻塞）。
+        # 迭代357：FULL 路径升级为 scatter_gather_route（Domain-Aware 并发检索）
         if _KR_AVAILABLE and not _check_deadline("router"):
             try:
-                _vfs_timeout = 100 if priority == "FULL" else 10  # LITE: 10ms fast-fail
-                kr_results = kr_route(query, sources=["memory-md", "self-improving"],
-                                      timeout_ms=_vfs_timeout)
-                if kr_results:
-                    kr_section = kr_format(kr_results)
-                    inject_lines.append(kr_section)
+                if priority == "FULL":
+                    # 迭代357：scatter_gather_route 并发检索所有知识源（domain-aware）
+                    from hooks.knowledge_router import scatter_gather_route as _sg_route
+                    _sg_timeout = 100
+                    _sg_result = _sg_route(
+                        query=query,
+                        project=project,
+                        timeout_ms=_sg_timeout,
+                        conn=conn,
+                    )
+                    if _sg_result and _sg_result.get("results"):
+                        # 格式化 scatter_gather 结果为注入文本
+                        _sg_items = []
+                        for r in _sg_result["results"][:6]:
+                            _src = r.get("source", "")
+                            _sum = (r.get("summary") or "")[:120]
+                            if _sum:
+                                _sg_items.append(f"[{_src}] {_sum}")
+                        if _sg_items:
+                            inject_lines.append("[跨系统知识]")
+                            inject_lines.extend(_sg_items)
+                else:
+                    # LITE 路径沿用原来的 kr_route（10ms fast-fail）
+                    _vfs_timeout = 10
+                    kr_results = kr_route(query, sources=["memory-md", "self-improving"],
+                                          timeout_ms=_vfs_timeout)
+                    if kr_results:
+                        kr_section = kr_format(kr_results)
+                        inject_lines.append(kr_section)
             except Exception:
-                pass  # VFS 超时或无结果不阻塞主路径
+                pass  # VFS/scatter-gather 超时或无结果不阻塞主路径
 
         # ── 迭代101: Tool Pattern Hint — 意图感知工具模式建议 ──
         # OS 类比：CPU branch predictor hint (likely/unlikely) — 基于历史跳转记录预测执行路径
@@ -2551,6 +2740,8 @@ def main():
             reason += "|psi_downgrade"  # 迭代36：PSI 反馈降级标记
         if deadline_skipped:
             reason += f"|deadline_skip:{'+'.join(deadline_skipped)}"  # 迭代41
+        if _iter359_dedup_count > 0:
+            reason += f"|dedup:{_iter359_dedup_count}"  # 迭代359：去重计数
         _write_hash(current_hash)
         _tlb_write(prompt_hash, current_hash, _get_db_mtime())  # 迭代57: TLB
 
@@ -2594,9 +2785,14 @@ def main():
         try:
             for _inj_c in accessed_ids:
                 _session_injection_counts[_inj_c] = _session_injection_counts.get(_inj_c, 0) + 1
+            # 迭代361：FULL 路径注入的 chunk 加入 full_injected 集合
+            # OS 类比：Linux page cache dirty bit — 已写入页面标记，重复写入走快路径（LITE format）
+            if priority == "FULL":
+                _session_full_injected.update(accessed_ids)
             with open(_SESSION_INJ_FILE, 'w', encoding="utf-8") as _sif_w:
                 _sif_w.write(json.dumps({"session_id": session_id,
-                                         "counts": _session_injection_counts},
+                                         "counts": _session_injection_counts,
+                                         "full_injected": list(_session_full_injected)},  # 迭代361
                                         ensure_ascii=False))
         except Exception:
             pass  # 计数写入失败不影响已输出的结果

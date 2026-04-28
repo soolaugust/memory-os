@@ -45,7 +45,23 @@ from store_core import (  # noqa: F401
     is_pinned,
     get_pinned_chunks,
     get_pinned_ids,
+    # ── 迭代356：Pin Decay + Cap（防止 pin 过度膨胀，RLIMIT_MEMLOCK 类比）──
+    pin_decay,
+    enforce_pin_cap,
     proc_stats,
+    memory_profile,
+    # ── Task12：Chunk Lifecycle FSM ──
+    CHUNK_STATES,
+    mark_active,
+    mark_cold,
+    mark_dead,
+    mark_ghost,
+    fsm_transition,
+    get_state_distribution,
+    # ── Task13：Optimistic Locking ──
+    cas_update,
+    get_chunk_version,
+    broadcast_invalidate,
     dmesg_log,
     dmesg_read,
     dmesg_clear,
@@ -71,6 +87,8 @@ from store_core import (  # noqa: F401
     sched_link_decision,
     sched_dump_tasks,
     sched_restore_tasks,
+    # ── 迭代360：FTS5 Auto-Optimize ──
+    fts_optimize,
 )
 
 # ── Memory Management Subsystems ──
@@ -102,6 +120,8 @@ from store_mm import (  # noqa: F401
     GOV_NORMAL,
     GOV_HIGH,
     GOV_CRITICAL,
+    # ── 迭代362：Swap Warmup ──
+    warmup_swap_cache,
     # 私有符号（供测试使用）
     _governor_load_state,
     _governor_save_state,

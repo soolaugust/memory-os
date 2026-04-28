@@ -38,7 +38,7 @@ PROJECT = "test_oom_score"
 
 
 def _make_chunk(suffix: str, importance: float = 0.5, chunk_type: str = "decision",
-                age_days: int = 0) -> dict:
+                age_days: int = 1) -> dict:  # age_days=1 绕过10分钟 grace period
     """创建测试用 chunk dict。"""
     now = datetime.now(timezone.utc) - timedelta(days=age_days)
     chunk = MemoryChunk(

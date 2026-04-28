@@ -25,7 +25,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 # 设置路径
-_ROOT = Path(__file__).parent
+_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT / "hooks"))
 

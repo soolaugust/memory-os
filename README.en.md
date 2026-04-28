@@ -6,9 +6,9 @@
 
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![SQLite](https://img.shields.io/badge/storage-SQLite%20WAL-lightgrey?logo=sqlite)](https://sqlite.org/)
-[![Tests](https://img.shields.io/badge/tests-38%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-44%20passing-brightgreen)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Iterations](https://img.shields.io/badge/iterations-260%2B-orange)](#roadmap)
+[![Iterations](https://img.shields.io/badge/iterations-362%2B-orange)](#roadmap)
 
 [English](./README.en.md) · [中文](./README.md)
 
@@ -65,7 +65,12 @@ Zero manual memory management. The whole pipeline runs inside Claude Code hooks.
 | Cross-session recall | **94.2%** |
 | Knowledge base size | **427 chunks / 8 types** |
 | Hot-path retrieval | **1.74 µs/op** (iter 258, −84.7% from baseline) |
-| Total iterations | **260+** |
+| Total iterations | **362+** |
+| **Token injection per call** | **~44 tokens** (avg 178 chars) |
+| **Token net ROI per call** | **~+256 tokens** saved (inject 44, save ~300 re-explanation) |
+| FULL→LITE demotion savings (iter 361) | **~62 tokens/repeat** (69.6% reduction on re-injection) |
+| Session dedup excluded chunks (iter 359) | chunks injected ≥2× automatically excluded |
+| Same-hash TLB bypass | **zero tokens** overhead on repeated prompts |
 
 ---
 
@@ -122,6 +127,9 @@ Every subsystem maps to a Linux kernel mechanism:
 | FTS result cache | Page cache | iter 205 |
 | Multi-agent isolation | Linux namespace (PID/mount) | iter 259 |
 | Async extraction pool | kworker thread pool + pdflush | iter 260 |
+| FTS5 auto-optimize | ext4 online defrag | iter 360 |
+| FULL→LITE injection demotion | page cache dirty bit fast-path | iter 361 |
+| Proactive swap warmup | MGLRU proactive reclaim | iter 362 |
 
 ---
 
@@ -255,6 +263,27 @@ Stop hook  →  ipc_msgq[extract_task]  →  extractor_pool (kworker ×3)  →  
 ```
 </details>
 
+<details>
+<summary><strong>Problem 10: Repeated injection wastes tokens — full context re-attached every call (iter 359, 361)</strong></summary>
+
+Without deduplication, the same chunk is injected with its full `raw_snippet` on every prompt in a long session. Content already in the model's working memory is re-transmitted, wasting tokens.
+
+**Solution: Three-layer token budget enforcement**
+
+- **FULL→LITE demotion (iter 361):** Once a chunk has been injected in full format (summary + raw_snippet) in this session, subsequent injections use LITE format (summary only) — raw text has zero marginal value after the first time.
+- **Session dedup (iter 359):** Chunks injected ≥ `session_dedup_threshold` (default: 2) times are excluded entirely from context output.
+- **Same-hash TLB bypass:** Identical prompt hashes return the cached result immediately — zero DB queries, zero new tokens injected.
+
+**Measured (validated by `tests/test_token_budget.py`):**
+```
+Injection cost:             ~44 tokens/call  (avg 178 chars)
+FULL→LITE saving:           ~62 tokens/repeat (69.6% reduction per re-injected chunk)
+User re-explanation saved:  ~300 tokens/call  (no need to re-describe context)
+Net token ROI:              ~+256 tokens/call
+Context cap enforced:       ≤ 800 chars       (max_context_chars sysctl)
+```
+</details>
+
 ---
 
 ## Roadmap
@@ -266,7 +295,8 @@ Stop hook  →  ipc_msgq[extract_task]  →  extractor_pool (kworker ×3)  →  
 | Data-driven precision tuning — 258 iterations, −84.7% latency (iter 235–258) | ✅ Done |
 | Multi-agent isolation — per-session namespacing, IPC broadcast (iter 259) | ✅ Done |
 | Async extraction pool — Stop hook offload, kworker pool (iter 260) | ✅ Done |
-| Distributed multi-agent shared memory — NUMA/RDMA analogy (iter 261+) | 🔜 Planned |
+| Token budget optimization — FULL→LITE demotion, session dedup, swap warmup (iter 359–362) | ✅ Done |
+| Distributed multi-agent shared memory — NUMA/RDMA analogy (iter 363+) | 🔜 Planned |
 
 ---
 

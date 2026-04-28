@@ -245,10 +245,10 @@ def test_evict_respects_pin_types():
     ensure_schema(conn)
     _cleanup(conn, TEST_PROJECT_A)
 
-    # 创建 3 个低分 chunk
-    hard_pinned = _chunk(TEST_PROJECT_A, importance=0.1)
-    soft_pinned = _chunk(TEST_PROJECT_A, importance=0.1)
-    unpinned = _chunk(TEST_PROJECT_A, importance=0.1)
+    # 创建 3 个低分 chunk（days_ago=1 绕过10分钟 grace period）
+    hard_pinned = _chunk(TEST_PROJECT_A, importance=0.1, days_ago=1)
+    soft_pinned = _chunk(TEST_PROJECT_A, importance=0.1, days_ago=1)
+    unpinned = _chunk(TEST_PROJECT_A, importance=0.1, days_ago=1)
 
     for c in (hard_pinned, soft_pinned, unpinned):
         insert_chunk(conn, c)
@@ -336,7 +336,7 @@ def test_unpin_not_pinned():
 
 # ── T10: extractor import 验证 ──
 def test_extractor_imports_pin():
-    ext_path = _ROOT / "hooks" / "extractor.py"
+    ext_path = _ROOT.parent / "hooks" / "extractor.py"
     code = ext_path.read_text()
     assert "pin_chunk" in code, "extractor.py should import pin_chunk"
     assert "pin_chunk(conn, cid, project" in code, "extractor.py should call pin_chunk"

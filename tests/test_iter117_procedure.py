@@ -24,7 +24,7 @@ def test_procedure_in_all_retrieve_types():
     """iter117: procedure 必须在 _ALL_RETRIEVE_TYPES 中。"""
     import hooks.retriever as retriever_module
     # Read retriever.py source and check _ALL_RETRIEVE_TYPES contains procedure
-    src = (ROOT / "hooks" / "retriever.py").read_text()
+    src = (ROOT.parent / "hooks" / "retriever.py").read_text()
     # Find _ALL_RETRIEVE_TYPES block
     idx = src.find("_ALL_RETRIEVE_TYPES = (")
     assert idx >= 0, "_ALL_RETRIEVE_TYPES not found"
@@ -35,7 +35,7 @@ def test_procedure_in_all_retrieve_types():
 
 def test_procedure_in_working_set_types():
     """iter117: procedure 必须在 loader.py WORKING_SET_TYPES 中。"""
-    src = (ROOT / "hooks" / "loader.py").read_text()
+    src = (ROOT.parent / "hooks" / "loader.py").read_text()
     idx = src.find("WORKING_SET_TYPES = (")
     assert idx >= 0, "WORKING_SET_TYPES not found"
     block_end = src.find(")", idx)
@@ -45,7 +45,7 @@ def test_procedure_in_working_set_types():
 
 def test_procedure_in_implement_intent():
     """iter117: implement 意图应包含 procedure 类型。"""
-    src = (ROOT / "hooks" / "retriever.py").read_text()
+    src = (ROOT.parent / "hooks" / "retriever.py").read_text()
     # Find _INTENT_MAP block
     m = re.search(r'_INTENT_MAP\s*=\s*\{(.+?)\}', src, re.DOTALL)
     assert m, "_INTENT_MAP not found"
@@ -59,7 +59,7 @@ def test_procedure_in_implement_intent():
 
 def test_procedure_in_code_review_intent():
     """iter117: code_review 意图应包含 procedure 类型。"""
-    src = (ROOT / "hooks" / "retriever.py").read_text()
+    src = (ROOT.parent / "hooks" / "retriever.py").read_text()
     # Find _INTENT_MAP block
     m = re.search(r'_INTENT_MAP\s*=\s*\{(.+?)\}', src, re.DOTALL)
     assert m, "_INTENT_MAP not found"

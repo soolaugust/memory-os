@@ -18,7 +18,7 @@ import sys
 
 SETTINGS_PATH = os.path.expanduser("~/.claude/settings.json")
 COALESCED_SCRIPT = os.path.join(
-    os.path.dirname(__file__), "hooks", "pretool_coalesced.js"
+    os.path.dirname(__file__), "..", "hooks", "pretool_coalesced.js"
 )
 
 def load_settings():
@@ -142,7 +142,7 @@ def test_coalesced_in_settings():
 # ── 迭代70: PostToolUse observer coalescing tests ──
 
 POSTTOOL_SCRIPT = os.path.join(
-    os.path.dirname(__file__), "hooks", "posttool_observers.js"
+    os.path.dirname(__file__), "..", "hooks", "posttool_observers.js"
 )
 
 

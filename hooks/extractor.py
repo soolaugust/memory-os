@@ -156,14 +156,14 @@ QUANTITATIVE_PATTERN = re.compile(
 # 系统中"为什么不这样做"的约束知识——违反会产生语义错误但表面合理的修改
 # 迭代102 扩展：从8个模式扩展到22个，覆盖工程中常见约束表达
 CONSTRAINT_SIGNALS = [
-    # ── 原有模式（迭代98）──
+    # ── 原有模式（迭代98）—— 为什么不能/why must not 提前，避免被短模式[0]抢占 ──
+    r'(?:为什么.*不能.*?|why.*must not.*?)[：:]\s*(.{10,100})',  # 提前：.*? 允许冒号前有额外词语
     r'(?:不能|禁止|不允许|must not|should not)\s*(.{5,80})\s*(?:因为|，因为|because|，because)',
     r'(?:这样做会|这会导致|this would|will cause)\s*(.{5,80})',
     r'(?:会导致|会产生|会引发|会造成)\s*(.{5,80})',
     r'(?:破坏|违反|corrupt|violate)\s*(.{5,80})',
     r'(?:设计约束|invariant|不变量|design constraint)[：:]\s*(.{10,120})',
     r'(?:之所以|正是因为)\s*(.{5,60})\s*(?:绕过|skip)',
-    r'(?:为什么.*不能|why.*must not)[：:]\s*(.{10,100})',
     r'(?:前提条件|prerequisite|assumption)[：:]\s*(.{10,100})',
     # ── 迭代102 新增：中文警告句式 ──
     r'(?:注意不要|小心不要|务必不要|千万不要|切勿)\s*(.{5,80})',
@@ -325,6 +325,8 @@ def _extract_constraints(text: str) -> list:
         r'race condition|deadlock|memory leak|data corruption|'
         r'竞态|死锁|内存泄漏|数据损坏|'
         r'never|avoid|don\'t|always ensure|requires?.*before|must.*before|'
+        r'unsafe|incorrect|incorrect|wrong|error|fail|危险|风险|'
+        r'without.*lock|without.*holding|without.*acquiring|'
         r'因为|由于|以免|以防)',  # iter119: 因果说明也是约束知识的核心载体
         re.IGNORECASE
     )

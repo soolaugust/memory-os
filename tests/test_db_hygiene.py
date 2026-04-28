@@ -10,7 +10,7 @@ import sqlite3
 from pathlib import Path
 
 # tmpfs 隔离（必须在 store import 前）
-_ROOT = Path(__file__).parent
+_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_ROOT))
 import tmpfs
 

@@ -33,8 +33,8 @@ _original_dir = config.MEMORY_OS_DIR
 def _setup():
     """创建临时目录，隔离测试环境。"""
     tmpdir = tempfile.mkdtemp(prefix="memoryos_ns_test_")
-    config.MEMORY_OS_DIR = type(config.MEMORY_OS_DIR)(tmpdir)
-    config.SYSCTL_FILE = config.MEMORY_OS_DIR / "sysctl.json"
+    config.MEMORY_OS_DIR = tmpdir
+    config.SYSCTL_FILE = os.path.join(tmpdir, "sysctl.json")
     config._invalidate_cache()
     return tmpdir
 
@@ -175,7 +175,8 @@ def test_sysctl_set_with_project():
         config.sysctl_set("kswapd.batch_size", 20, project="proj_a")
 
         # 验证磁盘上的 sysctl.json 结构
-        disk = json.loads(config.SYSCTL_FILE.read_text(encoding="utf-8"))
+        with open(config.SYSCTL_FILE, encoding="utf-8") as _f:
+            disk = json.load(_f)
         assert "namespaces" in disk
         assert "proj_a" in disk["namespaces"]
         assert disk["namespaces"]["proj_a"]["kswapd.batch_size"] == 20
