@@ -766,6 +766,110 @@ _REGISTRY: dict = {
     "store_vfs.qwr_max_chunks": (30, int, 5, 200, None,
         "iter449: 每次 QWR 最多处理的 chunk 数量（按 importance × recency 排序取前 N，默认 30）"),
 
+    # ── iter450: Predictive Memory Encoding — 预期将来被测试增强编码（Roediger & Karpicke 2011）────────────
+    # 认知科学依据：
+    #   Roediger & Karpicke (2011) "The Critical Importance of Retrieval for Learning" (Current Directions) —
+    #     预期将来会被测试的知识，在学习阶段被更深度加工（elaborative encoding），
+    #     形成更强记忆痕迹（Test-Expectancy Effect: encoding effort increases when test is anticipated）。
+    #     实验：提示"将来有测试"→ 当场编码的记忆保留率比无测试预期组高 25-35%。
+    #   Szpunar et al. (2014) Nature Communications "Interpolated Memory Tests Reduce Mind Wandering" —
+    #     中间插入测试题（间隔测试）不仅强化当时记忆，还提升后续学习段的编码质量
+    #     （因为大脑进入"考试预期"状态，注意力集中度更高）。
+    #   Wissman & Rawson (2012) "How Quickly Do Students Forget What They Have Learned?" —
+    #     测试预期使初始编码强度提升，使后续遗忘曲线斜率更平缓（steeper consolidation）。
+    #
+    # memory-os 等价：
+    #   新 chunk 写入时，查询同项目近期（past pme_window_hours）内 recall_traces 中同 chunk_type
+    #   的检索次数（pme_query_count）。如果 pme_query_count >= pme_min_queries，说明该类型知识
+    #   在用户工作流中正处于"活跃测试期"（= 高被测试预期），给予额外 initial_stability 加成：
+    #     pme_factor = min(1.0, pme_query_count / pme_ref_count)
+    #     new_stab = min(365.0, stab × (1 + pme_boost × pme_factor))
+    #   只对 importance >= pme_min_importance 的 chunk 应用（低重要性 chunk 不值得额外保护）。
+    #
+    # 与 iter412 Testing Effect 的区别：
+    #   Testing Effect(412) = 被实际检索后（事后）stability 提升（retrieval-triggered consolidation）
+    #   PME(450) = 写入时预测将来会被测试（事前）initial_stability 提升（anticipatory encoding boost）
+    #   两者互补：PME 提升初始编码强度 → Testing Effect 在每次检索时再次强化 → 双重保护循环
+    #
+    # OS 类比：Linux writeback dirty page pre-marking（MADV_SEQUENTIAL hint）—
+    #   应用程序提前告诉内核"这段内存将被顺序读取"（= 测试预期），
+    #   内核提前扩大 readahead 窗口并将相关 page 提升到 active 列表（= 提升初始编码强度）；
+    #   类比：同话题近期高检索频率 = MADV_SEQUENTIAL hint → 新写入的同话题 chunk 获得预测性加成。
+    "store_vfs.pme_enabled": (True, bool, None, None, None,
+        "iter450: 是否启用 Predictive Memory Encoding — 高检索频率话题的新 chunk 获得预测性编码加成"),
+    "store_vfs.pme_window_hours": (6.0, float, 0.5, 48.0, None,
+        "iter450: 检索频率统计时间窗口（小时）：查找过去 N 小时内同 chunk_type 的检索次数（默认 6h）"),
+    "store_vfs.pme_min_queries": (3, int, 1, 50, None,
+        "iter450: 触发 PME 的最低同类型检索次数（默认 3：该话题被检索 >= 3 次才认为处于'测试预期'）"),
+    "store_vfs.pme_ref_count": (10, int, 2, 100, None,
+        "iter450: 检索次数参考值：pme_factor = min(1.0, count / ref_count)，"
+        "count=ref_count 时达到最大加成（默认 10）"),
+    "store_vfs.pme_boost": (0.12, float, 0.0, 0.50, None,
+        "iter450: PME 最大 stability 加成系数：new_stab = stab × (1 + pme_boost × pme_factor)，"
+        "count=ref_count 时最大加成 = pme_boost（默认 0.12 ≈ 12%，对应 Roediger 2011 的 25-35% 记忆优势的折半估计）"),
+    "store_vfs.pme_min_importance": (0.45, float, 0.0, 1.0, None,
+        "iter450: 触发 PME 的最低 importance 阈值（默认 0.45，低重要性 chunk 不参与预测编码增强）"),
+
+    # ── iter451: Memory Reconsolidation — 检索后再巩固窗口期的编码情境刷新（Nader et al. 2000）────────────
+    # 认知科学依据：
+    #   Nader, Schafe & LeDoux (2000) Nature "Fear memories require protein synthesis in the amygdala
+    #     for reconsolidation after retrieval" — 被检索（reactivated）的记忆进入不稳定的"可塑窗口"
+    #     （labile reconsolidation window），在此窗口内记忆痕迹可被更新（而非只能固化或遗忘）。
+    #     蛋白质合成抑制剂在检索后注入 → 记忆被修改而非消退（reconsolidation update, not extinction）。
+    #   Hupbach et al. (2007) Nature Neuroscience "Reconsolidation of episodic memories:
+    #     A subtle reminder triggers integration of new information" —
+    #     旧记忆被轻微激活（subtle reminder）后，与新环境中获得的信息发生整合：
+    #     实验者在复习旧物体后进入新环境学习新物体列表，后测发现旧列表中混入了新物体（整合效应）；
+    #     这证明再巩固窗口允许"新旧信息双向融合"（bidirectional integration）。
+    #   Lee (2009) "Reconsolidation: Maintaining Memory Relevance" (Trends in Neurosciences) —
+    #     再巩固的适应性功能：将新情境信息（encoding context）注入旧记忆表示，
+    #     使旧记忆能反映"最新的关联情境"（keeping memories relevant to current context）；
+    #     而不是让旧记忆永远锁定在原始编码情境（防止 context-dependent retrieval failure）。
+    #   Fernández et al. (2016) Science "Reactivation predicts the consolidation of new episodic memories" —
+    #     先前检索激活的脑区（hippocampal pattern completion）在新情境中学习时被更强地激活，
+    #     促进新旧知识的"模式整合"（pattern integration）而非"模式分离"（pattern separation）。
+    #
+    # memory-os 等价：
+    #   sleep_consolidate 时，对"近期被检索"（last_accessed 在 rcr_labile_hours 内）的
+    #   高 importance chunk 扫描：
+    #     若本 session 内（created_at >= last_accessed - rcr_session_window_mins）存在
+    #     encode_context entity 重叠 >= rcr_min_overlap 的"新写入 chunk"（created_at > last_accessed），
+    #     则将新 chunk 的 encode_context entity 中不在旧 chunk 的 token，
+    #     追加到旧 chunk 的 encode_context（最多 rcr_max_new_entities 个）。
+    #   这不改变 stability（不是加成），而是丰富旧 chunk 的"语义检索面"：
+    #     更多 entity → 更多检索路径 → encoding variability 增加（iter415）→ 更高的跨情境可提取性。
+    #   副作用：更新后的 encode_context 可触发后续 sleep 的 PF/SCC/VRR 等机制（snowball consolidation）。
+    #
+    # 与 iter448 RE（Retroactive Enhancement）的区别：
+    #   RE：新 chunk 增强旧 chunk 的 stability（数值加成）
+    #   RCR：新 chunk 更新旧 chunk 的 encode_context（质性更新，丰富语义表示）
+    #   两者互补：RE 增加旧记忆强度，RCR 扩展旧记忆的检索路径 → 共同实现双向整合
+    #
+    # OS 类比：Linux copy-on-write (CoW) page reconsolidation —
+    #   页面被读访问后标记为"读保护"（COW ready），后续写操作先 copy-on-write 产生新副本，
+    #   再将更新内容写回（新内容 → 旧页面的更新版本）；
+    #   类比：旧 chunk 被检索（=读访问）→ 进入再巩固窗口（=COW ready）→
+    #   新 chunk 写入后将新 entity 合并入旧 chunk encode_context（=写时合并新内容）。
+    "store_vfs.rcr_enabled": (True, bool, None, None, None,
+        "iter451: 是否启用 Memory Reconsolidation Context Refresh — 被检索后的 chunk 在再巩固窗口期内"
+        "获得新写入的相关 chunk 的 entity 注入，扩展语义检索面"),
+    "store_vfs.rcr_labile_hours": (6.0, float, 0.5, 48.0, None,
+        "iter451: 再巩固可塑窗口时长（小时）：last_accessed 在此窗口内的 chunk 可接受 encode_context 更新"
+        "（对应 Nader 2000 蛋白质合成窗口期，默认 6h）"),
+    "store_vfs.rcr_session_window_mins": (120, int, 10, 720, None,
+        "iter451: 同 session 内新 chunk 的时间窗口（分钟）：只考虑 last_accessed 后 N 分钟内写入的新 chunk"
+        "（模拟 Hupbach 2007 subtle reminder → new context 的时间关系，默认 120min = 2h）"),
+    "store_vfs.rcr_min_overlap": (2, int, 1, 10, None,
+        "iter451: 触发 RCR 更新的最小 entity 重叠数（旧 chunk 与新 chunk encode_context 交集 >= 此值，默认 2）"),
+    "store_vfs.rcr_max_new_entities": (5, int, 1, 20, None,
+        "iter451: 每次 RCR 最多向旧 chunk 注入的新 entity 数量（防止过度稀释 encode_context，默认 5）"),
+    "store_vfs.rcr_min_importance": (0.50, float, 0.0, 1.0, None,
+        "iter451: 触发 RCR 的最低 importance 阈值（低重要性 chunk 不参与再巩固更新，默认 0.50）"),
+    "store_vfs.rcr_protect_stable": (True, bool, None, None, None,
+        "iter451: stability >= rcr_stable_floor 的 chunk 跳过 RCR（极度稳固的记忆不需要再巩固窗口更新，默认 True）"),
+    "store_vfs.rcr_stable_floor": (60.0, float, 10.0, 365.0, None,
+        "iter451: 视为'极度稳固'的 stability 下限（stability >= 此值时跳过 RCR，默认 60 天以上的稳固记忆不更新）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。

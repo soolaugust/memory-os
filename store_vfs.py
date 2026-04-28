@@ -7266,6 +7266,15 @@ def sleep_consolidate(
     except Exception:
         pass
 
+    # ── 子操作 19（iter451）：Memory Reconsolidation Context Refresh — 再巩固窗口期编码情境刷新 ──
+    # OS 类比：Linux CoW page reconsolidation — 读访问标记 COW ready 后，新内容写入时合并到旧页面
+    # 机制：近期被检索的 chunk（处于再巩固可塑窗口）接收同 session 内新写入相关 chunk 的 entity 注入
+    try:
+        rcr_result = apply_reconsolidation_context_refresh(conn, project)
+        result["rcr_updated"] = rcr_result.get("rcr_updated", 0)
+    except Exception:
+        pass
+
     return result
 
 
@@ -7807,6 +7816,167 @@ def apply_enactment_effect(
         return new_stability
     except Exception:
         return base_stability
+
+
+def apply_reconsolidation_context_refresh(
+    conn: sqlite3.Connection,
+    project: str,
+) -> dict:
+    """
+    iter451: Memory Reconsolidation Context Refresh — 检索后再巩固窗口期的编码情境刷新。
+
+    认知科学依据：
+      Nader et al. (2000) Nature — 被检索的记忆进入不稳定的再巩固窗口，可被更新。
+      Hupbach et al. (2007) NatNeuro — 旧记忆轻微激活后与新情境信息发生整合（bidirectional integration）。
+      Lee (2009) TiNS — 再巩固的适应性功能是将新情境信息注入旧记忆，使其保持与当前情境的相关性。
+
+    机制：
+      1. 找出近期被检索（last_accessed 在 rcr_labile_hours 内）且 importance >= rcr_min_importance 的旧 chunk
+      2. 对每个旧 chunk，找 last_accessed 后 rcr_session_window_mins 内写入的新 chunk
+      3. 若新旧 chunk encode_context entity 重叠 >= rcr_min_overlap，将新 entity 注入旧 chunk
+      4. 每个旧 chunk 最多注入 rcr_max_new_entities 个新 entity（防止稀释）
+      5. stability >= rcr_stable_floor 的 chunk 跳过（极度稳固记忆不需再巩固）
+
+    OS 类比：Linux copy-on-write page reconsolidation —
+      页面被读访问（=检索）→ 标记 COW ready → 后续新内容写入时合并到旧页面的 encode_context。
+
+    返回 dict：
+      rcr_updated: int — 被更新 encode_context 的旧 chunk 数量
+      total_examined: int — 参与扫描的旧 chunk 数量
+    """
+    result = {"rcr_updated": 0, "total_examined": 0}
+    if not project:
+        return result
+    try:
+        import config as _config
+        if not _config.get("store_vfs.rcr_enabled"):
+            return result
+
+        rcr_labile_hours = float(_config.get("store_vfs.rcr_labile_hours") or 6.0)
+        rcr_session_window_mins = int(_config.get("store_vfs.rcr_session_window_mins") or 120)
+        rcr_min_overlap = int(_config.get("store_vfs.rcr_min_overlap") or 2)
+        rcr_max_new_entities = int(_config.get("store_vfs.rcr_max_new_entities") or 5)
+        rcr_min_importance = float(_config.get("store_vfs.rcr_min_importance") or 0.50)
+        rcr_protect_stable = bool(_config.get("store_vfs.rcr_protect_stable") if True else True)
+        rcr_stable_floor = float(_config.get("store_vfs.rcr_stable_floor") or 60.0)
+
+        now = datetime.now(timezone.utc)
+        labile_cutoff = (now - timedelta(hours=rcr_labile_hours)).isoformat()
+
+        # 1. 找出再巩固窗口内（最近被检索）的旧 chunk
+        labile_rows = conn.execute(
+            """SELECT id, encode_context, stability, last_accessed
+               FROM memory_chunks
+               WHERE project=?
+                 AND importance >= ?
+                 AND last_accessed >= ?
+               ORDER BY last_accessed DESC
+               LIMIT 100""",
+            (project, rcr_min_importance, labile_cutoff)
+        ).fetchall()
+
+        if not labile_rows:
+            return result
+
+        result["total_examined"] = len(labile_rows)
+        updated = 0
+
+        for row in labile_rows:
+            if hasattr(row, 'keys'):
+                cid = row["id"]
+                old_ctx = row["encode_context"] or ""
+                stab = float(row["stability"] or 1.0)
+                last_accessed_iso = row["last_accessed"] or ""
+            else:
+                cid = row[0]
+                old_ctx = row[1] or ""
+                stab = float(row[2] or 1.0)
+                last_accessed_iso = row[3] or ""
+
+            # 2. 极度稳固记忆跳过（不需要再巩固更新）
+            if rcr_protect_stable and stab >= rcr_stable_floor:
+                continue
+
+            # 3. 找 last_accessed 后 rcr_session_window_mins 内写入的新 chunk
+            try:
+                # 解析 last_accessed 时间
+                la_dt = datetime.fromisoformat(last_accessed_iso.replace("Z", "+00:00"))
+                if la_dt.tzinfo is None:
+                    la_dt = la_dt.replace(tzinfo=timezone.utc)
+                window_end = (la_dt + timedelta(minutes=rcr_session_window_mins)).isoformat()
+            except Exception:
+                continue
+
+            new_rows = conn.execute(
+                """SELECT encode_context FROM memory_chunks
+                   WHERE project=?
+                     AND id != ?
+                     AND created_at > ?
+                     AND created_at <= ?
+                     AND importance >= ?
+                   ORDER BY created_at ASC
+                   LIMIT 20""",
+                (project, cid, last_accessed_iso, window_end, rcr_min_importance)
+            ).fetchall()
+
+            if not new_rows:
+                continue
+
+            # 4. 计算 old entity set
+            def _tokenize(ctx: str) -> set:
+                """从 encode_context 字符串提取 token 集合（逗号/空格分隔）。"""
+                import re as _re
+                tokens = _re.split(r'[,\s]+', ctx.strip())
+                return {t.strip().lower() for t in tokens if len(t.strip()) >= 2}
+
+            old_tokens = _tokenize(old_ctx)
+            new_entities_to_add = []
+
+            for new_row in new_rows:
+                new_ctx = (new_row[0] if not hasattr(new_row, 'keys') else new_row["encode_context"]) or ""
+                new_tokens = _tokenize(new_ctx)
+
+                # 检查重叠
+                overlap = old_tokens & new_tokens
+                if len(overlap) < rcr_min_overlap:
+                    continue
+
+                # 收集新 entity（不在旧 chunk 中的）
+                truly_new = new_tokens - old_tokens
+                for tok in truly_new:
+                    if tok and tok not in new_entities_to_add:
+                        new_entities_to_add.append(tok)
+                    if len(new_entities_to_add) >= rcr_max_new_entities:
+                        break
+
+                if len(new_entities_to_add) >= rcr_max_new_entities:
+                    break
+
+            if not new_entities_to_add:
+                continue
+
+            # 5. 将新 entity 追加到旧 chunk 的 encode_context
+            new_ctx_str = old_ctx
+            if new_ctx_str and not new_ctx_str.endswith(","):
+                new_ctx_str += ", "
+            elif not new_ctx_str:
+                new_ctx_str = ""
+            new_ctx_str += ", ".join(new_entities_to_add[:rcr_max_new_entities])
+
+            conn.execute(
+                "UPDATE memory_chunks SET encode_context=?, updated_at=? WHERE id=?",
+                (new_ctx_str, now.isoformat(), cid)
+            )
+            updated += 1
+
+        if updated > 0:
+            conn.commit()
+
+        result["rcr_updated"] = updated
+        return result
+
+    except Exception:
+        return result
 
 
 def apply_predictive_memory_encoding(
