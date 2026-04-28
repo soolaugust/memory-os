@@ -35,6 +35,11 @@ class EdgeType:
     SUPERSEDES = "supersedes"      # A 取代 B（新决策覆盖旧决策）
     IMPLEMENTS = "implements"      # A 是 B 的实现
     COOCCURS = "cooccurs"          # 同 session 同 topic 出现（弱关联）
+    # iter426: Temporal Contiguity Effect — 前向非对称关联边（Kahana 1996）
+    # 认知科学：自由回忆中，前向联想率约是后向的 2:1（Kahana 1996 forward asymmetry）
+    # OS 类比：Linux mm/readahead.c 前向预取 — 顺序读取时预取下一个 page（前向），不预取上一个
+    # A 写入后 B 紧接着写入 → temporal_forward(A→B) weight=0.45（高于后向 COOCCURS 0.15）
+    TEMPORAL_FORWARD = "temporal_forward"  # A 之后紧接写入 B（前向时序关联，单向强边）
 
 
 # ── Schema ────────────────────────────────────────────────────────────────────

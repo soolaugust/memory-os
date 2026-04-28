@@ -3329,11 +3329,18 @@ def main():
             if _tp_recent_ids:
                 for _new_id in written_chunk_ids:
                     for _old_id in _tp_recent_ids:
-                        # 弱双向边（weight=0.3，低于共现边的 0.5）
-                        if add_edge(_tp_conn, _new_id, _old_id, EdgeType.COOCCURS, 0.3,
+                        # iter426: Temporal Contiguity Effect — 前向非对称关联（Kahana 1996）
+                        # _old_id 先写入，_new_id 后写入 → 前向边：_old_id → _new_id（强）
+                        # 后向边：_new_id → _old_id（弱，仅 COOCCURS）
+                        # 前向 weight=0.60（>= expand_with_neighbors min_weight=0.55，确保被预取）
+                        # 后向 weight=0.15（< 0.55，低于 expand 阈值，符合后向抑制原则）
+                        # Kahana (1996) 前向:后向 = 2:1，weight 比约 0.60:0.15 = 4:1（略强于认知数据）
+                        # OS 类比：readahead 只预取下一个 page（前向），不预取上一个（后向）
+                        if add_edge(_tp_conn, _old_id, _new_id, EdgeType.TEMPORAL_FORWARD, 0.60,
                                     source="temporal"):
                             _tp_edge_count += 1
-                        if add_edge(_tp_conn, _old_id, _new_id, EdgeType.COOCCURS, 0.3,
+                        # 后向保持弱 COOCCURS 边（0.15，约为前向的 1/4，低于 expand 阈值）
+                        if add_edge(_tp_conn, _new_id, _old_id, EdgeType.COOCCURS, 0.15,
                                     source="temporal"):
                             _tp_edge_count += 1
                 _tp_conn.commit()
