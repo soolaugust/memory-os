@@ -366,6 +366,24 @@ _REGISTRY: dict = {
     "store_vfs.df_penalty_cap": (0.15, float, 0.0, 0.50, None,
         "iter418: Directed Forgetting stability 惩罚上限（从 base 减去 base × 此系数，默认 0.15）"),
 
+    # ── iter422: Permastore Memory — 充分强化后的记忆永久保护（Bahrick 1979）──────────────
+    # 认知科学依据：Bahrick (1979) — 充分访问+高重要性的记忆达到"permastore"状态，
+    #   即使经过数十年不复习，仍能保留约 80% 的可访问性。
+    #   Conway et al. (1991): 专业知识具有 permastore 特征。
+    # 应用：chunk 满足 age>=30d + access_count>=10 + importance>=0.80 →
+    #   RI/RIF/DF 只能降低到 stability×floor_factor(0.80)（而非普通 floor=0.1）。
+    # OS 类比：Linux mlock() — 重要页面锁定在 RAM，kswapd 无法驱逐。
+    "store_vfs.permastore_enabled": (True, bool, None, None, None,
+        "是否启用 iter422 Permastore Memory：充分访问+高重要性 chunk 的 stability 受更高 floor 保护"),
+    "store_vfs.permastore_min_age_days": (30, int, 7, 365, None,
+        "iter422: 进入 permastore 所需的最小 chunk 年龄（天），默认 30 天"),
+    "store_vfs.permastore_min_access_count": (10, int, 3, 100, None,
+        "iter422: 进入 permastore 所需的最小访问次数，默认 10 次"),
+    "store_vfs.permastore_min_importance": (0.80, float, 0.3, 1.0, None,
+        "iter422: 进入 permastore 所需的最低 importance，默认 0.80"),
+    "store_vfs.permastore_floor_factor": (0.80, float, 0.3, 1.0, None,
+        "iter422: permastore chunk 的 stability 下限系数（stability × factor），默认 0.80"),
+
     # ── iter421: Retroactive Interference — 新学习干扰旧记忆回忆 ─────────────────────────
     # 认知科学依据：McGeoch (1932) Interference Theory; Barnes & Underwood (1959) —
     #   新学习的信息（新 chunk）干扰对旧相关信息的回忆（retroactive interference）。

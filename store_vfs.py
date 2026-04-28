@@ -3755,6 +3755,75 @@ def apply_zeigarnik_effect(
         return base_stability
 
 
+# ── iter422: Permastore Memory — 充分强化后的记忆永久保护（Bahrick 1979）───────────────
+# 认知科学依据：Bahrick (1979) Permastore — 充分暴露+高重要性的记忆达到"永久存储"状态：
+#   即使经过数十年不复习，仍能保留约 80% 的可访问性（vs 普通记忆的完全遗忘）。
+#   Conway et al. (1991): 专业知识（expert knowledge）具有 permastore 特征。
+# 应用：满足条件的 chunk（age>=30d, access_count>=10, importance>=0.80）进入 permastore 状态；
+#   RI/RIF/DF 对这些 chunk 只能将 stability 降低到 stability×floor_factor(0.80)，
+#   而非普通的硬 floor=0.1，保护核心知识不被干扰效应过度压制。
+# OS 类比：Linux mlock() + MADV_WILLNEED —
+#   重要页面（内核代码、共享库 .text 段）mlock 锁定在 RAM，
+#   即使系统内存极度紧张，kswapd 也无法驱逐这些页面（硬保护下限）。
+
+def compute_permastore_floor(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    current_stability: float,
+) -> float:
+    """
+    iter422: 计算 chunk 的 stability 下限（Permastore Memory）。
+
+    如果 chunk 满足 permastore 条件（age >= min_age_days, access_count >= min_acc,
+    importance >= min_importance），返回 current_stability × floor_factor（> 普通 0.1）。
+    否则返回普通 floor=0.1。
+
+    在 RI/RIF/DF 函数中替代硬编码的 floor=0.1。
+
+    Returns:
+      float — 该 chunk 的 stability 下限
+    """
+    import config as _config
+    if not _config.get("store_vfs.permastore_enabled"):
+        return 0.1  # disabled: use normal floor
+    try:
+        min_age_days = _config.get("store_vfs.permastore_min_age_days")
+        min_acc = _config.get("store_vfs.permastore_min_access_count")
+        min_imp = _config.get("store_vfs.permastore_min_importance")
+        floor_factor = _config.get("store_vfs.permastore_floor_factor")
+
+        row = conn.execute(
+            "SELECT created_at, access_count, importance FROM memory_chunks WHERE id=?",
+            (chunk_id,)
+        ).fetchone()
+        if not row:
+            return 0.1
+
+        created_at = row[0] if isinstance(row, (list, tuple)) else row["created_at"]
+        access_count = int(row[1] if isinstance(row, (list, tuple)) else row["access_count"]) or 0
+        importance = float(row[2] if isinstance(row, (list, tuple)) else row["importance"]) or 0.0
+
+        if not created_at:
+            return 0.1
+
+        # Compute age in days
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            _created_ts = _dt.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
+            _now_ts = _dt.now(_tz.utc).timestamp()
+            age_days = (_now_ts - _created_ts) / 86400.0
+        except Exception:
+            return 0.1
+
+        if age_days >= min_age_days and access_count >= min_acc and importance >= min_imp:
+            # Permastore: floor is a fraction of current stability
+            return max(0.1, current_stability * floor_factor)
+
+        return 0.1
+    except Exception:
+        return 0.1
+
+
 # ── iter417: Retrieval-Induced Forgetting — 检索引发的竞争性抑制（Anderson et al. 1994）──
 # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
 #   检索一个记忆时主动抑制其语义竞争者（inhibitory tagging），
@@ -3847,10 +3916,11 @@ def apply_retrieval_induced_forgetting(
         neighbor_overlaps.sort(key=lambda x: -x[2])
         to_inhibit = neighbor_overlaps[:max_neighbors]
 
-        # Apply RIF decay
+        # Apply RIF decay (iter422: permastore floor)
         inhibited = 0
         for n_cid, n_stab, _ in to_inhibit:
-            new_stab = max(0.1, n_stab * decay_factor)
+            _ps_floor = compute_permastore_floor(conn, n_cid, n_stab)
+            new_stab = max(_ps_floor, n_stab * decay_factor)
             if abs(new_stab - n_stab) > 0.001:
                 conn.execute(
                     "UPDATE memory_chunks SET stability=? WHERE id=?",
@@ -3946,7 +4016,8 @@ def apply_directed_forgetting(
         penalty_cap = _config.get("store_vfs.df_penalty_cap")
         score = compute_directed_forgetting_score(content or "", chunk_type or "")
         penalty = directed_forgetting_penalty(score, stab, penalty_cap)
-        new_stability = max(0.1, stab - penalty)  # floor at 0.1
+        _ps_floor = compute_permastore_floor(conn, chunk_id, stab)
+        new_stability = max(_ps_floor, stab - penalty)  # iter422: permastore floor
         if penalty > 0.001:
             conn.execute(
                 "UPDATE memory_chunks SET stability=? WHERE id=?",
@@ -4119,7 +4190,8 @@ def apply_retroactive_interference(
 
         inhibited = 0
         for c_id, c_stab, _ in overlapping:
-            new_stab = max(0.1, c_stab * decay_factor)
+            _ps_floor = compute_permastore_floor(conn, c_id, c_stab)
+            new_stab = max(_ps_floor, c_stab * decay_factor)  # iter422: permastore floor
             if abs(new_stab - c_stab) > 1e-6:
                 conn.execute(
                     "UPDATE memory_chunks SET stability=? WHERE id=?",
