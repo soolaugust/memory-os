@@ -294,6 +294,31 @@ _REGISTRY: dict = {
     "store_vfs.lop_enabled": (True, bool, None, None, None,
         "是否启用 iter411 Levels of Processing：encode_context 实体密度代理编码深度 → stability 加成"),
 
+    # ── iter414: Self-Reference Effect — 自我参照内容的记忆优势 ─────────────────────
+    # 认知科学依据：Rogers et al. (1977) Self-Reference Effect —
+    #   以"与自我相关"方式加工的信息比语义加工的记忆更强（self-referential processing 激活 PFC + hippocampus）。
+    #   Symons & Johnson (1997) Meta-analysis: self-reference advantage ≈ +0.5 SD vs semantic encoding。
+    #   在 memory-os 中：chunk 内容含第一人称标记（I/we/our/my）或 agent 自身推理产物，
+    #   代理"自我参照"加工，initial stability 获得加成。
+    # OS 类比：Linux process 自身页（stack/heap/text）在 TLB 中有最高局部性 —
+    #   process 直接引用的 page（自我参照）命中率最高，类比 self-referential chunk 的检索优势。
+    "store_vfs.self_ref_enabled": (True, bool, None, None, None,
+        "是否启用 iter414 Self-Reference Effect：含第一人称标记的 chunk 获得 stability 加成"),
+    "store_vfs.self_ref_bonus_cap": (0.25, float, 0.0, 0.50, None,
+        "iter414: Self-Reference Effect stability 加成上限（作为 base × 此系数，默认 0.25）"),
+
+    # ── iter415: Encoding Variability — 多情境编码的记忆鲁棒性 ────────────────────
+    # 认知科学依据：Estes (1955) Encoding Variability Theory; Bjork & Bjork (1992) New Theory of Disuse —
+    #   同一记忆在多个不同情境下编码 → 更多检索线索 → 在多样化情境下均可提取（retrieval robustness）。
+    #   Glenberg (1979): 分布式练习效果部分来自情境多样性（context diversification across repetitions）。
+    # 实现：encode_context token 数量随 iter404 语义启动而增长；token 数超过初始值越多，
+    #   代表访问情境越多样，在 update_accessed 时给予轻微 stability 加成。
+    # OS 类比：Linux 共享库被 N 个进程引用 → page cache 引用计数高 → 驱逐优先级低（多情境引用 = 更稳定）。
+    "store_vfs.encoding_variability_enabled": (True, bool, None, None, None,
+        "是否启用 iter415 Encoding Variability：encode_context 增长（多情境访问）→ stability 加成"),
+    "store_vfs.encoding_variability_scale": (0.05, float, 0.0, 0.20, None,
+        "iter415: 每个新增 encode_context token 的 stability 加成系数（默认 0.05，上限 base × 0.15）"),
+
     # ── Deadline I/O Scheduler（迭代41）──
     "retriever.deadline_ms": (50.0, float, 5.0, 200.0, None,
         "检索截止时间（ms），超过时跳过低优先级阶段（从30ms调整为50ms，适应VFS+PSI开销）"),

@@ -354,6 +354,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     # 存储 chunk 写入时的情境特征 JSON，检索时与 query_context 比对计算匹配度。
     _safe_add_column(conn, "memory_chunks", "encoding_context", "TEXT DEFAULT '{}'")
 
+    # ── iter415: original_ec_count — encode_context 初始 token 数（Encoding Variability）──
+    # 存储 chunk 写入时的 encode_context token 数量，用于检测后续多情境富化。
+    # OS 类比：page 首次 mapped-in 的引用计数基线；后续跨进程引用增量代表多情境共享。
+    _safe_add_column(conn, "memory_chunks", "original_ec_count", "INTEGER DEFAULT 0")
+
     # ── Task13：row_version — Optimistic Locking（CAS）──
     # OS 类比：Linux seqlock / atomic_cmpxchg — 读取 sequence number 后写入时验证未变化。
     # 多 agent 并发写：每次 update 递增 row_version，CAS 检查版本防止 ABA 问题。
@@ -1856,6 +1861,40 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
         apply_depth_effect(conn, d["id"], base_stability=_lop_base_stability)
     except Exception:
         pass  # depth effect 写入失败不阻塞主流程
+
+    # iter414: Self-Reference Effect — 含自我参照标记的 chunk 获得 stability 加成（Rogers et al. 1977）
+    # 自我参照加工激活 PFC + hippocampus 双路径，形成更强记忆痕迹
+    try:
+        _sr_base_stability = d.get("stability", 1.0)
+        apply_self_reference_effect(conn, d["id"], base_stability=_sr_base_stability)
+    except Exception:
+        pass  # self-reference effect 写入失败不阻塞主流程
+
+    # iter415: store original encode_context token count for variability tracking
+    # This count is used by apply_encoding_variability at access time to measure enrichment
+    try:
+        _ec_str = d.get("encoding_context", {})
+        if isinstance(_ec_str, dict):
+            import json as _json
+            _ec_str = _json.dumps(_ec_str)
+        # Read current encode_context from DB (may have been set by extract_encode_context)
+        _ec_row = conn.execute(
+            "SELECT encode_context FROM memory_chunks WHERE id=?", (d["id"],)
+        ).fetchone()
+        if _ec_row:
+            _ec_val = _ec_row[0] if isinstance(_ec_row, (list, tuple)) else _ec_row["encode_context"]
+            _orig_tokens = [t.strip() for t in (_ec_val or "").split(",") if t.strip()]
+            _orig_count = len(_orig_tokens)
+            # Store original_ec_count in DB (if column exists; safe fallback)
+            try:
+                conn.execute(
+                    "UPDATE memory_chunks SET original_ec_count=? WHERE id=?",
+                    (_orig_count, d["id"])
+                )
+            except Exception:
+                pass  # column may not exist in older schemas
+    except Exception:
+        pass  # iter415 init 失败不阻塞主流程
 
 
 # ── iter403：Cue-Dependent Forgetting — Context-Sensitive Retrieval（Tulving 1974）──
@@ -3360,6 +3399,209 @@ def apply_depth_effect(
         return base_stability
 
 
+# ── iter414: Self-Reference Effect — 自我参照内容的记忆优势（Rogers et al. 1977）──
+# 认知科学依据：Rogers et al. (1977), Symons & Johnson (1997 meta-analysis):
+#   以"与自我相关"方式加工的信息比语义加工的记忆更强（+0.5 SD）。
+# OS 类比：Linux process 自身页（stack/heap/text）在 TLB 中有最高局部性。
+
+_SELF_REF_MARKERS = frozenset([
+    "i ", "i'm", "i've", "i'll", "i'd", "we ", "we're", "we've", "we'll",
+    "our ", "my ", "myself", "ourselves", "me ", "us ", "let me", "let's",
+    # Chinese self-reference markers
+    "我", "我们", "我的", "我们的", "自己",
+])
+
+
+def compute_self_reference_score(content: str, chunk_type: str = "") -> float:
+    """
+    iter414: 计算内容的自我参照分数 [0.0, 1.0]。
+
+    检测内容中第一人称标记的密度，以及 agent 主动生成的 chunk 类型加成。
+
+    Returns:
+      float — 自我参照分数 [0.0, 1.0]
+    """
+    if not content:
+        return 0.0
+    try:
+        content_lower = content.lower()
+        # Count self-reference marker occurrences
+        total_matches = 0
+        for marker in _SELF_REF_MARKERS:
+            # Simple substring count (fast, no regex)
+            idx = 0
+            while True:
+                pos = content_lower.find(marker, idx)
+                if pos == -1:
+                    break
+                total_matches += 1
+                idx = pos + len(marker)
+
+        # Normalize by content length (per 100 chars)
+        content_words = max(1, len(content.split()))
+        density = total_matches / content_words
+
+        # chunk_type bonus: agent-generated types get extra self-reference weight
+        type_bonus = 0.0
+        if chunk_type in ("reasoning_chain", "decision", "causal_chain", "procedure"):
+            type_bonus = 0.2  # agent's own reasoning = inherently self-referential
+
+        raw_score = min(1.0, density * 5.0 + type_bonus)  # density 0.2 → raw=1.0 + bonus
+        return min(1.0, raw_score)
+    except Exception:
+        return 0.0
+
+
+def self_ref_stability_bonus(score: float, base_stability: float, bonus_cap: float = 0.25) -> float:
+    """
+    iter414: 根据自我参照分数计算 stability 加成。
+
+    bonus = base × bonus_cap × score
+    capped at base × bonus_cap
+
+    Args:
+      score: self-reference score [0.0, 1.0]
+      base_stability: chunk 的基础 stability
+      bonus_cap: 最大加成比例（默认 0.25 = base × 25%）
+
+    Returns:
+      float — stability 加成量
+    """
+    if score <= 0.0 or base_stability <= 0.0:
+        return 0.0
+    max_bonus = base_stability * bonus_cap
+    return min(max_bonus, max_bonus * score)
+
+
+def apply_self_reference_effect(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    base_stability: float = 1.0,
+) -> float:
+    """
+    iter414: 读取 chunk 内容，计算自我参照加成并更新 stability。
+
+    Returns:
+      float — 更新后的 stability
+    """
+    if not chunk_id:
+        return base_stability
+    import config as _config
+    if not _config.get("store_vfs.self_ref_enabled"):
+        return base_stability
+    try:
+        row = conn.execute(
+            "SELECT content, chunk_type FROM memory_chunks WHERE id=?",
+            (chunk_id,)
+        ).fetchone()
+        if not row:
+            return base_stability
+        content = row[0] if isinstance(row, (list, tuple)) else row["content"]
+        chunk_type = row[1] if isinstance(row, (list, tuple)) else row["chunk_type"]
+        bonus_cap = _config.get("store_vfs.self_ref_bonus_cap")
+        score = compute_self_reference_score(content or "", chunk_type or "")
+        bonus = self_ref_stability_bonus(score, base_stability, bonus_cap)
+        new_stability = base_stability + bonus
+        if bonus > 0.001:
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?",
+                (new_stability, chunk_id)
+            )
+        return new_stability
+    except Exception:
+        return base_stability
+
+
+# ── iter415: Encoding Variability — 多情境编码的记忆鲁棒性（Estes 1955）──────────
+# 认知科学依据：多情境编码 → 更多检索线索 → retrieval robustness。
+# OS 类比：共享库被 N 个进程引用 → 高引用计数 → 不易被 kswapd 驱逐。
+
+
+def compute_context_enrichment(current_ec: str, original_ec_count: int) -> int:
+    """
+    iter415: 计算 encode_context 的富化程度（新增 token 数）。
+
+    Returns:
+      int — 超过原始 token 数的新增 token 数量（>= 0）
+    """
+    if not current_ec:
+        return 0
+    current_tokens = [t.strip() for t in current_ec.split(",") if t.strip()]
+    enrichment = max(0, len(current_tokens) - original_ec_count)
+    return enrichment
+
+
+def encoding_variability_bonus(enrichment_count: int, base_stability: float,
+                                scale: float = 0.05) -> float:
+    """
+    iter415: 根据 encode_context 富化程度计算 stability 加成。
+
+    bonus = base × min(0.15, enrichment_count × scale)
+    capped at base × 0.15
+
+    Args:
+      enrichment_count: 超过初始 token 数的新增 token 数量
+      base_stability: 当前 stability
+      scale: 每个新增 token 的加成系数（默认 0.05）
+
+    Returns:
+      float — stability 加成量
+    """
+    if enrichment_count <= 0 or base_stability <= 0.0:
+        return 0.0
+    max_factor = 0.15  # cap at base × 15%
+    factor = min(max_factor, enrichment_count * scale)
+    return base_stability * factor
+
+
+def apply_encoding_variability(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    current_stability: float = None,
+) -> float:
+    """
+    iter415: 检查 encode_context 富化程度，给予 stability 加成。
+
+    只在 update_accessed 时调用（不在 insert_chunk 时调用，因为初始状态无富化）。
+
+    Returns:
+      float — 更新后的 stability（如无富化则返回 current_stability）
+    """
+    if not chunk_id:
+        return current_stability or 0.0
+    import config as _config
+    if not _config.get("store_vfs.encoding_variability_enabled"):
+        return current_stability or 0.0
+    try:
+        row = conn.execute(
+            "SELECT stability, encode_context, COALESCE(original_ec_count, 0) AS orig_count "
+            "FROM memory_chunks WHERE id=?",
+            (chunk_id,)
+        ).fetchone()
+        if not row:
+            return current_stability or 0.0
+
+        stab = float(row[0] if isinstance(row, (list, tuple)) else row["stability"]) or 1.0
+        ec = row[1] if isinstance(row, (list, tuple)) else row["encode_context"]
+        orig_count = int(row[2] if isinstance(row, (list, tuple)) else row["orig_count"])
+
+        if current_stability is not None:
+            stab = current_stability
+
+        scale = _config.get("store_vfs.encoding_variability_scale")
+        enrichment = compute_context_enrichment(ec or "", orig_count)
+        bonus = encoding_variability_bonus(enrichment, stab, scale)
+        new_stability = min(365.0, stab + bonus)
+        if bonus > 0.001:
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?",
+                (new_stability, chunk_id)
+            )
+        return new_stability
+    except Exception:
+        return current_stability or 0.0
+
+
 # ── iter413: Sleep Consolidation — 离线记忆巩固（Stickgold 2005）───────────────
 # 认知科学依据：NREM 睡眠中海马体重放最近学习的记忆，将其转移到新皮层。
 # OS 类比：Linux pdflush/writeback daemon — session 间 idle period 内后台巩固 dirty pages。
@@ -3765,6 +4007,15 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
                 _tokens = [t.strip() for t in _ec.split(",") if t.strip()]
                 if _tokens:
                     prime_entities(conn, _tokens, _proj, prime_strength=0.8, now_iso=now_iso)
+    except Exception:
+        pass
+
+    # iter415: Encoding Variability — 多情境访问 → encode_context 富化 → stability 加成
+    # Estes (1955): 多情境编码提升检索鲁棒性（更多检索线索）
+    # OS 类比：共享库被 N 个进程引用 → 高引用计数 → 不易被 kswapd 驱逐
+    try:
+        for _cid in chunk_ids:
+            apply_encoding_variability(conn, _cid)
     except Exception:
         pass
 
