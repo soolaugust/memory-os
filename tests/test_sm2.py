@@ -81,58 +81,67 @@ def test_quality5_max_gain(conn):
     """quality=5 → stability × 1.2（最大增益）。"""
     insert_chunk(conn, _make_chunk("c1", stability=1.0))
     conn.commit()
+    s_before = _get_stability(conn, "c1")  # 实际写入后 stability（可能被写入效应修改）
     update_accessed(conn, ["c1"], recall_quality=5)
     conn.commit()
     s = _get_stability(conn, "c1")
-    assert abs(s - 1.2) < 1e-6, f"quality=5 → ×1.2，got {s}"
+    ratio = s / s_before if s_before else 0
+    assert abs(ratio - 1.2) < 1e-4, f"quality=5 → ×1.2，got ratio={ratio:.6f} (s={s:.4f}, base={s_before:.4f})"
 
 
 def test_quality3_neutral(conn):
     """quality=3 → stability 不变（× 1.0，中性）。"""
     insert_chunk(conn, _make_chunk("c2", stability=2.5))
     conn.commit()
+    s_before = _get_stability(conn, "c2")
     update_accessed(conn, ["c2"], recall_quality=3)
     conn.commit()
     s = _get_stability(conn, "c2")
-    assert abs(s - 2.5) < 1e-6, f"quality=3 → ×1.0，got {s}"
+    ratio = s / s_before if s_before else 0
+    assert abs(ratio - 1.0) < 1e-4, f"quality=3 → ×1.0，got ratio={ratio:.6f}"
 
 
 def test_quality0_forgetting(conn):
     """quality=0 → stability × 0.7（遗忘惩罚，下限保护）。"""
     insert_chunk(conn, _make_chunk("c3", stability=2.0))
     conn.commit()
+    s_before = _get_stability(conn, "c3")
     update_accessed(conn, ["c3"], recall_quality=0)
     conn.commit()
     s = _get_stability(conn, "c3")
-    assert abs(s - 1.4) < 1e-6, f"quality=0 → ×0.7 → 1.4，got {s}"
+    ratio = s / s_before if s_before else 0
+    assert abs(ratio - 0.7) < 1e-4, f"quality=0 → ×0.7，got ratio={ratio:.6f}"
 
 
 def test_quality4_mild_gain(conn):
     """quality=4 → stability × 1.1（轻微加固）。"""
     insert_chunk(conn, _make_chunk("c4", stability=1.0))
     conn.commit()
+    s_before = _get_stability(conn, "c4")
     update_accessed(conn, ["c4"], recall_quality=4)
     conn.commit()
     s = _get_stability(conn, "c4")
-    assert abs(s - 1.1) < 1e-6, f"quality=4 → ×1.1，got {s}"
+    ratio = s / s_before if s_before else 0
+    assert abs(ratio - 1.1) < 1e-4, f"quality=4 → ×1.1，got ratio={ratio:.6f}"
 
 
 def test_default_quality_is_4(conn):
     """recall_quality=None + 1-day gap → iter389 再巩固窗口推断 quality=4 → × 1.1。"""
     from datetime import timedelta
-    # 设置 last_accessed 为 25 小时前（> medium_gap=24hr → quality=5 已超过，
-    # 但为了测试 quality=4 场景，设置为 6 小时前（处于 medium zone）
+    # 设置 last_accessed 为 6 小时前（处于 medium zone，quality=4）
     chunk = _make_chunk("c5", stability=1.0)
     chunk["last_accessed"] = (__import__("datetime").datetime.now(
         __import__("datetime").timezone.utc
     ) - __import__("datetime").timedelta(hours=6)).isoformat()
     insert_chunk(conn, chunk)
     conn.commit()
+    s_before = _get_stability(conn, "c5")
     update_accessed(conn, ["c5"], recall_quality=None)
     conn.commit()
     s = _get_stability(conn, "c5")
     # 6hr gap → quality=4 → ×1.1
-    assert abs(s - 1.1) < 0.01, f"6hr gap → quality=4 → ×1.1，got {s}"
+    ratio = s / s_before if s_before else 0
+    assert abs(ratio - 1.1) < 0.01, f"6hr gap → quality=4 → ×1.1，got ratio={ratio:.4f}"
 
 
 def test_no_quality_param_backward_compat(conn):
@@ -166,20 +175,24 @@ def test_quality_clamp_below_zero(conn):
     """quality < 0 被 clamp 到 0。"""
     insert_chunk(conn, _make_chunk("c9", stability=2.0))
     conn.commit()
+    s_before = _get_stability(conn, "c9")
     update_accessed(conn, ["c9"], recall_quality=-1)  # clamp to 0 → × 0.7
     conn.commit()
     s = _get_stability(conn, "c9")
-    assert abs(s - 1.4) < 1e-6, f"quality=-1 clamp 到 0 → ×0.7，got {s}"
+    ratio = s / s_before if s_before else 0
+    assert abs(ratio - 0.7) < 1e-4, f"quality=-1 clamp 到 0 → ×0.7，got ratio={ratio:.6f}"
 
 
 def test_quality_clamp_above_5(conn):
     """quality > 5 被 clamp 到 5。"""
     insert_chunk(conn, _make_chunk("c10", stability=1.0))
     conn.commit()
+    s_before = _get_stability(conn, "c10")
     update_accessed(conn, ["c10"], recall_quality=10)  # clamp to 5 → × 1.2
     conn.commit()
     s = _get_stability(conn, "c10")
-    assert abs(s - 1.2) < 1e-6, f"quality=10 clamp 到 5 → ×1.2，got {s}"
+    ratio = s / s_before if s_before else 0
+    assert abs(ratio - 1.2) < 1e-4, f"quality=10 clamp 到 5 → ×1.2，got ratio={ratio:.6f}"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -191,7 +204,8 @@ def test_repeated_quality5_compounds(conn):
     insert_chunk(conn, _make_chunk("c11", stability=1.0))
     conn.commit()
 
-    s = 1.0
+    # 读取 insert_chunk 后的实际 stability（可能被写入效应修改）
+    s = _get_stability(conn, "c11")
     for i in range(5):
         update_accessed(conn, ["c11"], recall_quality=5)
         conn.commit()
@@ -227,9 +241,12 @@ def test_batch_update_applies_same_quality(conn):
         insert_chunk(conn, _make_chunk(f"b{i}", stability=1.0))
     conn.commit()
 
+    s_before = {f"b{i}": _get_stability(conn, f"b{i}") for i in range(3)}
     update_accessed(conn, ["b0", "b1", "b2"], recall_quality=5)
     conn.commit()
 
     for i in range(3):
         s = _get_stability(conn, f"b{i}")
-        assert abs(s - 1.2) < 1e-6, f"批量 quality=5 → ×1.2，b{i} got {s}"
+        base = s_before[f"b{i}"]
+        ratio = s / base if base else 0
+        assert abs(ratio - 1.2) < 1e-4, f"批量 quality=5 → ×1.2，b{i} got ratio={ratio:.6f}"

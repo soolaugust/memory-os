@@ -1839,6 +1839,24 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
     except Exception:
         pass  # flashbulb effect 写入失败不阻塞主流程
 
+    # iter410: Primacy Effect — 项目最早创建的 chunk 是基础 schema，stability 首位加成（Murdock 1962）
+    # boot-time parameters 类比：项目初期确立的知识比后来的更持久（rehearsal hypothesis）
+    try:
+        _pr_project = d.get("project", "")
+        _pr_base_stability = d.get("stability", 1.0)
+        if _pr_project:
+            apply_primacy_effect(conn, d["id"], _pr_project, base_stability=_pr_base_stability)
+    except Exception:
+        pass  # primacy effect 写入失败不阻塞主流程
+
+    # iter411: Levels of Processing — encode_context 实体数量代理编码深度（Craik & Lockhart 1972）
+    # 更多语义实体 = 更丰富语义网络 = 更深加工 = 更强 stability
+    try:
+        _lop_base_stability = d.get("stability", 1.0)
+        apply_depth_effect(conn, d["id"], base_stability=_lop_base_stability)
+    except Exception:
+        pass  # depth effect 写入失败不阻塞主流程
+
 
 # ── iter403：Cue-Dependent Forgetting — Context-Sensitive Retrieval（Tulving 1974）──
 #
@@ -3070,6 +3088,267 @@ def apply_flashbulb_effect(
             return base_stability
         ew = row[0] if isinstance(row, (list, tuple)) else row["emotional_weight"]
         bonus = flashbulb_stability_bonus(ew or 0.0, base_stability)
+        new_stability = base_stability + bonus
+        if bonus > 0.001:
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?",
+                (new_stability, chunk_id)
+            )
+        return new_stability
+    except Exception:
+        return base_stability
+
+
+# ── iter410: Primacy Effect — 首位效应（Murdock 1962 Serial Position Effect）────
+#
+# 认知科学依据：
+#   Murdock (1962) "The serial position effect of free recall" (JEP):
+#     在一系列项目中，最早出现的项目（primacy）和最近出现的项目（recency）
+#     记忆效果最好，中间项目最差。
+#   Primacy Effect 机制（Rundus 1971）：
+#     最早的项目在工作记忆中停留时间最长，被 rehearsed（复述）次数最多，
+#     形成更强的长时记忆痕迹（elaborative rehearsal hypothesis）。
+#   在工程知识场景中：
+#     项目最初建立的 chunk（架构决策/设计约束/技术选型）是后续所有工作的
+#     认知 schema（Bartlett 1932）。它们被参考、验证、依赖的次数最多，
+#     相当于被 rehearsed 最多次。
+#
+# OS 类比：Linux boot-time kernel parameters
+#   内核启动时通过 cmdline 设置的参数（如 hugepages=1024、pcie_aspm=off）
+#   比 sysctl 运行时参数更持久：它们在所有子系统初始化之前就生效，
+#   是系统的基础 schema，后续配置都在它之上构建。
+#   对应：项目最早创建的 chunk = boot-time parameters = 基础 schema = 更持久。
+#
+# 实现约束：
+#   1. min_total_chunks=20 阈值 — 项目少于 20 个 chunk 时不应用（避免新项目所有 chunk 都加成）
+#   2. primacy_pct=0.10 — 最早的 10% 的 chunk 获得完整 primacy bonus
+#   3. 延伸区间 [0.10, 0.20) — 线性衰减到 0
+#   4. 上限 base × 0.15（保守，首位效应是相对效应）
+
+
+def compute_primacy_rank(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    project: str,
+    min_total_chunks: int = 20,
+) -> float:
+    """
+    iter410: 计算 chunk 在项目中按创建时间排名的百分位 [0.0, 1.0]。
+
+    0.0 = 最早创建（primacy 最强），1.0 = 最晚创建。
+    若项目 chunk 总数 < min_total_chunks，返回 1.0（不触发 primacy 加成）。
+    """
+    if not chunk_id or not project:
+        return 1.0
+    try:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM memory_chunks WHERE project=?", (project,)
+        ).fetchone()[0]
+        if total < min_total_chunks:
+            return 1.0  # 项目还太小，不应用首位效应
+
+        # 获取 chunk 的创建时间排名（升序）
+        rank_row = conn.execute(
+            """SELECT COUNT(*) FROM memory_chunks
+               WHERE project=? AND created_at < (
+                   SELECT created_at FROM memory_chunks WHERE id=? AND project=?
+               )""",
+            (project, chunk_id, project)
+        ).fetchone()
+        if not rank_row:
+            return 1.0
+        rank = rank_row[0]  # 比该 chunk 更早的 chunk 数量（0-based）
+        return rank / total  # 百分位：0.0 = 最早
+    except Exception:
+        return 1.0
+
+
+def primacy_stability_bonus(primacy_rank: float, base_stability: float) -> float:
+    """
+    iter410: 将 primacy_rank 映射为 stability 加成（首位效应）。
+
+    设计（Rundus 1971 rehearsal hypothesis）：
+      rank < 0.10（最早 10%）: factor = 0.15（完整首位加成）
+      rank [0.10, 0.20)：线性衰减 0.15 → 0.0
+      rank ≥ 0.20：factor = 0（不在首位区间）
+
+    cap: base × 0.15
+    """
+    try:
+        primacy_rank = float(primacy_rank)
+        base_stability = float(base_stability)
+    except (TypeError, ValueError):
+        return 0.0
+    if base_stability <= 0.0:
+        return 0.0
+
+    _PRIMACY_CORE = 0.10    # 最早 10% 获得完整加成
+    _PRIMACY_TAIL = 0.20    # 10-20% 线性衰减
+    _PRIMACY_MAX_FACTOR = 0.15
+
+    if primacy_rank < _PRIMACY_CORE:
+        factor = _PRIMACY_MAX_FACTOR
+    elif primacy_rank < _PRIMACY_TAIL:
+        t = 1.0 - (primacy_rank - _PRIMACY_CORE) / (_PRIMACY_TAIL - _PRIMACY_CORE)
+        factor = t * _PRIMACY_MAX_FACTOR
+    else:
+        return 0.0
+
+    bonus = base_stability * factor
+    max_bonus = base_stability * _PRIMACY_MAX_FACTOR
+    return min(bonus, max_bonus)
+
+
+def apply_primacy_effect(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    project: str,
+    base_stability: float = 1.0,
+    min_total_chunks: int = 20,
+) -> float:
+    """
+    iter410: 计算首位效应并更新 chunk 的 stability。
+
+    Returns:
+      float — 更新后的 stability（= base + primacy_bonus）
+    """
+    if not chunk_id or not project:
+        return base_stability
+    try:
+        rank = compute_primacy_rank(conn, chunk_id, project, min_total_chunks=min_total_chunks)
+        bonus = primacy_stability_bonus(rank, base_stability)
+        new_stability = base_stability + bonus
+        if bonus > 0.001:
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?",
+                (new_stability, chunk_id)
+            )
+        return new_stability
+    except Exception:
+        return base_stability
+
+
+# ── iter411: Levels of Processing — 编码深度效应（Craik & Lockhart 1972）─────────
+#
+# 认知科学依据：
+#   Craik & Lockhart (1972) "Levels of processing: A framework for memory research" (JVLVB):
+#     记忆强度由编码时的加工深度决定，而非存储容量：
+#     - 浅层加工（phonological）：重复发音，不理解语义 → 弱记忆
+#     - 中层加工（syntactic）：理解语法结构 → 中等记忆
+#     - 深层加工（semantic）：与已有语义网络建立丰富联系 → 强记忆
+#   Hyde & Jenkins (1973): 语义导向任务（"它是有生命的吗？"）比
+#     结构导向任务（"它有字母 e 吗？"）产生更好的记忆保留。
+#
+#   在 memory-os 中，encode_context（逗号分隔实体列表）是语义网络节点密度的代理指标：
+#     实体越多 → 与更多概念建立了语义联系 → 更深的加工 → 更强的记忆痕迹
+#
+# OS 类比：Linux NUMA-aware page allocation
+#   NUMA-local 页面访问延迟最低（本地 memory bank），类比语义本地性：
+#   与本项目语义网络连接越多（实体越多），访问该知识的"延迟"越低（检索更容易）。
+#   深层加工 = NUMA-local allocation = 低访问延迟 = 更不容易被 swap out。
+#
+# 实现约束：
+#   1. 基于 encode_context 实体数量（已有字段，轻量）
+#   2. 非线性分级：8+→1.0, 5-7→0.7, 3-4→0.4, 1-2→0.1, 0→0.0
+#   3. 加成上限 base × 0.15（保守，因实体数量是间接代理，不是直接测量）
+#   4. 不依赖 DB 查询（纯函数），可用于写入前预计算
+
+
+def compute_encoding_depth(encode_context: str) -> float:
+    """
+    iter411: 基于 encode_context 实体数量计算编码深度分 [0.0, 1.0]。
+
+    分级（Hyde & Jenkins 1973 语义网络密度代理）：
+      entity_count >= 8: depth = 1.0（极丰富语义网络，深层加工）
+      entity_count 5-7:  depth = 0.7（丰富）
+      entity_count 3-4:  depth = 0.4（中等）
+      entity_count 1-2:  depth = 0.1（浅层）
+      entity_count = 0:  depth = 0.0（无语义编码）
+    """
+    if not encode_context:
+        return 0.0
+    try:
+        entities = [e.strip() for e in encode_context.split(',') if e.strip()]
+        count = len(entities)
+        if count == 0:
+            return 0.0
+        elif count <= 2:
+            return 0.1
+        elif count <= 4:
+            return 0.4
+        elif count <= 7:
+            return 0.7
+        else:
+            return 1.0
+    except Exception:
+        return 0.0
+
+
+def depth_stability_bonus(depth: float, base_stability: float) -> float:
+    """
+    iter411: 将编码深度分映射为 stability 加成。
+
+    设计（Craik & Lockhart 1972 深度 → 保留强度）：
+      depth >= 0.80: factor = 0.15（极深层加工）
+      depth [0.50, 0.80): 线性插值 0.08 → 0.15
+      depth [0.20, 0.50): 线性插值 0.00 → 0.08
+      depth < 0.20: factor = 0（浅层/无加工）
+
+    cap: base × 0.15（保守上限，间接代理指标）
+    """
+    try:
+        depth = float(depth)
+        base_stability = float(base_stability)
+    except (TypeError, ValueError):
+        return 0.0
+    if depth <= 0.0 or base_stability <= 0.0:
+        return 0.0
+
+    _LOP_DEEP   = 0.80
+    _LOP_MED    = 0.50
+    _LOP_WEAK   = 0.20
+    _LOP_MAX_FACTOR = 0.15
+    _LOP_MED_FACTOR = 0.08
+
+    if depth >= _LOP_DEEP:
+        factor = _LOP_MAX_FACTOR
+    elif depth >= _LOP_MED:
+        t = (depth - _LOP_MED) / (_LOP_DEEP - _LOP_MED)
+        factor = _LOP_MED_FACTOR + t * (_LOP_MAX_FACTOR - _LOP_MED_FACTOR)
+    elif depth >= _LOP_WEAK:
+        t = (depth - _LOP_WEAK) / (_LOP_MED - _LOP_WEAK)
+        factor = 0.0 + t * _LOP_MED_FACTOR
+    else:
+        return 0.0
+
+    bonus = base_stability * factor
+    max_bonus = base_stability * _LOP_MAX_FACTOR
+    return min(bonus, max_bonus)
+
+
+def apply_depth_effect(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    base_stability: float = 1.0,
+) -> float:
+    """
+    iter411: 读取 chunk 的 encode_context，计算编码深度加成并更新 stability。
+
+    Returns:
+      float — 更新后的 stability（= base + depth_bonus）
+    """
+    if not chunk_id:
+        return base_stability
+    try:
+        row = conn.execute(
+            "SELECT encode_context FROM memory_chunks WHERE id=?",
+            (chunk_id,)
+        ).fetchone()
+        if not row:
+            return base_stability
+        ec = row[0] if isinstance(row, (list, tuple)) else row["encode_context"]
+        depth = compute_encoding_depth(ec or "")
+        bonus = depth_stability_bonus(depth, base_stability)
         new_stability = base_stability + bonus
         if bonus > 0.001:
             conn.execute(

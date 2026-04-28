@@ -282,6 +282,18 @@ _REGISTRY: dict = {
     "store_vfs.flashbulb_medium_threshold": (0.50, float, 0.1, 0.9, None,
         "iter409: 中等情绪唤醒阈值（[medium, strong) 区间线性插值加成）"),
 
+    # ── iter410: Primacy Effect — 首位效应（Murdock 1962 Serial Position Effect）──
+    "store_vfs.primacy_enabled": (True, bool, None, None, None,
+        "是否启用 iter410 Primacy Effect：项目最早创建的 chunk 获得 stability 首位加成"),
+    "store_vfs.primacy_min_total": (20, int, 5, 200, None,
+        "iter410: 项目 chunk 总数低于此值时不应用首位效应（避免新项目误判）"),
+    "store_vfs.primacy_core_pct": (0.10, float, 0.02, 0.30, None,
+        "iter410: 最早 N% 的 chunk 获得完整首位加成（默认最早 10%）"),
+
+    # ── iter411: Levels of Processing — 编码深度（Craik & Lockhart 1972）─────────
+    "store_vfs.lop_enabled": (True, bool, None, None, None,
+        "是否启用 iter411 Levels of Processing：encode_context 实体密度代理编码深度 → stability 加成"),
+
     # ── Deadline I/O Scheduler（迭代41）──
     "retriever.deadline_ms": (50.0, float, 5.0, 200.0, None,
         "检索截止时间（ms），超过时跳过低优先级阶段（从30ms调整为50ms，适应VFS+PSI开销）"),

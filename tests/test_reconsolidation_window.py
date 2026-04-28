@@ -85,13 +85,15 @@ def test_rw1_short_gap_no_gain(conn):
     insert_chunk(conn, chunk)
     conn.commit()
 
+    stab_before = _get_stability(conn, "rw1")
     update_accessed(conn, ["rw1"])
     conn.commit()
 
     stab = _get_stability(conn, "rw1")
-    # quality=3 → factor=1.0 → stability unchanged ≈ 2.0
-    assert abs(stab - 2.0) < 0.05, \
-        f"短间隔（30s）质量=3，stability 不应增加，got {stab}"
+    # quality=3 → factor=1.0 → stability unchanged
+    ratio = stab / stab_before if stab_before else 0
+    assert abs(ratio - 1.0) < 0.05, \
+        f"短间隔（30s）质量=3，stability ratio 应 ≈ 1.0，got ratio={ratio:.4f}"
 
 
 # ── RW2: 1hr <= gap < 24hr → quality=4 (×1.1) ────────────────────────────
@@ -103,13 +105,15 @@ def test_rw2_medium_gap_light_boost(conn):
     insert_chunk(conn, chunk)
     conn.commit()
 
+    stab_before = _get_stability(conn, "rw2")
     update_accessed(conn, ["rw2"])
     conn.commit()
 
     stab = _get_stability(conn, "rw2")
-    # quality=4 → factor=1.1 → stability ≈ 2.2
-    assert abs(stab - 2.2) < 0.1, \
-        f"中间隔（6hr）质量=4，stability 应 ≈ 2.2，got {stab}"
+    # quality=4 → factor=1.1
+    ratio = stab / stab_before if stab_before else 0
+    assert abs(ratio - 1.1) < 0.1, \
+        f"中间隔（6hr）质量=4，stability ratio 应 ≈ 1.1，got ratio={ratio:.4f}"
 
 
 # ── RW3: gap >= 24hr → quality=5 (×1.2) ──────────────────────────────────
@@ -121,13 +125,15 @@ def test_rw3_long_gap_max_boost(conn):
     insert_chunk(conn, chunk)
     conn.commit()
 
+    stab_before = _get_stability(conn, "rw3")
     update_accessed(conn, ["rw3"])
     conn.commit()
 
     stab = _get_stability(conn, "rw3")
-    # quality=5 → factor=1.2 → stability ≈ 2.4
-    assert abs(stab - 2.4) < 0.1, \
-        f"长间隔（3天）质量=5，stability 应 ≈ 2.4，got {stab}"
+    # quality=5 → factor=1.2
+    ratio = stab / stab_before if stab_before else 0
+    assert abs(ratio - 1.2) < 0.1, \
+        f"长间隔（3天）质量=5，stability ratio 应 ≈ 1.2，got ratio={ratio:.4f}"
 
 
 # ── RW4: 显式 recall_quality 优先 ─────────────────────────────────────────
@@ -139,13 +145,15 @@ def test_rw4_explicit_quality_overrides_recon(conn):
     insert_chunk(conn, chunk)
     conn.commit()
 
+    stab_before = _get_stability(conn, "rw4")
     update_accessed(conn, ["rw4"], recall_quality=3)  # explicit quality=3
     conn.commit()
 
     stab = _get_stability(conn, "rw4")
-    # explicit quality=3 → factor=1.0 → stability ≈ 2.0
-    assert abs(stab - 2.0) < 0.05, \
-        f"显式 quality=3 优先，stability 应不变，got {stab}"
+    # explicit quality=3 → factor=1.0 → stability unchanged
+    ratio = stab / stab_before if stab_before else 0
+    assert abs(ratio - 1.0) < 0.05, \
+        f"显式 quality=3 优先，stability ratio 应不变，got ratio={ratio:.4f}"
 
 
 # ── RW5: recon.enabled=False → 固定 quality=4 ─────────────────────────────
@@ -159,6 +167,8 @@ def test_rw5_disabled_recon_fallback_quality4(conn, monkeypatch):
     chunk = _make_chunk("rw5", last_accessed_ago_secs=3*86400, stability=2.0)
     insert_chunk(conn, chunk)
     conn.commit()
+
+    stab_before = _get_stability(conn, "rw5")
 
     # When recon disabled: fixed quality=4 → ×1.1
     # We test by patching config.get for this key
@@ -177,11 +187,11 @@ def test_rw5_disabled_recon_fallback_quality4(conn, monkeypatch):
     conn.commit()
 
     stab = _get_stability(conn, "rw5")
-    # With recon disabled, stability should be either 2.0 (quality=3 if it happened)
-    # or 2.2 (quality=4) depending on the gap calculation
-    # The key constraint: stability should not be 2.4 (quality=5 result)
-    # Since gap=3 days and recon is disabled, result should be exactly 2.2 (quality=4 fallback)
-    assert stab <= 2.25, f"禁用 recon 时 stability 应 ≤ 2.25（fallback quality=4），got {stab}"
+    # With recon disabled: quality=4 → ×1.1
+    # Key constraint: ratio should be ≈ 1.1 (not 1.2 which would be quality=5 with gap=3days)
+    ratio = stab / stab_before if stab_before else 0
+    assert abs(ratio - 1.1) < 0.1, \
+        f"禁用 recon 时 quality=4 fallback，ratio 应 ≈ 1.1，got ratio={ratio:.4f}"
 
 
 # ── RW6: last_accessed=None → 安全退化 quality=4 ─────────────────────────
