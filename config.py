@@ -277,6 +277,50 @@ _REGISTRY: dict = {
     "store_vfs.hypermnesia_cooldown_days": (7.0, float, 1.0, 90.0, None,
         "iter437: Hypermnesia boost 冷却期（天）：两次 boost 之间的最小间隔，防止反复触发"),
 
+    # ── iter438: Jost's Law — 等强度记忆中较老者衰减更慢（Jost 1897）──────────────────────────────
+    # 认知科学依据：Jost (1897) "Die Assoziationsfestigkeit in ihrer Abhängigkeit von der Verteilung
+    #   der Wiederholungen" — Jost's Law of Memory（1897）：
+    #   若两个记忆在某一时刻强度相等，则较老的记忆在未来遗忘得更慢。
+    #   机制：老记忆已经历多次巩固周期（海马重放、间隔强化），
+    #   其突触权重矩阵（synaptic weight matrix）更稳固，
+    #   单次干扰难以使之退化（neurological consolidation gradient）。
+    #   Baddeley (1997) "Human Memory: Theory and Practice" — Jost's Law 是 Ebbinghaus 遗忘曲线
+    #   的重要补充：相同 retrievability（可提取性）时，age 越大的记忆实际衰减越慢。
+    #   等价表达：若 memory_A(age=30d) = memory_B(age=10d) = strength_X，
+    #     则 memory_A 在下次测试中会比 memory_B 更容易回忆。
+    #
+    # memory-os 等价：
+    #   decay_stability_by_type 执行时，age_days 越大的 chunk 应接受更弱的 stability 衰减。
+    #   effective_decay = base_decay + (1 - base_decay) × jost_bonus(age_days)
+    #   jost_bonus = min(jost_max_bonus, log(1+age_days)/log(365) × jost_scale)
+    #   age=14d→bonus≈0.04，age=30d→bonus≈0.06，age=365d→bonus=jost_max_bonus(0.20)
+    #
+    # 与 Ribot's Law（iter431）的区别：
+    #   Ribot = stability_floor 提高（下限保护，防止降到太低）
+    #   Jost  = effective_decay 减慢（每次衰减步长缩小，而非设置下限）
+    #   两者可以叠加：老 chunk 既有更高 floor，也有更慢的 per-step 衰减
+    #
+    # 与 iter433 Reminiscence Bump 的区别：
+    #   Bump = 项目形成期 chunk 在写入时一次性 initial_stability 加成
+    #   Jost  = 每次 sleep_consolidate 时对所有高龄 chunk 的持续性衰减减速
+    #
+    # OS 类比：Linux MGLRU old generation promotion resistance —
+    #   在 old generation 长期存在的 page 已"证明"了跨多个 aging interval 的热度，
+    #   kswapd 对其施加更弱的 reclaim pressure（MGLRU aging_interval × old_gen_protection_factor）；
+    #   类比：age 越大的 chunk → effective_decay 越接近 1.0 → per-step 衰减越小。
+    "store_vfs.jost_enabled": (True, bool, None, None, None,
+        "iter438: 是否启用 Jost's Law — 较老的 chunk 在等强度下衰减更慢（effective_decay 提升）"),
+    "store_vfs.jost_min_importance": (0.50, float, 0.0, 1.0, None,
+        "iter438: 触发 Jost's Law 保护的最低 importance 阈值（低重要性 chunk 不受保护）"),
+    "store_vfs.jost_scale": (0.10, float, 0.0, 0.50, None,
+        "iter438: Jost's Law 年龄-衰减减速系数：bonus=log(1+age_days)/log(365)×scale，"
+        "age=365d 时 bonus=jost_scale（默认 0.10）"),
+    "store_vfs.jost_max_bonus": (0.20, float, 0.0, 0.50, None,
+        "iter438: Jost bonus 上限：effective_decay += min(max_bonus, bonus)×(1-decay)，"
+        "最多让衰减步长缩小 max_bonus×(1-decay) 比例（默认 0.20）"),
+    "store_vfs.jost_min_age_days": (14, int, 3, 365, None,
+        "iter438: 应用 Jost's Law 的最小 chunk 年龄（天），默认 14 天"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。

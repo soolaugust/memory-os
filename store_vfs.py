@@ -7151,6 +7151,14 @@ def sleep_consolidate(
     except Exception:
         pass
 
+    # ── 子操作 7（iter438）：Jost's Law — 高龄 chunk 衰减减速修正 ──
+    # OS 类比：MGLRU old generation protection — 跨多 aging interval 存活的页面获得更弱的 reclaim pressure
+    try:
+        jost_result = apply_jost_law(conn, project, stale_days=stale_days)
+        result["jost_adjusted"] = jost_result.get("adjusted", 0)
+    except Exception:
+        pass
+
     return result
 
 
@@ -8582,6 +8590,139 @@ def apply_hypermnesia(
             continue
 
     return {"boosted": boosted, "total_examined": total_examined}
+
+
+# ── iter438: Jost's Law — 等强度记忆中较老者衰减更慢（Jost 1897）────────────────────────────────
+# 认知科学依据：Jost (1897) "Die Assoziationsfestigkeit in ihrer Abhängigkeit von der Verteilung
+#   der Wiederholungen" — Jost's Law of Memory：
+#   若两个记忆在某一时刻强度相等，则较老的记忆在未来遗忘得更慢。
+#   机制：老记忆已历经多次睡眠重放和巩固周期，突触权重矩阵更稳固；
+#   Baddeley (1997): Jost's Law 是遗忘曲线的重要补充，age 越大 → 衰减率越低。
+#
+# 与 iter431 Ribot's Law 的互补关系：
+#   Ribot = stability_floor 提高（下限保护）
+#   Jost  = effective_decay 减慢（每次衰减步长缩小，持续减速）
+#   两者叠加：老 chunk 既有更高 floor，也有更慢的 per-step 衰减速率。
+#
+# OS 类比：Linux MGLRU old generation protection —
+#   在 old generation 长期存在（经历多个 aging interval）的页面，
+#   kswapd 给予更弱的 reclaim pressure（不像 young gen 那样激进驱逐）；
+#   类比：age 越大的 chunk → effective_decay 越接近 1.0 → per-step 衰减量越小。
+
+def apply_jost_law(
+    conn: sqlite3.Connection,
+    project: str,
+    stale_days: int = 30,
+) -> dict:
+    """
+    iter438: Jost's Law — 对高龄 chunk 施加衰减减速修正。
+
+    在 sleep_consolidate 中，decay_stability_by_type_with_ci 已对 access_count < 2 的 chunk
+    执行了批量衰减。apply_jost_law 作为后处理，对满足年龄+重要性条件的 chunk 部分"撤销"
+    多余的衰减（恢复一部分被过度衰减的 stability），等效于以 effective_decay 替换 base_decay：
+
+      effective_decay = base_decay + (1 - base_decay) × jost_bonus
+      stability_restored = current_stab / base_decay × effective_decay - current_stab
+                         = current_stab × (effective_decay / base_decay - 1)
+
+    实现简化：直接用 jost_bonus 乘以 (1 - current_decay_factor) 做增量修复：
+      new_stab = min(old_stab, current_stab * (1 + jost_bonus / (1 - effective_decay + ε)))
+
+    更简洁的实际实现：
+      对每个符合条件的 chunk，stability × (1 + jost_effective_bonus)
+      其中 jost_effective_bonus = jost_bonus × base_decay_step
+                                = jost_bonus × (1 - decay_factor_used)
+    但 decay_factor_used 不易追踪。改用直接乘法（近似）：
+      new_stab = min(pre_decay_stab, current_stab × (1 + jost_bonus))
+
+    由于 pre_decay_stab 未知，用保守方法：
+      new_stab = current_stab × jost_multiplier，where jost_multiplier = 1 + jost_bonus×0.1
+    这确保每次 sleep_consolidate 后，老 chunk 的 stability 被轻微"提振"，
+    相当于减缓了 decay 的净效果。
+
+    Returns:
+      {"adjusted": N, "total_examined": N}
+    """
+    import math
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+    try:
+        import config as _cfg_jost
+    except ImportError:
+        return {"adjusted": 0, "total_examined": 0}
+
+    try:
+        if not _cfg_jost.get("store_vfs.jost_enabled"):
+            return {"adjusted": 0, "total_examined": 0}
+        jost_min_imp = _cfg_jost.get("store_vfs.jost_min_importance")
+        jost_scale = _cfg_jost.get("store_vfs.jost_scale")
+        jost_max_bonus = _cfg_jost.get("store_vfs.jost_max_bonus")
+        jost_min_age = _cfg_jost.get("store_vfs.jost_min_age_days")
+    except Exception:
+        return {"adjusted": 0, "total_examined": 0}
+
+    now = _dt.now(_tz.utc)
+    now_iso = now.isoformat()
+    # 只对"被衰减候选"的 chunk 做修复（stale_days 未访问，access_count < 2，低重要性除外）
+    cutoff_stale = (now - _td(days=stale_days)).isoformat()
+    min_age_cutoff = (now - _td(days=jost_min_age)).isoformat()
+
+    try:
+        # 候选：high importance + old age + stale (recently decayed by CI)
+        rows = conn.execute(
+            """SELECT id, stability, created_at, importance
+               FROM memory_chunks
+               WHERE project = ?
+                 AND COALESCE(importance, 0.0) >= ?
+                 AND created_at < ?
+                 AND last_accessed < ?
+                 AND access_count < 2
+                 AND COALESCE(stability, 0.1) > 0.1
+               LIMIT 500""",
+            (project, jost_min_imp, min_age_cutoff, cutoff_stale),
+        ).fetchall()
+    except Exception:
+        return {"adjusted": 0, "total_examined": 0}
+
+    total_examined = len(rows)
+    adjusted = 0
+
+    for row in rows:
+        try:
+            cid, stab, created_at, importance = row
+            if not created_at:
+                continue
+            _ts_c = _dt.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
+            age_days = (now.timestamp() - _ts_c) / 86400.0
+            if age_days < jost_min_age:
+                continue
+
+            # Jost bonus: log(1 + age_days) / log(365) × jost_scale，上限 jost_max_bonus
+            raw_bonus = math.log(1 + age_days) / math.log(365) * jost_scale
+            jost_bonus = min(jost_max_bonus, raw_bonus)
+
+            # effective_decay_reduction = jost_bonus × (1 - typical_decay)
+            # 典型 type_decay ≈ 0.95，(1 - 0.95) = 0.05
+            # 实际 stability 恢复量 = current_stab × jost_bonus × 0.05
+            # 等效 multiplier ≈ 1 + jost_bonus × 0.05（保守）
+            jost_multiplier = 1.0 + jost_bonus * 0.05  # 保守系数，避免过度逆转 decay
+            new_stab = min(365.0, float(stab or 0.1) * jost_multiplier)
+
+            if new_stab <= float(stab or 0.1) + 0.0001:
+                continue  # 无实质变化
+
+            conn.execute(
+                "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=?",
+                (round(new_stab, 4), now_iso, cid),
+            )
+            adjusted += 1
+        except Exception:
+            continue
+
+    if adjusted > 0:
+        conn.commit()
+
+    return {"adjusted": adjusted, "total_examined": total_examined}
 
 
 # ── iter432: Cumulative Interference Effect — 累积干扰加速遗忘（Underwood 1957）──
