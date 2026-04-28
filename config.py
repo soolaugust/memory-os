@@ -351,6 +351,38 @@ _REGISTRY: dict = {
     "store_vfs.eddr_shallow_penalty": (0.05, float, 0.0, 0.20, None,
         "iter439: 浅层编码 stability 轻微衰减系数（shallow chunk stability × (1 - penalty)，默认 0.05）"),
 
+    # ── iter440: Proactive Facilitation — 强邻居锚定保护新知识衰减（Ausubel 1963）────────────────────
+    # 认知科学依据：Ausubel (1963) "The psychology of meaningful verbal learning" —
+    #   正向迁移（positive transfer）/先行组织者（advance organizer）效应：
+    #   新知识与已有强记忆语义高度相关时，新知识的长期记忆保留显著改善。
+    #   机制：已有稳固 schema 为新知识提供"认知锚点"（assimilative anchoring），
+    #   降低新知识的遗忘速率（schema-assimilation strengthens encoding）。
+    #   Ausubel & Fitzgerald (1962)：存在强先行知识 → 新知识 24h 保留率提升 30-40%。
+    #   与 Proactive Interference（iter408）区别：
+    #     PI（iter408）= 旧知识干扰新知识编码（负迁移，降低 initial_stability）
+    #     PF（iter440）= 旧强记忆锚定新知识（正迁移，减慢后续衰减）
+    #     条件：PI 触发在 importance 低的旧记忆；PF 触发在 importance 高的强邻居
+    #
+    # memory-os 等价：
+    #   sleep_consolidate 时，若 chunk_A 的 encode_context 与高 importance(≥0.75) 强邻居 chunk_B
+    #   有足够 entity 重叠（≥ pf_min_overlap），则 chunk_A 被"锚定"：
+    #   new_stab = current_stab × (1 + pf_bonus × 0.04)（轻微修复，减慢净衰减）。
+    #
+    # OS 类比：Linux page cache 引用计数（refcount）—
+    #   被多个 inode 共享引用（shared pages）的 page 有高 refcount，
+    #   kswapd 优先保留（因驱逐代价 = 通知所有引用方 → 代价过高）；
+    #   类比：被强邻居 chunk "引用"（共享 entity）的 chunk → refcount 提升 → 衰减更慢。
+    "store_vfs.pf_enabled": (True, bool, None, None, None,
+        "iter440: 是否启用 Proactive Facilitation — 与高 importance 强邻居共享 entity 的 chunk 衰减更慢"),
+    "store_vfs.pf_anchor_min_importance": (0.75, float, 0.3, 1.0, None,
+        "iter440: 触发 PF 锚定的强邻居最低 importance 阈值（默认 0.75）"),
+    "store_vfs.pf_anchor_min_access": (2, int, 1, 50, None,
+        "iter440: 强邻居最低 access_count（≥ 此值才视为'已稳固'的锚点记忆，默认 2）"),
+    "store_vfs.pf_min_overlap": (3, int, 1, 10, None,
+        "iter440: 触发 PF 保护所需的最小 encode_context entity 重叠数（默认 3）"),
+    "store_vfs.pf_max_bonus": (0.10, float, 0.0, 0.30, None,
+        "iter440: PF stability 最大修复系数（new_stab = current_stab × (1 + pf_max_bonus × 0.04)，默认 0.10）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。

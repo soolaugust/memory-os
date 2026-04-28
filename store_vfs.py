@@ -7168,6 +7168,14 @@ def sleep_consolidate(
     except Exception:
         pass
 
+    # ── 子操作 9（iter440）：Proactive Facilitation — 强邻居锚定保护新知识衰减 ──
+    # OS 类比：Linux page cache refcount — 被多个 inode 共享引用的 page 有高 refcount，kswapd 优先保留
+    try:
+        pf_result = apply_proactive_facilitation(conn, project, stale_days=stale_days)
+        result["pf_facilitated"] = pf_result.get("facilitated", 0)
+    except Exception:
+        pass
+
     return result
 
 
@@ -8844,6 +8852,153 @@ def apply_encoding_depth_decay_resistance(
 
     return {"deep_boosted": deep_boosted, "shallow_penalized": shallow_penalized,
             "total_examined": total_examined}
+
+
+# ── iter440: Proactive Facilitation — 强邻居锚定保护新知识衰减（Ausubel 1963）──────────────────────
+# 认知科学依据：Ausubel (1963) 正向迁移/先行组织者：已有稳固 schema 锚定新知识，
+#   降低新知识的遗忘速率。encode_context entity 重叠代理语义相似度。
+# OS 类比：Linux page cache refcount —
+#   被多个 inode 共享引用的 page 有高 refcount，kswapd 优先保留（驱逐代价 > 收益）。
+
+def apply_proactive_facilitation(
+    conn: sqlite3.Connection,
+    project: str,
+    stale_days: int = 30,
+) -> dict:
+    """
+    iter440: Proactive Facilitation — 对被高 importance 强邻居锚定的 chunk 减慢衰减。
+
+    在 sleep_consolidate 中，对 stale + access_count < 2 的候选 chunk，
+    若其 encode_context entity 集合与高 importance(≥ pf_anchor_min_importance) 且
+    access_count >= pf_anchor_min_access 的强邻居有足够重叠（≥ pf_min_overlap entity），
+    则该 chunk 被"锚定"，获得轻微 stability 修复：
+      new_stab = current_stab × (1 + pf_max_bonus × 0.04)
+
+    注意：这是对所有候选 chunk 批量扫描，效率优先：
+    将所有强邻居的 entity 集合构建成全局集合，候选 chunk 逐一与之匹配。
+
+    Returns:
+      {"facilitated": N, "total_examined": N}
+    """
+    try:
+        import config as _cfg_pf
+    except ImportError:
+        return {"facilitated": 0, "total_examined": 0}
+
+    try:
+        if not _cfg_pf.get("store_vfs.pf_enabled"):
+            return {"facilitated": 0, "total_examined": 0}
+        pf_anchor_min_imp = _cfg_pf.get("store_vfs.pf_anchor_min_importance")
+        pf_anchor_min_acc = _cfg_pf.get("store_vfs.pf_anchor_min_access")
+        pf_min_overlap = _cfg_pf.get("store_vfs.pf_min_overlap")
+        pf_max_bonus = _cfg_pf.get("store_vfs.pf_max_bonus")
+    except Exception:
+        return {"facilitated": 0, "total_examined": 0}
+
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    now = _dt.now(_tz.utc)
+    now_iso = now.isoformat()
+    cutoff_stale = (now - _td(days=stale_days)).isoformat()
+
+    # Step 1: 获取强邻居的 entity 集合（全局锚点）
+    try:
+        anchor_rows = conn.execute(
+            """SELECT encode_context FROM memory_chunks
+               WHERE project = ?
+                 AND COALESCE(importance, 0.0) >= ?
+                 AND access_count >= ?
+                 AND encode_context IS NOT NULL
+                 AND encode_context != ''
+               LIMIT 200""",
+            (project, pf_anchor_min_imp, pf_anchor_min_acc),
+        ).fetchall()
+    except Exception:
+        return {"facilitated": 0, "total_examined": 0}
+
+    if not anchor_rows:
+        return {"facilitated": 0, "total_examined": 0}
+
+    # 构建全局强邻居 entity 集合（每个锚点 chunk 的 entity set）
+    anchor_entity_sets = []
+    for arow in anchor_rows:
+        try:
+            ec = arow[0] if isinstance(arow, (list, tuple)) else arow["encode_context"]
+            if ec:
+                entities = frozenset(e.strip() for e in ec.split(',') if e.strip())
+                if entities:
+                    anchor_entity_sets.append(entities)
+        except Exception:
+            continue
+
+    if not anchor_entity_sets:
+        return {"facilitated": 0, "total_examined": 0}
+
+    # Step 2: 获取候选 chunk（stale + access_count < 2）
+    try:
+        candidate_rows = conn.execute(
+            """SELECT id, stability, encode_context
+               FROM memory_chunks
+               WHERE project = ?
+                 AND last_accessed < ?
+                 AND access_count < 2
+                 AND COALESCE(stability, 0.1) > 0.1
+                 AND encode_context IS NOT NULL
+                 AND encode_context != ''
+               LIMIT 500""",
+            (project, cutoff_stale),
+        ).fetchall()
+    except Exception:
+        return {"facilitated": 0, "total_examined": 0}
+
+    total_examined = len(candidate_rows)
+    facilitated = 0
+    pf_multiplier = 1.0 + pf_max_bonus * 0.04
+
+    for row in candidate_rows:
+        try:
+            cid = row[0] if isinstance(row, (list, tuple)) else row["id"]
+            stab = row[1] if isinstance(row, (list, tuple)) else row["stability"]
+            ec = row[2] if isinstance(row, (list, tuple)) else row["encode_context"]
+
+            if not ec:
+                continue
+            stab_f = float(stab or 0.1)
+            if stab_f <= 0.1:
+                continue
+
+            # 计算候选 chunk 的 entity 集合
+            cand_entities = frozenset(e.strip() for e in ec.split(',') if e.strip())
+            if not cand_entities:
+                continue
+
+            # 检查是否与任一强邻居有足够重叠
+            anchored = False
+            for anchor_set in anchor_entity_sets:
+                overlap = len(cand_entities & anchor_set)
+                if overlap >= pf_min_overlap:
+                    anchored = True
+                    break
+
+            if not anchored:
+                continue
+
+            # 锚定：轻微 stability 修复
+            new_stab = min(365.0, stab_f * pf_multiplier)
+            if new_stab <= stab_f + 0.0001:
+                continue
+
+            conn.execute(
+                "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=?",
+                (round(new_stab, 4), now_iso, cid),
+            )
+            facilitated += 1
+        except Exception:
+            continue
+
+    if facilitated > 0:
+        conn.commit()
+
+    return {"facilitated": facilitated, "total_examined": total_examined}
 
 
 # ── iter432: Cumulative Interference Effect — 累积干扰加速遗忘（Underwood 1957）──
