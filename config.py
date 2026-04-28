@@ -789,6 +789,24 @@ _REGISTRY: dict = {
         "iter423: IDF 权重混合系数：edge_score × (1 - fan_effect_idf_weight × (1 - idf_factor))，"
         "0=不惩罚，1=完全 IDF 权重"),
 
+    # ── iter424: Mood-Congruent Memory — 情绪效价一致性检索增强（Bower 1981）──
+    # 认知科学依据：Bower (1981) "Mood and memory" —
+    #   人在某种情绪状态（情绪诱导实验）下，更容易回忆起与该情绪一致的记忆。
+    #   正面情绪 → 优先检索正面内容；负面情绪 → 优先检索负面/危机内容。
+    #   Bower (1981) Associative Network Theory：情绪节点（mood nodes）与记忆节点相连，
+    #   情绪激活会扩散到同效价的记忆，降低其检索阈值。
+    #   Matt et al. (1992) Meta-analysis: MCM effect is robust across recall + recognition tasks。
+    # 应用：query 包含情绪效价词（崩溃/突破）→ 推断用户当前情绪状态 →
+    #   chunk.emotional_valence 与 query 效价方向一致 → score += mcm_boost × |valence_match|。
+    # OS 类比：Linux NUMA-aware page placement —
+    #   进程有 preferred NUMA node（情绪状态），访问同 node 的 page（同效价 chunk）延迟最低。
+    "retriever.mcm_enabled": (True, bool, None, None, None,
+        "是否启用 iter424 Mood-Congruent Memory：query 情绪效价与 chunk 效价一致时检索加分"),
+    "retriever.mcm_boost": (0.05, float, 0.0, 0.20, None,
+        "iter424: 情绪效价一致时的 score boost（默认 +0.05，query_valence × chunk_valence > 0 时生效）"),
+    "retriever.mcm_valence_threshold": (0.3, float, 0.0, 1.0, None,
+        "iter424: query/chunk 情绪效价触发阈值（|valence| >= 此值才参与 MCM 匹配，避免弱情绪噪音）"),
+
     # ── iter394：Contextual Similarity Boost — 编码情境检索增强 ──
     # 认知科学：Tulving (1983) Encoding Specificity Principle +
     #   Godden & Baddeley (1975) Context-Dependent Memory —

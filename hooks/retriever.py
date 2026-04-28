@@ -1737,6 +1737,16 @@ def main():
                         boost += (_vi / _vu) * _sysctl("retriever.task_verbs_boost")
             return min(boost, 0.25)  # iter394: 上限从 0.20 提升到 0.25（新增两个 boost 维度）
 
+        # ── iter424: Mood-Congruent Memory — 预计算 query 情绪效价（每次检索只算一次）──
+        # OS 类比：Linux NUMA topology detection at boot — 一次性 probe，之后所有调度决策共用
+        _mcm_query_valence: float = 0.0
+        try:
+            if _sysctl("retriever.mcm_enabled") is not False:
+                from store_vfs import compute_emotional_valence as _cev
+                _mcm_query_valence = _cev(query)
+        except Exception:
+            pass
+
         def _score_chunk(chunk, relevance):
             # 迭代322: Query-Conditioned Importance — 动态 α
             # OS 类比：CPUFreq P-state — 高负载（高 relevance）降低 importance 依赖；
@@ -1821,6 +1831,22 @@ def main():
                 if _ew > (_et or 0.4):
                     _ef = _sysctl("retriever.emotional_boost_factor")  # default 0.08
                     score += _ew * (_ef or 0.08)
+            except Exception:
+                pass
+            # ── iter424: Mood-Congruent Memory — 情绪效价一致性加分（Bower 1981）──
+            # OS 类比：Linux NUMA-aware page placement — 访问同 NUMA node 的 page 延迟最低；
+            #   query 情绪效价（positive/negative node）与 chunk 效价一致 → 检索优先
+            # 认知科学：情绪激活扩散到同效价记忆，降低其检索阈值（Associative Network Theory）
+            # query_valence × chunk_valence > 0 → 同向效价 → +mcm_boost × |product|
+            try:
+                if _mcm_query_valence != 0.0 and (_sysctl("retriever.mcm_enabled") is not False):
+                    _chunk_val = float(chunk.get("emotional_valence") or 0.0)
+                    _mcm_thresh = _sysctl("retriever.mcm_valence_threshold") or 0.3
+                    if abs(_mcm_query_valence) >= _mcm_thresh and abs(_chunk_val) >= _mcm_thresh:
+                        _val_product = _mcm_query_valence * _chunk_val
+                        if _val_product > 0:  # 同向效价
+                            _mcm_b = _sysctl("retriever.mcm_boost") or 0.05
+                            score += _mcm_b * min(1.0, abs(_val_product))
             except Exception:
                 pass
             # ── iter396: Source Monitoring Weight ──────────────────────────────

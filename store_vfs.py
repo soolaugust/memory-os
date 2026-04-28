@@ -298,6 +298,14 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     # emotional_weight ∈ [0.0, 1.0]：0=情感中性，1=极高唤醒（崩溃/critical 类词）
     _safe_add_column(conn, "memory_chunks", "emotional_weight", "REAL DEFAULT 0.0")
 
+    # ── iter424：emotional_valence — 情绪效价（Bower 1981 Mood-Congruent Memory）──
+    # OS 类比：Linux NUMA node distance matrix — 每个 page 有 home node（positive/negative），
+    #   访问时按 node distance 决定延迟（同 node = 低延迟 = valence 一致 = 检索优势）。
+    # emotional_valence ∈ [-1.0, +1.0]：
+    #   +1 = 正面情绪（突破/发现/成功），-1 = 负面情绪（错误/崩溃/失败），0 = 中性
+    # Mood-Congruent Memory：query 情绪效价与 chunk 情绪效价一致时检索加分。
+    _safe_add_column(conn, "memory_chunks", "emotional_valence", "REAL DEFAULT 0.0")
+
     # ── iter401：depth_of_processing — 加工深度（Craik & Lockhart 1972）──
     # OS 类比：Linux page writeback dirty throttle — 页面在 dirty state 停留时间越长，
     #   获得的 write aggregation 越充分，落盘后数据更完整（类比深度加工 → 更稳固的记忆痕迹）。
@@ -1513,7 +1521,9 @@ def fts_search(conn: sqlite3.Connection, query: str, project: str,
                    COALESCE(mc.lru_gen, 0), mc.project,
                    mc.verification_status, mc.confidence_score,
                    COALESCE(mc.retrievability, 1.0),
-                   COALESCE(mc.source_reliability, 0.7)
+                   COALESCE(mc.source_reliability, 0.7),
+                   COALESCE(mc.emotional_weight, 0.0),
+                   COALESCE(mc.emotional_valence, 0.0)
             FROM memory_chunks_fts
             JOIN memory_chunks mc ON mc.rowid = CAST(memory_chunks_fts.rowid_ref AS INTEGER)
             WHERE memory_chunks_fts MATCH ?
@@ -1579,7 +1589,7 @@ def fts_search(conn: sqlite3.Connection, query: str, project: str,
                 break
 
     result = []
-    for rid, summary, content, importance, last_accessed, chunk_type, access_count, created_at, fts_rank, lru_gen, chunk_project, verification_status, confidence_score, retrievability, source_reliability in rows:
+    for rid, summary, content, importance, last_accessed, chunk_type, access_count, created_at, fts_rank, lru_gen, chunk_project, verification_status, confidence_score, retrievability, source_reliability, emotional_weight, emotional_valence in rows:
         result.append({
             "id": rid,
             "summary": summary or "",
@@ -1596,6 +1606,8 @@ def fts_search(conn: sqlite3.Connection, query: str, project: str,
             "confidence_score": confidence_score,
             "retrievability": retrievability if retrievability is not None else 1.0,  # iter369
             "source_reliability": float(source_reliability) if source_reliability is not None else 0.7,  # iter396
+            "emotional_weight": float(emotional_weight) if emotional_weight is not None else 0.0,  # iter376
+            "emotional_valence": float(emotional_valence) if emotional_valence is not None else 0.0,  # iter424
         })
     return result
 
@@ -6965,6 +6977,53 @@ _EMOTIONAL_SALIENCE_RE: list = [
     for pat, delta in _EMOTIONAL_SALIENCE_RULES
 ]
 
+# ── iter424: 情绪效价规则（Bower 1981 Mood-Congruent Memory）──
+# 效价：+1 = 正面情绪（成功/发现/突破），-1 = 负面情绪（失败/崩溃/危机）
+# 独立于唤醒度（emotional_weight）：错误可以高唤醒但为负效价
+_EMOTIONAL_VALENCE_RULES: list = [
+    # 正面效价：突破/成功/发现
+    (r'突破|关键发现|重要发现|成功|解决了|搞定|完成|优化成功', +1.0),
+    (r'breakthrough|success|solved|achieved|resolved|fixed|works|great', +1.0),
+    # 负面效价：失败/错误/崩溃/危机
+    (r'崩溃|严重错误|fatal|panic|死锁|数据丢失|失败|无法|报错', -1.0),
+    (r'failed|failure|exception|traceback|ERROR|crash|broken|bug|error', -1.0),
+    (r'P0|紧急|CRITICAL|critical.*bug|production.*down|线上.*故障', -1.0),
+    # 中等负面：问题/瓶颈（不是灾难，但是挑战）
+    (r'性能瓶颈|bottleneck|slow|latency.*high|阻塞|卡住|stuck', -0.5),
+    (r'问题|issue|concerned|trouble|difficulty|challenge', -0.3),
+]
+
+# 预编译情绪效价正则
+_EMOTIONAL_VALENCE_RE: list = [
+    (re.compile(pat, re.IGNORECASE), val)
+    for pat, val in _EMOTIONAL_VALENCE_RULES
+]
+
+
+def compute_emotional_valence(text: str) -> float:
+    """
+    iter424: 计算文本的情绪效价（Bower 1981 Mood-Congruent Memory）。
+
+    扫描情绪效价词，正负累积后 clamp 到 [-1, +1]。
+    与 compute_emotional_salience（唤醒度）正交：
+      崩溃/错误 → salience=+0.12（高唤醒），valence=-1.0（负面情绪）
+      突破/成功 → salience=+0.10（高唤醒），valence=+1.0（正面情绪）
+      已解决    → salience=-0.08（降权），  valence=0.0（事件结束）
+
+    OS 类比：Linux NUMA node selection — valence 是 page 的 preferred home node，
+      访问者（query）有自己的 home node，同 node 时延迟最低（MCM 加分）。
+
+    Returns:
+      float ∈ [-1.0, +1.0]，0.0 表示情绪中性
+    """
+    if not text:
+        return 0.0
+    valence = 0.0
+    for pat, v in _EMOTIONAL_VALENCE_RE:
+        if pat.search(text):
+            valence += v
+    return max(-1.0, min(1.0, valence))
+
 
 def compute_emotional_salience(text: str) -> float:
     """
@@ -7024,13 +7083,17 @@ def apply_emotional_salience(
     # 负向 delta（已废弃/已解决）不产生情绪权重（只影响 importance 降权）
     emotional_weight = round(max(0.0, min(1.0, delta / 0.25)), 4) if delta > 0 else 0.0
 
+    # iter424: emotional_valence — 情绪效价（独立于唤醒度）
+    emotional_valence = round(compute_emotional_valence(text), 4)
+
     if abs(delta) < 0.01:
         # delta 微弱 — 仍写入 emotional_weight=0（明确表示无情绪显著性）
         # 但只在字段为 NULL 时才写（避免覆盖已有有效值）
         try:
             conn.execute(
-                "UPDATE memory_chunks SET emotional_weight=? WHERE id=? AND (emotional_weight IS NULL OR emotional_weight=0)",
-                (0.0, chunk_id),
+                "UPDATE memory_chunks SET emotional_weight=?, emotional_valence=? "
+                "WHERE id=? AND (emotional_weight IS NULL OR emotional_weight=0)",
+                (0.0, emotional_valence, chunk_id),
             )
         except Exception:
             pass
@@ -7042,8 +7105,9 @@ def apply_emotional_salience(
 
     try:
         conn.execute(
-            "UPDATE memory_chunks SET importance=?, emotional_weight=?, updated_at=? WHERE id=?",
-            (round(new_importance, 4), emotional_weight,
+            "UPDATE memory_chunks SET importance=?, emotional_weight=?, "
+            "emotional_valence=?, updated_at=? WHERE id=?",
+            (round(new_importance, 4), emotional_weight, emotional_valence,
              datetime.now(timezone.utc).isoformat(), chunk_id),
         )
     except Exception:
