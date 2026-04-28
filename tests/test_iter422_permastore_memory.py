@@ -216,6 +216,8 @@ def test_pm5_disabled_normal_floor(conn, monkeypatch):
     def patched_get(key, project=None):
         if key == "store_vfs.permastore_enabled":
             return False
+        if key == "scorer.ribot_enabled":
+            return False  # iter431: 同时禁用 Ribot floor，隔离 permastore 测试
         if key == "store_vfs.ri_decay_factor":
             return 0.01
         if key == "store_vfs.permastore_min_importance":

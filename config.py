@@ -179,6 +179,30 @@ _REGISTRY: dict = {
     "scorer.freshness_grace_days": (7, int, 1, 30, None,
         "freshness_bonus 的 grace period 天数，超过后 bonus=0"),
 
+    # ── iter431: Ribot's Law — 远期记忆稳定性梯度（Ribot 1882）──────────────────
+    # 认知科学依据：Théodule Ribot (1882) "Diseases of Memory" —
+    #   越早形成的记忆越能抵抗损伤（retrograde amnesia gradient）。
+    #   脑损伤患者失去近期记忆，但保留远期（远古）的记忆——因为远期记忆已被"新皮层化"
+    #   （hippocampal → neocortical transfer，系统巩固理论）。
+    # 应用：chunk 年龄（age_days）越大 + importance >= ribot_min_importance →
+    #   Ebbinghaus 遗忘曲线的 stability_floor 随年龄对数增长。
+    #   floor_bonus = min(ribot_max_bonus, log(1+age_days)/log(365) × ribot_scale)
+    #   年龄 1 年（365天）→ floor_bonus 达到 ribot_max_bonus。
+    # OS 类比：Linux ext4 journal aging —
+    #   长时间存在的 inode（ancient inodes）在 extent tree 中有更稳定的布局，
+    #   碎片整理操作会优先保留而非移动 ancient extents（structural stability gradient）。
+    "scorer.ribot_enabled": (True, bool, None, None, None,
+        "iter431: 是否启用 Ribot's Law — 年龄越大的 chunk stability_floor 越高"),
+    "scorer.ribot_min_importance": (0.60, float, 0.0, 1.0, None,
+        "iter431: 应用 Ribot's Law 的最低 importance 阈值（低重要性老 chunk 不受保护）"),
+    "scorer.ribot_scale": (0.20, float, 0.0, 1.0, None,
+        "iter431: Ribot 稳定性梯度系数：floor_bonus = log(1+age_days)/log(365) × scale，"
+        "age=365d 时 bonus=0.20，age=30d 时 bonus≈0.09"),
+    "scorer.ribot_max_bonus": (0.25, float, 0.0, 0.5, None,
+        "iter431: Ribot floor_bonus 上限（防止超长历史 chunk 的 floor 过高）"),
+    "scorer.ribot_min_age_days": (30, int, 7, 365, None,
+        "iter431: 开始应用 Ribot's Law 的最小年龄（天），默认 30 天"),
+
     # ── dmesg（迭代29）──
     "dmesg.ring_buffer_size": (500, int, 10, 5000, None,
         "dmesg 环形缓冲区最大条目数"),

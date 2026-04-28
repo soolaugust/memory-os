@@ -3872,6 +3872,75 @@ def compute_permastore_floor(
         return 0.1
 
 
+# ── iter431: Ribot's Law — 远期记忆稳定性梯度（Ribot 1882）──────────────────────────
+# 认知科学依据：Théodule Ribot (1882) "Diseases of Memory" —
+#   越早形成的记忆越能抵抗损伤（retrograde amnesia gradient）。
+#   脑损伤患者失去近期记忆，但保留远期（远古）的记忆——因为远期记忆已被"新皮层化"
+#   （hippocampal → neocortical transfer，系统巩固理论）。
+# 应用：chunk 年龄（age_days）越大 + importance >= ribot_min_importance →
+#   stability_floor 随年龄对数增长：
+#   floor_bonus = min(ribot_max_bonus, log(1+age_days)/log(365) × ribot_scale)
+# OS 类比：Linux ext4 journal aging —
+#   长时间存在的 inode（ancient inodes）在 extent tree 中有更稳定的布局，
+#   碎片整理操作会优先保留而非移动 ancient extents。
+
+def compute_ribot_floor(age_days: float, importance: float) -> float:
+    """
+    iter431: Ribot's Law — 计算基于年龄的 stability floor bonus。
+
+    年龄越大、重要性越高的 chunk，stability floor 越高（远期记忆更稳定）。
+    floor_bonus = min(ribot_max_bonus, log(1+age_days)/log(365) × ribot_scale)
+
+    条件：
+      - ribot_enabled = True
+      - age_days >= ribot_min_age_days（默认 30 天）
+      - importance >= ribot_min_importance（默认 0.60）
+
+    Returns:
+      float — floor_bonus [0.0, ribot_max_bonus]，加到普通 floor=0.1 上
+    """
+    import config as _config
+    try:
+        if not _config.get("scorer.ribot_enabled"):
+            return 0.0
+        min_age = float(_config.get("scorer.ribot_min_age_days") or 30)
+        min_imp = float(_config.get("scorer.ribot_min_importance") or 0.60)
+        if age_days < min_age or importance < min_imp:
+            return 0.0
+        import math
+        ribot_scale = float(_config.get("scorer.ribot_scale") or 0.20)
+        ribot_max = float(_config.get("scorer.ribot_max_bonus") or 0.25)
+        bonus = math.log(1 + age_days) / math.log(365) * ribot_scale
+        return min(ribot_max, bonus)
+    except Exception:
+        return 0.0
+
+
+def _get_chunk_age_importance(conn, chunk_id: str) -> tuple:
+    """
+    iter431: 获取 chunk 的 age_days 和 importance，用于 Ribot floor 计算。
+    返回 (age_days, importance)，出错返回 (0.0, 0.0)。
+    """
+    try:
+        row = conn.execute(
+            "SELECT created_at, importance FROM memory_chunks WHERE id=?",
+            (chunk_id,)
+        ).fetchone()
+        if not row:
+            return 0.0, 0.0
+        created_at = row[0] if isinstance(row, (list, tuple)) else row["created_at"]
+        importance = float(row[1] if isinstance(row, (list, tuple)) else row["importance"]) or 0.0
+        if not created_at:
+            return 0.0, importance
+        from datetime import datetime as _dt, timezone as _tz
+        _created_ts = _dt.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
+        _now_ts = _dt.now(_tz.utc).timestamp()
+        age_days = (_now_ts - _created_ts) / 86400.0
+        return age_days, importance
+    except Exception:
+        return 0.0, 0.0
+
+
 # ── iter417: Retrieval-Induced Forgetting — 检索引发的竞争性抑制（Anderson et al. 1994）──
 # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
 #   检索一个记忆时主动抑制其语义竞争者（inhibitory tagging），
@@ -3964,11 +4033,13 @@ def apply_retrieval_induced_forgetting(
         neighbor_overlaps.sort(key=lambda x: -x[2])
         to_inhibit = neighbor_overlaps[:max_neighbors]
 
-        # Apply RIF decay (iter422: permastore floor)
+        # Apply RIF decay (iter422: permastore floor, iter431: Ribot floor)
         inhibited = 0
         for n_cid, n_stab, _ in to_inhibit:
             _ps_floor = compute_permastore_floor(conn, n_cid, n_stab)
-            new_stab = max(_ps_floor, n_stab * decay_factor)
+            _age_d, _imp = _get_chunk_age_importance(conn, n_cid)
+            _ribot_floor = 0.1 + compute_ribot_floor(_age_d, _imp)
+            new_stab = max(max(_ps_floor, _ribot_floor), n_stab * decay_factor)
             if abs(new_stab - n_stab) > 0.001:
                 conn.execute(
                     "UPDATE memory_chunks SET stability=? WHERE id=?",
@@ -4065,7 +4136,9 @@ def apply_directed_forgetting(
         score = compute_directed_forgetting_score(content or "", chunk_type or "")
         penalty = directed_forgetting_penalty(score, stab, penalty_cap)
         _ps_floor = compute_permastore_floor(conn, chunk_id, stab)
-        new_stability = max(_ps_floor, stab - penalty)  # iter422: permastore floor
+        _age_d2, _imp2 = _get_chunk_age_importance(conn, chunk_id)
+        _ribot_floor2 = 0.1 + compute_ribot_floor(_age_d2, _imp2)
+        new_stability = max(max(_ps_floor, _ribot_floor2), stab - penalty)  # iter422+431
         if penalty > 0.001:
             conn.execute(
                 "UPDATE memory_chunks SET stability=? WHERE id=?",
@@ -4239,7 +4312,9 @@ def apply_retroactive_interference(
         inhibited = 0
         for c_id, c_stab, _ in overlapping:
             _ps_floor = compute_permastore_floor(conn, c_id, c_stab)
-            new_stab = max(_ps_floor, c_stab * decay_factor)  # iter422: permastore floor
+            _age_d3, _imp3 = _get_chunk_age_importance(conn, c_id)
+            _ribot_floor3 = 0.1 + compute_ribot_floor(_age_d3, _imp3)
+            new_stab = max(max(_ps_floor, _ribot_floor3), c_stab * decay_factor)  # iter422+431
             if abs(new_stab - c_stab) > 1e-6:
                 conn.execute(
                     "UPDATE memory_chunks SET stability=? WHERE id=?",
