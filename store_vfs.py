@@ -7192,6 +7192,14 @@ def sleep_consolidate(
     except Exception:
         pass
 
+    # ── 子操作 12（iter443）：Sleep-Targeted Reactivation — 主动抢救衰退的高价值记忆 ──
+    # OS 类比：Linux dirty page "expire" writeback scan — 即将超时的脏页被 flusher 优先抢救写回
+    try:
+        str_result = apply_sleep_targeted_reactivation(conn, project)
+        result["str_rescued"] = str_result.get("rescued", 0)
+    except Exception:
+        pass
+
     return result
 
 
@@ -9247,6 +9255,103 @@ def apply_schema_consistent_consolidation(
         conn.commit()
 
     return {"schema_consolidated": schema_consolidated, "total_examined": total_examined}
+
+
+# ── iter443: Sleep-Targeted Reactivation — 睡眠期主动抢救衰退的高价值记忆（Stickgold 2005）──────
+# 认知科学依据：
+#   Stickgold (2005) Nature: 睡眠期 targeted memory reactivation — 海马 sharp-wave ripples 优先重放
+#     高价值但 retrievability 下降的记忆（即将消退的重要记忆被"抢救"）。
+#   Stickgold & Walker (2013) Nature Neuroscience: sleep memory triage —
+#     优先级 = importance × (1 - retrievability)（高价值 + 正在衰退 = 最需要抢救）。
+# OS 类比：Linux dirty page "expire" scan — flusher 扫描即将超时的脏页，强制写回抢救。
+
+def apply_sleep_targeted_reactivation(
+    conn: sqlite3.Connection,
+    project: str,
+) -> dict:
+    """
+    iter443: Sleep-Targeted Reactivation (STR) — 睡眠期主动抢救高 importance 但 retrievability 低的 chunk。
+
+    对 importance >= str_min_importance 且 retrievability <= str_max_retrievability 的 chunk，
+    按衰退程度修复 stability：
+      rescue_bonus = (1.0 - retrievability) × str_scale
+      new_stab = min(365.0, stab × (1 + rescue_bonus))
+
+    优先级 = importance × (1 - retrievability)：高价值且正在衰退的记忆获得最大修复。
+    适用于所有满足条件的 chunk（不限 stale），模拟海马对重要衰退记忆的 targeted reactivation。
+
+    Returns:
+      {"rescued": N, "total_examined": N}
+    """
+    try:
+        import config as _cfg_str
+    except ImportError:
+        return {"rescued": 0, "total_examined": 0}
+
+    try:
+        if not _cfg_str.get("store_vfs.str_enabled"):
+            return {"rescued": 0, "total_examined": 0}
+        str_min_importance = _cfg_str.get("store_vfs.str_min_importance")      # 0.65
+        str_max_retrievability = _cfg_str.get("store_vfs.str_max_retrievability")  # 0.40
+        str_scale = _cfg_str.get("store_vfs.str_scale")                        # 0.12
+    except Exception:
+        return {"rescued": 0, "total_examined": 0}
+
+    from datetime import datetime as _dt, timezone as _tz
+    now_iso = _dt.now(_tz.utc).isoformat()
+
+    # 扫描：importance >= str_min_importance + retrievability <= str_max_retrievability
+    try:
+        rows = conn.execute(
+            """SELECT id, stability, importance, retrievability FROM memory_chunks
+               WHERE project = ?
+                 AND COALESCE(importance, 0.0) >= ?
+                 AND COALESCE(retrievability, 1.0) <= ?
+                 AND COALESCE(stability, 0.1) > 0.1
+               ORDER BY (COALESCE(importance, 0.0) * (1.0 - COALESCE(retrievability, 1.0))) DESC
+               LIMIT 200""",
+            (project, str_min_importance, str_max_retrievability),
+        ).fetchall()
+    except Exception:
+        return {"rescued": 0, "total_examined": 0}
+
+    total_examined = len(rows)
+    rescued = 0
+
+    for row in rows:
+        try:
+            cid = row[0] if isinstance(row, (list, tuple)) else row["id"]
+            stab = row[1] if isinstance(row, (list, tuple)) else row["stability"]
+            imp = row[2] if isinstance(row, (list, tuple)) else row["importance"]
+            ret = row[3] if isinstance(row, (list, tuple)) else row["retrievability"]
+
+            stab_f = float(stab or 0.1)
+            ret_f = float(ret if ret is not None else 1.0)
+
+            if stab_f <= 0.1:
+                continue
+
+            # rescue_bonus 与遗忘程度正比：retrievability 越低 → 修复越大
+            rescue_bonus = (1.0 - ret_f) * str_scale
+            if rescue_bonus <= 0.0001:
+                continue
+
+            new_stab = min(365.0, stab_f * (1.0 + rescue_bonus))
+            if new_stab <= stab_f + 0.0001:
+                continue
+
+            conn.execute(
+                "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=?",
+                (round(new_stab, 4), now_iso, cid),
+            )
+            rescued += 1
+        except Exception:
+            continue
+
+    if rescued > 0:
+        conn.commit()
+
+    return {"rescued": rescued, "total_examined": total_examined}
 
 
 # ── iter432: Cumulative Interference Effect — 累积干扰加速遗忘（Underwood 1957）──

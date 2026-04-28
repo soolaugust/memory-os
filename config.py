@@ -460,6 +460,52 @@ _REGISTRY: dict = {
     "store_vfs.scc_bonus": (0.15, float, 0.0, 0.50, None,
         "iter442: SCC stability 加成系数（new_stab = stab × (1 + scc_bonus × 0.04)，默认 0.15 → 0.6% 加成）"),
 
+    # ── iter443: Sleep-Targeted Memory Reactivation — 睡眠期主动抢救衰退的重要记忆（Stickgold 2005）──
+    # 认知科学依据：
+    #   Stickgold (2005) "Sleep-dependent memory consolidation" (Nature) —
+    #     睡眠期间，海马对"正在衰退"的重要记忆进行主动重放（targeted memory reactivation, TMR）：
+    #     N2/SWS 期间的 sleep spindles + sharp-wave ripples 优先重放高价值但 retrievability 下降的记忆。
+    #     "记忆抢救"（memory rescue）现象：睡眠后测试的记忆保留率 显著高于 清醒后，
+    #     尤其对 consolidation 临界期内（学习后 12-24h 首次睡眠）的记忆保留贡献最大。
+    #   Stickgold & Walker (2013) "Sleep-dependent memory triage: evolving generalization
+    #     through selective processing" (Nature Neuroscience) —
+    #     睡眠并非随机巩固所有记忆，而是"优先分诊"（triage）：
+    #     高重要性（reward-tagged、emotionally-flagged）+ 当前 retrievability 下降的记忆
+    #     获得优先的 hippocampal replay，防止进入不可逆遗忘区间。
+    #     等价：importance 高 + retrievability 低 = 最需要被"抢救"的记忆。
+    #   Walker & Stickgold (2004) "Sleep-dependent learning and motor-skill complexity" —
+    #     睡眠巩固的资源分配遵循"价值 × 衰退度"的优先级：
+    #     value × (1 - current_retrievability) = rescue_priority
+    #
+    # memory-os 等价：
+    #   sleep_consolidate 时，扫描 importance >= str_min_importance 且
+    #   retrievability <= str_max_retrievability 的 chunk（高价值但正在衰退）；
+    #   对这些 chunk 施加 stability 修复：
+    #     rescue_bonus = (1.0 - retrievability) × str_scale
+    #     new_stab = min(365.0, stab × (1 + rescue_bonus))
+    #   rescue_bonus 与遗忘程度正比：retrievability 越低 → 离遗忘临界越近 → 修复幅度越大。
+    #
+    # 与其他机制的区别：
+    #   Testing Effect (iter412) = 被用户实际检索时修复（activation-triggered，事后）
+    #   EC (iter441) = 情绪显著性 chunk 的持续加成（每次 sleep）
+    #   STR (iter443) = 主动扫描正在衰退的高价值 chunk 并修复（proactive triage，事前抢救）
+    #   三者互补：EC/STR 是主动保护；Testing Effect 是被动触发保护
+    #
+    # OS 类比：Linux dirty page writeback priority + data integrity policy —
+    #   系统在写回脏页时优先处理"快要超时"的脏页（page age 接近 dirty_expire_centisecs 上限），
+    #   防止数据丢失（analogous to: data 正在消退 = dirty page 即将超时 → 优先 writeback 抢救）。
+    #   pdflush/flusher 的 "expire" scan：定期扫描即将超时的脏页 → 强制写回（rescue before expiry）。
+    "store_vfs.str_enabled": (True, bool, None, None, None,
+        "iter443: 是否启用 Sleep-Targeted Reactivation — 睡眠期主动抢救高 importance 但 retrievability 低的 chunk"),
+    "store_vfs.str_min_importance": (0.65, float, 0.3, 1.0, None,
+        "iter443: 触发 STR 的最低 importance 阈值（默认 0.65，只抢救重要记忆）"),
+    "store_vfs.str_max_retrievability": (0.40, float, 0.0, 1.0, None,
+        "iter443: 触发 STR 的最高 retrievability 阈值（<= 此值说明正在衰退，默认 0.40）"),
+    "store_vfs.str_scale": (0.12, float, 0.0, 0.50, None,
+        "iter443: STR 修复系数：rescue_bonus = (1.0 - retrievability) × scale，"
+        "retrievability=0.0 时最大 bonus=str_scale（默认 0.12 ≈ 12%），"
+        "retrievability=0.40 时 bonus=0.072 ≈ 7.2%"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。
