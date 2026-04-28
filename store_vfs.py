@@ -7224,6 +7224,14 @@ def sleep_consolidate(
     except Exception:
         pass
 
+    # ── 子操作 16（iter447）：Von Restorff Sleep Reactivation — 孤立 chunk 在 sleep 时获得额外巩固 ──
+    # OS 类比：Linux huge page mlock + MADV_HUGEPAGE 双标注 — 独特布局的锁定页受双重保护路径
+    try:
+        vrr_result = apply_von_restorff_sleep_reactivation(conn, project)
+        result["vrr_boosted"] = vrr_result.get("vrr_boosted", 0)
+    except Exception:
+        pass
+
     return result
 
 
@@ -9825,6 +9833,152 @@ def apply_temporal_contiguity_consolidation(
         conn.commit()
 
     return {"tce_boosted": tce_boosted, "total_examined": total_examined}
+
+
+# ── iter447: Von Restorff Sleep Reactivation — 孤立记忆的睡眠期优先回放（Restorff 1933 / McDaniel & Einstein 1986）──
+# 认知科学依据：
+#   Von Restorff (1933) Isolation Effect — 孤立/独特的项目比同质项目记忆更好（+40-60% recall）。
+#   McDaniel & Einstein (1986) JEP — 孤立效应在延迟测试（1周后）更显著；睡眠巩固选择性保护孤立记忆。
+#   Huang et al. (2004) Memory — 孤立记忆的 delayed recall 在睡眠后比清醒组高约 25%。
+# OS 类比：Linux huge page mlock + MADV_HUGEPAGE 双标注 —
+#   独特布局页（MADV_HUGEPAGE）+ 锁定（mlock）= kswapd 跳过 + khugepaged 优先处理（双重保护路径）。
+
+def apply_von_restorff_sleep_reactivation(
+    conn: sqlite3.Connection,
+    project: str,
+) -> dict:
+    """
+    iter447: Von Restorff Sleep Reactivation (VRR) — 孤立 chunk 在 sleep 时获得额外 stability 加成。
+
+    算法：
+    1. 获取项目内 importance >= vrr_min_importance 的所有 chunk，按 created_at 排序。
+    2. 对每个 chunk，取其在 created_at 序列中的前后 vrr_neighbor_window/2 个邻居。
+    3. 计算孤立度：isolation_score = 1 - avg(jaccard(chunk.encode_context, neighbor.encode_context))
+       Jaccard = |交集| / |并集| （基于 encode_context token 集合）
+    4. isolation_score >= vrr_min_isolation → sleep bonus = isolation_score × vrr_scale
+       new_stab = min(365.0, stab × (1 + sleep_bonus))
+    5. 返回 {"vrr_boosted": N, "total_examined": N}
+
+    孤立度计算细节：
+      - encode_context 按逗号/空格分词（与 iter407 isolation_effect 一致）。
+      - 邻居 < 3 个时 isolation_score = 0.0（避免项目初期误判所有 chunk 为孤立）。
+      - 邻居 Jaccard 均值越低 = 该 chunk 与周围知识越不同 = isolation_score 越高。
+
+    Returns:
+      {"vrr_boosted": N, "total_examined": N}
+    """
+    try:
+        import config as _cfg_vrr
+    except ImportError:
+        return {"vrr_boosted": 0, "total_examined": 0}
+
+    try:
+        if not _cfg_vrr.get("store_vfs.vrr_enabled"):
+            return {"vrr_boosted": 0, "total_examined": 0}
+        vrr_min_isolation = _cfg_vrr.get("store_vfs.vrr_min_isolation")   # 0.60
+        vrr_min_importance = _cfg_vrr.get("store_vfs.vrr_min_importance") # 0.50
+        vrr_neighbor_window = _cfg_vrr.get("store_vfs.vrr_neighbor_window") # 20
+        vrr_scale = _cfg_vrr.get("store_vfs.vrr_scale")                   # 0.10
+    except Exception:
+        return {"vrr_boosted": 0, "total_examined": 0}
+
+    from datetime import datetime as _dt_vrr, timezone as _tz_vrr
+    now_iso = _dt_vrr.now(_tz_vrr.utc).isoformat()
+
+    # 获取所有符合 importance 阈值的 chunk，按 created_at 排序
+    try:
+        rows = conn.execute(
+            """SELECT id, stability, importance, encode_context FROM memory_chunks
+               WHERE project = ?
+                 AND COALESCE(importance, 0.0) >= ?
+                 AND COALESCE(stability, 0.1) > 0.1
+               ORDER BY created_at ASC
+               LIMIT 2000""",
+            (project, vrr_min_importance),
+        ).fetchall()
+    except Exception:
+        return {"vrr_boosted": 0, "total_examined": 0}
+
+    if not rows:
+        return {"vrr_boosted": 0, "total_examined": 0}
+
+    total_examined = len(rows)
+
+    # 构建 (cid, stab, token_set) 列表
+    parsed = []
+    for row in rows:
+        try:
+            cid = row[0] if isinstance(row, (list, tuple)) else row["id"]
+            stab = float(row[1] if isinstance(row, (list, tuple)) else row["stability"] or 0.1)
+            enc_ctx = row[3] if isinstance(row, (list, tuple)) else row["encode_context"]
+            # 分词：按逗号 + 空格分割，去重为 frozenset
+            tokens = frozenset(
+                t.strip().lower()
+                for t in (enc_ctx or "").replace(",", " ").split()
+                if t.strip()
+            )
+            parsed.append((cid, stab, tokens))
+        except Exception:
+            continue
+
+    if not parsed:
+        return {"vrr_boosted": 0, "total_examined": total_examined}
+
+    half_window = max(1, vrr_neighbor_window // 2)
+    vrr_boosted = 0
+    updates = []
+
+    for i, (cid, stab_f, tokens) in enumerate(parsed):
+        if stab_f <= 0.1 or not tokens:
+            continue
+
+        # 取前后邻居（排除自身）
+        lo = max(0, i - half_window)
+        hi = min(len(parsed), i + half_window + 1)
+        neighbors = [parsed[j] for j in range(lo, hi) if j != i]
+
+        if len(neighbors) < 3:
+            # 邻居太少 → 无法可靠计算孤立度（避免项目初期误判）
+            continue
+
+        # 计算 Jaccard 均值
+        jaccard_sum = 0.0
+        valid_neighbors = 0
+        for _, _, nb_tokens in neighbors:
+            if not nb_tokens:
+                continue
+            inter = len(tokens & nb_tokens)
+            union = len(tokens | nb_tokens)
+            if union > 0:
+                jaccard_sum += inter / union
+                valid_neighbors += 1
+
+        if valid_neighbors == 0:
+            continue
+
+        avg_jaccard = jaccard_sum / valid_neighbors
+        isolation_score = 1.0 - avg_jaccard
+
+        if isolation_score < vrr_min_isolation:
+            continue
+
+        # 孤立度达标 → 计算 sleep bonus
+        sleep_bonus = isolation_score * vrr_scale
+        new_stab = min(365.0, stab_f * (1.0 + sleep_bonus))
+        if new_stab <= stab_f + 0.0001:
+            continue
+
+        updates.append((round(new_stab, 4), now_iso, cid))
+        vrr_boosted += 1
+
+    if updates:
+        conn.executemany(
+            "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=?",
+            updates,
+        )
+        conn.commit()
+
+    return {"vrr_boosted": vrr_boosted, "total_examined": total_examined}
 
 
 # ── iter432: Cumulative Interference Effect — 累积干扰加速遗忘（Underwood 1957）──

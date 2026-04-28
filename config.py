@@ -625,6 +625,47 @@ _REGISTRY: dict = {
     "store_vfs.tce_max_group_size": (10, int, 2, 50, None,
         "iter446: 每个时间窗口内最多参与 TCE 的 chunk 数量（按 importance 降序取 top N，避免长 session 失控）"),
 
+    # ── iter447: Von Restorff Sleep Reactivation — 孤立记忆的睡眠期优先回放（Restorff 1933 / McDaniel 1986）────────
+    # 认知科学依据：
+    #   Von Restorff (1933) "Über die Wirkung von Bereichsbildungen im Spurenfeld" (Isolation Effect) —
+    #     在一串相似项目中，孤立/独特的项目（与其他项目不同）被记忆得更好（+40-60% recall advantage）。
+    #     机制：孤立项目在编码时占据更多认知资源（selective attention），形成更强记忆痕迹。
+    #   McDaniel & Einstein (1986) "Bizarre imagery as an effective memory aid" (JEP) —
+    #     孤立效应在延迟测试（1周后）中比即时测试更显著：睡眠巩固对孤立记忆的保护尤为强烈。
+    #     机制：孤立记忆在 NREM SWS 期间有更强的 hippocampal sharp-wave ripple 重放频率。
+    #   Huang et al. (2004) "The isolation effect in free recall" (Memory) —
+    #     孤立效应的睡眠增强：学习后睡眠使孤立项目的 delayed recall 比清醒组高约 25%；
+    #     对非孤立项目无此差异（睡眠选择性保护孤立记忆）。
+    #   Hunt & Lamb (2001) Meta-analysis: isolation effect ≈ d=0.80（相对普通项目的优势），
+    #     在图片/词汇/行为等多个记忆类型均显著。
+    #
+    # memory-os 等价：
+    #   encode_context 在项目内 Jaccard 相似度低（语义孤立）的 chunk = Von Restorff 孤立项。
+    #   iter407 写入时已计算孤立度，但仅一次性加成（encoding 阶段）。
+    #   iter447 = 睡眠巩固阶段的持续保护：
+    #     sleep_consolidate 时，对 encode_context 低 Jaccard 重叠的 chunk 计算孤立度：
+    #       isolation_score = 1 - avg(jaccard(chunk, neighbor_i) for neighbor_i in recent_neighbors)
+    #       isolation_score >= vrr_min_isolation → sleep bonus = isolation_score × vrr_scale
+    #       new_stab = min(365.0, stab × (1 + sleep_bonus))
+    #     与 iter407 的区别：iter407 = 写入时一次性；iter447 = 每次 sleep 持续（离线重放）。
+    #   最近邻窗口：比较同项目内创建时间相近的 N 个 chunk（vrr_neighbor_window=20）。
+    #
+    # OS 类比：Linux kernel huge page 特殊标记页（mlock + MADV_HUGEPAGE 双标注）—
+    #   被 mlock 锁定（高价值）+ MADV_HUGEPAGE 标注（独特页布局）的页面，
+    #   在内存压力下受到双重保护：kswapd 跳过 mlock 页，khugepaged 优先处理 MADV_HUGEPAGE；
+    #   类比：孤立 chunk（独特语义布局）在 sleep 时受到额外巩固（双重保护路径）。
+    "store_vfs.vrr_enabled": (True, bool, None, None, None,
+        "iter447: 是否启用 Von Restorff Sleep Reactivation — 孤立 chunk 在 sleep 时获得额外巩固加成"),
+    "store_vfs.vrr_min_isolation": (0.60, float, 0.0, 1.0, None,
+        "iter447: 触发 VRR 的最低孤立度阈值（isolation_score >= 此值才获得 sleep bonus，默认 0.60）"),
+    "store_vfs.vrr_min_importance": (0.50, float, 0.0, 1.0, None,
+        "iter447: 触发 VRR 的最低 importance 阈值（低重要性孤立 chunk 不受特殊保护，默认 0.50）"),
+    "store_vfs.vrr_neighbor_window": (20, int, 5, 100, None,
+        "iter447: 计算孤立度时使用的相邻 chunk 数量（按 created_at 取最近 N 个邻居，默认 20）"),
+    "store_vfs.vrr_scale": (0.10, float, 0.0, 0.30, None,
+        "iter447: VRR sleep bonus 系数：bonus = isolation_score × scale，"
+        "isolation_score=1.0（完全孤立）时最大 bonus=vrr_scale（默认 0.10 ≈ 10%）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。
