@@ -1986,6 +1986,13 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
     except Exception:
         pass  # boundary_proximity 写入失败不阻塞主流程
 
+    # iter429: Enactment Effect — 行动编码加成（Engelkamp & Zimmer 1989）
+    try:
+        _en_base_stability = d.get("stability", 1.0)
+        apply_enactment_effect(conn, d["id"], base_stability=float(_en_base_stability or 1.0))
+    except Exception:
+        pass  # enactment effect 写入失败不阻塞主流程
+
 
 # ── iter403：Cue-Dependent Forgetting — Context-Sensitive Retrieval（Tulving 1974）──
 #
@@ -7231,6 +7238,107 @@ def compute_boundary_proximity(
         return 0.0  # 中性：会话中间写入
     except Exception:
         return 0.0
+
+
+# ── iter429: Enactment Effect — 行动编码加成（Engelkamp & Zimmer 1989）─────────────
+# 认知科学依据：Engelkamp & Zimmer (1989) "Memory for subject-performed tasks" —
+#   Subject-Performed Tasks (SPT) 比仅听/说的 Verbal Tasks (VT) 记忆留存率高约 40%。
+#   行动编码激活运动皮层（motor cortex）+ 语义系统双路径，形成多模态记忆痕迹。
+# OS 类比：Linux writeback dirty page accounting —
+#   write() syscall 产生的 dirty page 比 read() 产生的 clean page 有更高 priority。
+
+_ENACTMENT_TOOL_SIGNATURES = frozenset({
+    "bash", "edit", "write", "notebookedit",
+    "computer", "execute", "run",
+})
+
+import re as _re_enact
+_ENACTMENT_CONTENT_RE = _re_enact.compile(
+    r'(?:'
+    r'\$\s+\w+'
+    r'|^\+\+\+\s+b/'
+    r'|^---\s+a/'
+    r'|^\+[^\+]|^-[^-]'
+    r'|File written to'
+    r'|Command output:'
+    r'|\d+\s+(?:lines?|bytes?)\s+(?:added|removed|written|modified)'
+    r')',
+    _re_enact.MULTILINE | _re_enact.IGNORECASE,
+)
+
+
+def apply_enactment_effect(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    base_stability: float = 1.0,
+) -> float:
+    """
+    iter429: 对 agent 工具调用产生的 chunk 应用行动编码 stability 加成。
+    SPT（subject-performed tasks）比 VT（verbal tasks）留存率高约 40%（Engelkamp 1989）。
+
+    检测链（L1→L3，首个匹配即生效）：
+      L1: source_type 字段标记为 tool_result/bash_output 等
+      L2: chunk_type == 'tool_insight'
+      L3: content 包含工具调用特征（diff 标记、shell prompt、输出格式）
+
+    Returns: 加成后的 stability 值（未改变时返回 base_stability）。
+    """
+    if not chunk_id:
+        return base_stability
+    try:
+        import config as _config
+        if not _config.get("store_vfs.enactment_enabled"):
+            return base_stability
+        row = conn.execute(
+            "SELECT content, chunk_type, stability, source_type FROM memory_chunks WHERE id=?",
+            (chunk_id,)
+        ).fetchone()
+        if not row:
+            return base_stability
+        # 兼容 Row 和 tuple
+        if hasattr(row, 'keys'):
+            content = row["content"]
+            chunk_type = row["chunk_type"]
+            stab = float(row["stability"] or base_stability)
+            source_type = row["source_type"] if "source_type" in row.keys() else None
+        else:
+            content, chunk_type, stab, source_type = row[0], row[1], float(row[2] or base_stability), row[3]
+
+        is_enacted = False
+        # L1: source_type 检测
+        if source_type and source_type.lower() in {"tool_result", "bash_output", "tool_output", "enactment"}:
+            is_enacted = True
+        # L2: chunk_type 检测
+        if not is_enacted and chunk_type == "tool_insight":
+            is_enacted = True
+        # L3: content 特征检测
+        if not is_enacted and content:
+            if _ENACTMENT_CONTENT_RE.search(content[:1000]):
+                is_enacted = True
+        # L3b: 配置的工具名称检测
+        if not is_enacted and content:
+            _enact_tools_cfg = _config.get("store_vfs.enactment_tool_types") or ""
+            _enact_tools = [t.strip().lower() for t in _enact_tools_cfg.split(",") if t.strip()]
+            if _enact_tools:
+                import re as _re
+                _tool_re = _re.compile(
+                    r'(?:tool(?:_name)?[:\s]+|^\[)(' + '|'.join(_re.escape(t) for t in _enact_tools) + r')',
+                    _re.IGNORECASE | _re.MULTILINE,
+                )
+                if _tool_re.search(content[:500]):
+                    is_enacted = True
+
+        if not is_enacted:
+            return stab
+
+        boost = float(_config.get("store_vfs.enactment_boost") or 1.4)
+        cap = float(_config.get("store_vfs.enactment_cap") or 365.0)
+        new_stability = min(cap, stab * boost)
+        if new_stability > stab + 0.001:
+            conn.execute("UPDATE memory_chunks SET stability=? WHERE id=?", (new_stability, chunk_id))
+        return new_stability
+    except Exception:
+        return base_stability
 
 
 def compute_emotional_valence(text: str) -> float:

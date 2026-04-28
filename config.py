@@ -745,6 +745,26 @@ _REGISTRY: dict = {
         "iter428: doorway effect stability 惩罚系数（boundary_proximity < -0.5 时应用，"
         "默认 0.05 = 最多 5% stability 惩罚，模拟 Radvansky 2006 doorway forgetting）"),
 
+    # ── iter429: Enactment Effect — 行动编码加成 ─────────────────────────────
+    # 认知科学依据：Engelkamp & Zimmer (1989) Subject-Performed Tasks (SPT) —
+    #   亲自执行动作（SPT）比仅语言描述（VT）的记忆留存率高约 40%；
+    #   行动编码激活运动皮层 + 语义系统双路径，形成更强的多模态痕迹。
+    # OS 类比：Linux writeback — 写操作（exec/write syscall）创建比读操作（read）
+    #   更深的 page cache dirty state，需要更多 I/O 才能清除。
+    # 检测：chunk 的 source_type='tool_result' 或 content 包含工具调用签名
+    "store_vfs.enactment_enabled": (True, bool, None, None, None,
+        "是否启用 iter429 Enactment Effect：agent 工具调用产生的 chunk 获得 stability 加成"),
+    "store_vfs.enactment_boost": (1.4, float, 1.0, 3.0, None,
+        "iter429: 行动编码 stability 乘子 — 执行工具调用的 chunk stability × enactment_boost，"
+        "默认 1.4（对应 SPT 比 VT 高约 40% 的留存率优势，Engelkamp 1989）"),
+    "store_vfs.enactment_cap": (365.0, float, 1.0, 365.0, None,
+        "iter429: enactment effect 后 stability 上限（避免超过遗忘曲线最大值）"),
+    "store_vfs.enactment_tool_types": (
+        "Bash,Edit,Write,NotebookEdit",
+        str, None, None, None,
+        "iter429: 触发行动编码加成的工具名列表（逗号分隔），"
+        "这些工具产生副作用（写磁盘/执行命令），比 Read/Glob 等只读工具有更强行动编码"),
+
     # ── iter390: Prospective Memory — 展望记忆触发 ───────────────────────────
     # 认知科学依据：Einstein & McDaniel (1990) Prospective Memory —
     #   意图性记忆（"记得在X时做Y"）需要在未来条件满足时主动提取。
