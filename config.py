@@ -666,6 +666,52 @@ _REGISTRY: dict = {
         "iter447: VRR sleep bonus 系数：bonus = isolation_score × scale，"
         "isolation_score=1.0（完全孤立）时最大 bonus=vrr_scale（默认 0.10 ≈ 10%）"),
 
+    # ── iter448: Retroactive Enhancement — 新知识睡眠后逆行增强先前相关旧知识（Mednick et al. 2011）──
+    # 认知科学依据：
+    #   Mednick et al. (2011) "REM, not incubation, improves creativity by priming associative networks" (PNAS) —
+    #     学习新知识 → 立即睡眠 → 睡眠不仅巩固新知识，还逆行增强与之关联的旧记忆（retroactive enhancement）。
+    #     机制：新知识编码激活的 hippocampal-cortical 回路，在 NREM SWS 重放时也重放与之关联的旧记忆痕迹，
+    #     使旧记忆的突触权重也得到更新（bidirectional consolidation）。
+    #   Walker & Stickgold (2004) "Sleep-dependent learning and motor-skill complexity" —
+    #     睡眠巩固新旧知识的"联合整合"：新技能习得后睡眠，与之结构相似的旧技能也有 overnight 提升。
+    #   Stickgold & Walker (2007) "Sleep-dependent memory consolidation and reconsolidation" —
+    #     系统巩固理论（Squire & Alvarez 1995）的睡眠扩展：新知识与旧知识在 SWS 期间共同重放，
+    #     形成整合性表示（integrated representation），旧知识的 stability 同步提升。
+    #   Ellenbogen et al. (2007) Science — 睡眠促进新-旧知识的关联发现（transitive inference），
+    #     即使学习时未直接配对也能在睡眠后建立间接关联（A>B, C>B → A>C）。
+    #
+    # memory-os 等价：
+    #   sleep_consolidate 时，找出"近期写入的新 chunk"（created_at >= now - re_new_window_hours）：
+    #     对每个新 chunk，查找项目内 encode_context entity 重叠度高（>= re_min_overlap）的"旧 chunk"
+    #     （created_at < now - re_new_window_hours），逆行给旧 chunk 施加 stability 加成：
+    #       overlap_score = |new_tokens ∩ old_tokens| / |new_tokens ∪ old_tokens|
+    #       re_bonus = overlap_score × re_scale
+    #       new_stab = min(365.0, old_stab × (1 + re_bonus))
+    #   只处理 importance >= re_min_importance 的新旧 chunk（低重要性不触发）。
+    #   每个旧 chunk 最多被加成一次（取所有关联新 chunk 中的最大 bonus）。
+    #
+    # 与 iter440 PF（Proactive Facilitation）的区别：
+    #   PF：旧强邻居锚定新知识（高 access_count 旧 chunk → 减慢新 chunk 衰减）
+    #   RE：新知识逆行增强旧知识（新 chunk 写入后睡眠 → 逆行 boost 旧 chunk stability）
+    #   PF = 前向传播（旧→新）；RE = 逆向传播（新→旧）。
+    #
+    # OS 类比：Linux page fault 触发的 backward readahead —
+    #   当访问 page_N 时（新知识），内核的向后预取算法同时预取 page_N-4 到 page_N-1（旧页）；
+    #   类比：新 chunk 编码激活的记忆回路逆行激活历史相关 chunk（backward cache warmup）。
+    "store_vfs.re_enabled": (True, bool, None, None, None,
+        "iter448: 是否启用 Retroactive Enhancement — 新 chunk 写入后 sleep 时逆行增强旧相关 chunk"),
+    "store_vfs.re_new_window_hours": (24.0, float, 1.0, 168.0, None,
+        "iter448: 新 chunk 时间窗口（小时）：created_at >= now - window 的 chunk 视为'新知识'（默认 24h）"),
+    "store_vfs.re_min_overlap": (3, int, 1, 10, None,
+        "iter448: 触发 RE 的最小 entity 重叠数（新旧 chunk encode_context 交集 >= 此值，默认 3）"),
+    "store_vfs.re_min_importance": (0.45, float, 0.0, 1.0, None,
+        "iter448: 触发 RE 的最低 importance 阈值（新旧 chunk 均需 >= 此值，默认 0.45）"),
+    "store_vfs.re_scale": (0.06, float, 0.0, 0.20, None,
+        "iter448: RE 逆行加成系数：re_bonus = overlap_score × scale，"
+        "overlap_score=1.0 时最大 bonus=re_scale（默认 0.06 ≈ 6%，保守以防过度干扰 PF 机制）"),
+    "store_vfs.re_max_old_per_new": (5, int, 1, 20, None,
+        "iter448: 每个新 chunk 最多逆行增强的旧 chunk 数量（按 overlap_score 降序取 top N，默认 5）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。

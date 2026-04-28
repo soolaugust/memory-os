@@ -7232,6 +7232,14 @@ def sleep_consolidate(
     except Exception:
         pass
 
+    # ── 子操作 17（iter448）：Retroactive Enhancement — 新 chunk 睡眠后逆行增强旧相关 chunk ──
+    # OS 类比：Linux page fault 触发的 backward readahead — 新页命中触发对历史相关页的反向预取
+    try:
+        re_result = apply_retroactive_enhancement(conn, project)
+        result["re_boosted"] = re_result.get("re_boosted", 0)
+    except Exception:
+        pass
+
     return result
 
 
@@ -9979,6 +9987,194 @@ def apply_von_restorff_sleep_reactivation(
         conn.commit()
 
     return {"vrr_boosted": vrr_boosted, "total_examined": total_examined}
+
+
+# ── iter448: Retroactive Enhancement — 新知识睡眠后逆行增强旧相关知识（Mednick et al. 2011）──
+# 认知科学依据：
+#   Mednick et al. (2011) PNAS — 睡眠不仅巩固新知识，还逆行增强与之关联的旧记忆痕迹（bidirectional consolidation）。
+#   Walker & Stickgold (2004) — 新技能睡眠后，结构相似的旧技能也有 overnight 提升。
+#   Ellenbogen et al. (2007) Science — 睡眠促进新-旧知识联合整合，产生逆行传递性推断。
+# OS 类比：Linux page fault 触发的 backward readahead —
+#   page_N 缺页中断 → 内核向后预取 page_N-K 到 page_N-1（历史邻居）；
+#   新 chunk 写入后睡眠 → 其关联的历史旧 chunk 也被逆行激活并增强。
+
+def apply_retroactive_enhancement(
+    conn: sqlite3.Connection,
+    project: str,
+) -> dict:
+    """
+    iter448: Retroactive Enhancement (RE) — sleep 时新 chunk 逆行增强旧相关 chunk 的 stability。
+
+    算法：
+    1. 找出"新 chunk"：created_at >= now - re_new_window_hours（24h 内写入）
+       且 importance >= re_min_importance。
+    2. 找出"旧 chunk"：created_at < now - re_new_window_hours
+       且 importance >= re_min_importance。
+    3. 对每个新 chunk，计算与所有旧 chunk 的 Jaccard(encode_context)：
+       重叠 >= re_min_overlap → 候选旧 chunk。
+    4. 每个旧 chunk 的 bonus = max(overlap_score × re_scale over all new chunks)。
+    5. new_stab = min(365.0, old_stab × (1 + re_bonus))。
+    6. 返回 {"re_boosted": N, "total_examined": N}
+
+    关键设计：
+    - 每个旧 chunk 最多被增强一次（取所有新 chunk 中的最大 bonus，避免重复叠加）。
+    - re_max_old_per_new 限制每个新 chunk 影响的旧 chunk 数量（防止新 chunk 过于"广播"）。
+
+    Returns:
+      {"re_boosted": N, "total_examined": N}
+    """
+    try:
+        import config as _cfg_re
+    except ImportError:
+        return {"re_boosted": 0, "total_examined": 0}
+
+    try:
+        if not _cfg_re.get("store_vfs.re_enabled"):
+            return {"re_boosted": 0, "total_examined": 0}
+        re_new_window_hours = _cfg_re.get("store_vfs.re_new_window_hours")  # 24.0
+        re_min_overlap = _cfg_re.get("store_vfs.re_min_overlap")            # 3
+        re_min_importance = _cfg_re.get("store_vfs.re_min_importance")      # 0.45
+        re_scale = _cfg_re.get("store_vfs.re_scale")                        # 0.06
+        re_max_old_per_new = _cfg_re.get("store_vfs.re_max_old_per_new")    # 5
+    except Exception:
+        return {"re_boosted": 0, "total_examined": 0}
+
+    from datetime import datetime as _dt_re, timezone as _tz_re, timedelta as _td_re
+    now_dt = _dt_re.now(_tz_re.utc)
+    now_iso = now_dt.isoformat()
+    new_cutoff = (now_dt - _td_re(hours=re_new_window_hours)).isoformat()
+
+    # 获取新 chunk（24h 内写入）
+    try:
+        new_rows = conn.execute(
+            """SELECT id, stability, importance, encode_context FROM memory_chunks
+               WHERE project = ?
+                 AND COALESCE(importance, 0.0) >= ?
+                 AND COALESCE(stability, 0.1) > 0.1
+                 AND created_at >= ?
+               LIMIT 500""",
+            (project, re_min_importance, new_cutoff),
+        ).fetchall()
+    except Exception:
+        return {"re_boosted": 0, "total_examined": 0}
+
+    if not new_rows:
+        return {"re_boosted": 0, "total_examined": 0}
+
+    # 获取旧 chunk（24h 前写入）
+    try:
+        old_rows = conn.execute(
+            """SELECT id, stability, importance, encode_context FROM memory_chunks
+               WHERE project = ?
+                 AND COALESCE(importance, 0.0) >= ?
+                 AND COALESCE(stability, 0.1) > 0.1
+                 AND (created_at IS NULL OR created_at < ?)
+               LIMIT 2000""",
+            (project, re_min_importance, new_cutoff),
+        ).fetchall()
+    except Exception:
+        return {"re_boosted": 0, "total_examined": 0}
+
+    if not old_rows:
+        return {"re_boosted": 0, "total_examined": 0}
+
+    total_examined = len(old_rows)
+
+    def _parse_tokens(row, idx=3):
+        enc = row[idx] if isinstance(row, (list, tuple)) else row["encode_context"]
+        return frozenset(
+            t.strip().lower()
+            for t in (enc or "").replace(",", " ").split()
+            if t.strip()
+        )
+
+    def _get_field(row, idx, name):
+        return row[idx] if isinstance(row, (list, tuple)) else row[name]
+
+    # 解析旧 chunk
+    old_parsed = []
+    for row in old_rows:
+        try:
+            cid = _get_field(row, 0, "id")
+            stab = float(_get_field(row, 1, "stability") or 0.1)
+            tokens = _parse_tokens(row)
+            old_parsed.append((cid, stab, tokens))
+        except Exception:
+            continue
+
+    if not old_parsed:
+        return {"re_boosted": 0, "total_examined": total_examined}
+
+    # 解析新 chunk
+    new_parsed = []
+    for row in new_rows:
+        try:
+            tokens = _parse_tokens(row)
+            if tokens:
+                new_parsed.append(tokens)
+        except Exception:
+            continue
+
+    if not new_parsed:
+        return {"re_boosted": 0, "total_examined": total_examined}
+
+    # 对每个旧 chunk，计算最大 bonus（来自所有新 chunk 中的最优关联）
+    # old_bonus_map: {cid: max_bonus}
+    old_bonus_map: dict = {}
+
+    for new_tokens in new_parsed:
+        if not new_tokens:
+            continue
+
+        # 找出与此新 chunk 高重叠的旧 chunk
+        candidates = []
+        for cid, stab_f, old_tokens in old_parsed:
+            if not old_tokens:
+                continue
+            inter = len(new_tokens & old_tokens)
+            if inter < re_min_overlap:
+                continue
+            union = len(new_tokens | old_tokens)
+            if union == 0:
+                continue
+            overlap_score = inter / union
+            candidates.append((cid, stab_f, overlap_score))
+
+        # 取 top re_max_old_per_new（按 overlap_score 降序）
+        candidates.sort(key=lambda x: x[2], reverse=True)
+        for cid, stab_f, overlap_score in candidates[:re_max_old_per_new]:
+            bonus = overlap_score * re_scale
+            existing = old_bonus_map.get(cid, 0.0)
+            if bonus > existing:
+                old_bonus_map[cid] = bonus
+
+    if not old_bonus_map:
+        return {"re_boosted": 0, "total_examined": total_examined}
+
+    # 构建更新列表（需要当前 stability）
+    # 使用 old_parsed 中的 stab 值
+    stab_lookup = {cid: stab_f for cid, stab_f, _ in old_parsed}
+    re_boosted = 0
+    updates = []
+
+    for cid, bonus in old_bonus_map.items():
+        stab_f = stab_lookup.get(cid, 0.0)
+        if stab_f <= 0.1 or bonus <= 0.0:
+            continue
+        new_stab = min(365.0, stab_f * (1.0 + bonus))
+        if new_stab <= stab_f + 0.0001:
+            continue
+        updates.append((round(new_stab, 4), now_iso, cid))
+        re_boosted += 1
+
+    if updates:
+        conn.executemany(
+            "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=?",
+            updates,
+        )
+        conn.commit()
+
+    return {"re_boosted": re_boosted, "total_examined": total_examined}
 
 
 # ── iter432: Cumulative Interference Effect — 累积干扰加速遗忘（Underwood 1957）──
