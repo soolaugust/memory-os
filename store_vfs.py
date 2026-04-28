@@ -5056,7 +5056,7 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
     except Exception:
         pass
 
-    # iter417: Retrieval-Induced Forgetting — 检索引发语义竞争者 stability 轻微衰减
+    # iter417: Retrieval-Induced Forgetting (encode_context) — 语义竞争者 stability 轻微衰减
     # Anderson et al. (1994): 检索记忆 A 抑制其语义竞争者 B/C
     # OS 类比：MESI 协议 — 写入 cache line 使其他核的相同 line 变为 Invalid
     try:
@@ -5068,6 +5068,20 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
         if _rif_proj_row:
             _rif_proj = _rif_proj_row[0] if isinstance(_rif_proj_row, (list, tuple)) else _rif_proj_row["project"]
             apply_retrieval_induced_forgetting(conn, chunk_ids, _rif_proj)
+    except Exception:
+        pass
+
+    # iter434: Retrieval-Induced Forgetting (summary Jaccard) — 按 chunk_type 分组的精确 RIF
+    # 补充 iter417：使用 summary Jaccard 相似度（比 encode_context 更鲁棒），按同类别竞争
+    # OS 类比：CPU set-associative cache way eviction — same-set 竞争者被驱逐
+    try:
+        _rif434_proj_row = conn.execute(
+            f"SELECT project FROM memory_chunks WHERE id IN ({placeholders}) LIMIT 1",
+            chunk_ids,
+        ).fetchone()
+        if _rif434_proj_row:
+            _rif434_proj = _rif434_proj_row[0] if isinstance(_rif434_proj_row, (list, tuple)) else _rif434_proj_row["project"]
+            apply_rif_by_summary(conn, _rif434_proj, chunk_ids)
     except Exception:
         pass
 
@@ -8095,6 +8109,197 @@ def decay_stability_by_type(
         pass
 
     return total_decayed
+
+
+# ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
+# 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
+#   检索某条记忆（practiced item）主动抑制同类别相关但未被检索的记忆（unpracticed items）。
+#   机制：检索激活类别竞争记忆 → 强化被选中者 → 主动抑制被压制者（RP-）→ RP- 遗忘增加 ~10-20%。
+#   条件：RIF 要求竞争者与检索目标属于同一类别（chunk_type）且内容相关（Jaccard 相似度阈值）。
+#
+# OS 类比：CPU cache set-associativity way eviction —
+#   访问 cache line A（命中 set 0, way 0）→ LRU 将同 set 的竞争 cache line B 推向更高 way
+#   → B 的 eviction 概率上升（A 的命中加速了 B 的驱逐路径）。
+#
+# 与 iter432 Cumulative Interference 的区别：
+#   CI（iter432）= 静态结构性干扰（同类数量多 → 被动衰减加速）
+#   RIF（iter434）= 动态事件性抑制（检索事件 → 主动压制竞争记忆）
+
+def _rif_tokenize(text: str) -> frozenset:
+    """iter434: RIF 内部 tokenizer — 提取用于 Jaccard 相似度计算的 token 集合。"""
+    import re as _re
+    tokens = set()
+    for m in _re.finditer(r'[a-zA-Z0-9_][-a-zA-Z0-9_.]*', text):
+        tokens.add(m.group().lower())
+    cn = _re.sub(r'[^\u4e00-\u9fff]', '', text)
+    for i in range(len(cn) - 1):
+        tokens.add(cn[i:i + 2])
+    return frozenset(tokens)
+
+
+def apply_rif_by_summary(
+    conn: sqlite3.Connection,
+    project: str,
+    hit_chunk_ids: list,
+) -> dict:
+    """
+    iter434: Retrieval-Induced Forgetting (RIF) by Summary Jaccard — 基于 summary 相似度的精确 RIF。
+
+    与 iter417 apply_retrieval_induced_forgetting 的区别：
+      - iter417: 基于 encode_context token 集合重叠（稀疏，依赖上下文标注）
+      - iter434: 基于 summary Jaccard 相似度（更鲁棒，直接文本相似度）
+      - iter434: 按 chunk_type 分组（竞争限定在同类别，更符合 RIF 实验条件）
+      - iter434: 使用 scorer.rif_* sysctl（独立配置）
+
+    Anderson, Bjork & Bjork (1994) 实验范式：
+      - Practiced items (RP+): 被检索 → 记忆增强
+      - Unpracticed-related (RP-): 同类别但未被检索 → 记忆被抑制（低于控制组基线）
+      - Unpracticed-unrelated (NRP): 不同类别 → 不受影响（控制组基线）
+
+    实现逻辑：
+      1. 对每个命中 chunk，查询同 chunk_type 的其他 chunk（同类别竞争者）
+      2. 计算 Jaccard 相似度（RP- 候选必须与命中 chunk 内容相关）
+      3. 对 Jaccard >= rif_similarity_threshold 且未被命中的 chunk 施加 stability 惩罚
+      4. 豁免：importance 高、受保护类型、permastore 保护的 chunk
+
+    参数：
+      conn          — 数据库连接
+      project       — 项目 ID
+      hit_chunk_ids — 本次被检索命中的 chunk ID 列表
+
+    返回 dict：
+      suppressed     — 受到 RIF 抑制的 chunk 数量
+      total_examined — 总共检查的竞争者数量
+      suppressed_ids — 被抑制的 chunk ID 列表（调试用）
+    """
+    if not hit_chunk_ids:
+        return {"suppressed": 0, "total_examined": 0, "suppressed_ids": []}
+
+    try:
+        import config as _cfg_mod
+        if not _cfg_mod.get("scorer.rif_enabled"):
+            return {"suppressed": 0, "total_examined": 0, "suppressed_ids": []}
+
+        rif_factor = _cfg_mod.get("scorer.rif_factor")
+        sim_threshold = _cfg_mod.get("scorer.rif_similarity_threshold")
+        max_targets = _cfg_mod.get("scorer.rif_max_targets")
+        protect_imp = _cfg_mod.get("scorer.rif_protect_importance")
+        protect_types_raw = _cfg_mod.get("scorer.rif_protect_types")
+        protect_types = set(t.strip() for t in protect_types_raw.split(",") if t.strip())
+    except Exception:
+        return {"suppressed": 0, "total_examined": 0, "suppressed_ids": []}
+
+    hit_set = set(hit_chunk_ids)
+    placeholders = ",".join("?" * len(hit_chunk_ids))
+
+    # ── 读取命中 chunk 的 chunk_type 和 summary ──
+    hit_rows = conn.execute(
+        f"SELECT id, chunk_type, summary FROM memory_chunks WHERE id IN ({placeholders})",
+        hit_chunk_ids,
+    ).fetchall()
+
+    if not hit_rows:
+        return {"suppressed": 0, "total_examined": 0, "suppressed_ids": []}
+
+    # 按 chunk_type 分组
+    type_to_hits = {}  # chunk_type → [(id, tokens)]
+    for rid, ct, summary in hit_rows:
+        if ct in protect_types:
+            continue
+        toks = _rif_tokenize(summary or "")
+        if not toks:
+            continue
+        type_to_hits.setdefault(ct, []).append((rid, toks))
+
+    if not type_to_hits:
+        return {"suppressed": 0, "total_examined": 0, "suppressed_ids": []}
+
+    # ── 对每种 chunk_type，查询同类竞争者（候选 RP-）──
+    suppressed = 0
+    total_examined = 0
+    suppressed_ids = []
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    for chunk_type, hits_list in type_to_hits.items():
+        if chunk_type in protect_types:
+            continue
+
+        # 查询同类型的非命中 chunk
+        competitors = conn.execute(
+            """SELECT id, summary, COALESCE(stability, 1.0), importance
+               FROM memory_chunks
+               WHERE project = ? AND chunk_type = ?
+                 AND COALESCE(importance, 0.5) < ?
+                 AND COALESCE(oom_adj, 0) > -1000
+               ORDER BY stability ASC""",
+            (project, chunk_type, protect_imp),
+        ).fetchall()
+
+        # 排除命中 chunk
+        competitors = [(rid, s, stab, imp) for rid, s, stab, imp in competitors if rid not in hit_set]
+        total_examined += len(competitors)
+
+        if not competitors:
+            continue
+
+        # 预计算竞争者 tokens
+        comp_tokens = [(rid, _rif_tokenize(s or ""), stab) for rid, s, stab, imp in competitors]
+
+        # 对每个命中 chunk，找 Jaccard >= threshold 的竞争者
+        to_suppress = {}  # rid → current_stab (去重，取最小 stab 防重复压制)
+        for _hit_id, hit_toks in hits_list:
+            if not hit_toks:
+                continue
+            # 计算相似度并收集竞争者
+            scored = []
+            for rid, c_toks, c_stab in comp_tokens:
+                if not c_toks:
+                    continue
+                inter = len(hit_toks & c_toks)
+                union = len(hit_toks | c_toks)
+                jaccard = inter / union if union > 0 else 0.0
+                if jaccard >= sim_threshold:
+                    scored.append((jaccard, rid, c_stab))
+
+            # 取相似度最高的前 max_targets 个
+            scored.sort(key=lambda x: x[0], reverse=True)
+            for _, rid, c_stab in scored[:max_targets]:
+                if rid not in to_suppress:
+                    to_suppress[rid] = c_stab
+
+        # ── 批量应用 RIF stability 惩罚 ──
+        # 保护：iter422 Permastore floor 和 iter431 Ribot's Law floor
+        for rid, c_stab in to_suppress.items():
+            try:
+                # permastore floor
+                ps_floor = compute_permastore_floor(conn, rid, c_stab)
+                # Ribot floor
+                ribot_floor = 0.0
+                try:
+                    _row_r = _get_chunk_age_importance(conn, rid)
+                    if _row_r:
+                        ribot_floor = 0.1 + compute_ribot_floor(_row_r[0], _row_r[1])
+                except Exception:
+                    pass
+
+                floor = max(ps_floor, ribot_floor)
+                new_stab = max(floor, c_stab * rif_factor)
+                if new_stab < c_stab:
+                    conn.execute(
+                        "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=?",
+                        (round(new_stab, 4), now_iso, rid),
+                    )
+                    suppressed += 1
+                    suppressed_ids.append(rid)
+            except Exception:
+                pass
+
+    return {
+        "suppressed": suppressed,
+        "total_examined": total_examined,
+        "suppressed_ids": suppressed_ids[:10],  # 只返回前10个（调试用）
+    }
 
 
 # ── iter432: Cumulative Interference Effect — 累积干扰加速遗忘（Underwood 1957）──

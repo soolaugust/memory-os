@@ -205,6 +205,34 @@ _REGISTRY: dict = {
     "store_vfs.bump_min_project_age_days": (7.0, float, 1.0, 90.0, None,
         "iter433: 应用 Reminiscence Bump 的最短项目年龄（天），项目太新时禁用（避免误判）"),
 
+    # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
+    # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
+    #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。
+    #   机制：检索激活该类别所有竞争记忆 → 强化被选中者（RP+）→ 主动抑制被压制者（RP-）→ RP- 遗忘增加。
+    #   效果：测验后被练习项目增强记忆，相关未练习项目遗忘更多（比基线低 ~10-20%）。
+    #   条件：RIF 要求被抑制者与被检索者属于同一类别（category-based competition）。
+    #
+    # memory-os 等价：
+    #   检索命中 chunk_A → 对同类型（chunk_type）且内容相似（Jaccard >= threshold）的未命中 chunk_B
+    #   施加轻微 stability 惩罚（× rif_factor < 1.0）。
+    #   体现竞争抑制：被频繁检索的 chunk 越来越强，其竞争者越来越弱 → 系统自然专注核心知识。
+    #
+    # OS 类比：CPU cache set-associativity conflict eviction —
+    #   访问 cache line A（命中 set 0, way 0）→ 通过 LRU 策略将同 set 的竞争 cache line B 推向更高 way
+    #   → 再次访问 B 的概率降低（等价于 RIF：A 的命中加速了 B 的驱逐路径）。
+    "scorer.rif_enabled": (True, bool, None, None, None,
+        "iter434: 是否启用 Retrieval-Induced Forgetting — 检索 chunk 时轻微抑制同类相关但未命中的 chunk"),
+    "scorer.rif_factor": (0.95, float, 0.80, 1.0, None,
+        "iter434: RIF 抑制系数（被抑制 chunk stability × rif_factor，默认 0.95 = 5% 下降）"),
+    "scorer.rif_similarity_threshold": (0.25, float, 0.0, 1.0, None,
+        "iter434: RIF 触发的最低 Jaccard 相似度（0.25 = 至少 25% 词汇重叠才视为竞争者）"),
+    "scorer.rif_max_targets": (3, int, 1, 20, None,
+        "iter434: 每个命中 chunk 最多抑制的竞争者数量（按 Jaccard 降序，取前 N 个）"),
+    "scorer.rif_protect_importance": (0.85, float, 0.0, 1.0, None,
+        "iter434: importance >= 此值的 chunk 豁免 RIF 抑制（核心知识不被竞争压制）"),
+    "scorer.rif_protect_types": ("design_constraint,procedure", str, None, None, None,
+        "iter434: 豁免 RIF 的 chunk_type 列表（逗号分隔；保护类型即使相似也不被抑制）"),
+
     # ── iter432: Cumulative Interference Effect — 累积干扰加速遗忘（Underwood 1957）──
     # 认知科学依据：Underwood (1957) "Interference and forgetting" —
     #   遗忘的主要原因是同类型知识的累积干扰（proactive interference from prior lists），
