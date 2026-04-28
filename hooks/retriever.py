@@ -2220,6 +2220,71 @@ def main():
                         pass
                 sys.exit(0)
 
+            # ── iter425: Tip-of-the-Tongue (TOT) — FTS5 零命中边缘激活补救 ────────
+            # OS 类比：Linux mincore(2) fallback to swap — page cache miss 后从 swap 恢复：
+            #   FTS5 miss（无直接词汇匹配）→ 从 entity_map（倒排索引/swap）查 entity 关联 chunk。
+            # 认知科学依据：Brown & McNeill (1966) Tip-of-the-Tongue (TOT) effect —
+            #   完全回忆失败时（FTS5 zero hits），边缘激活仍保留语义线索：
+            #   query 中的实体词在 entity_map 中可找到关联 chunk，触发"周边激活"恢复。
+            # 触发条件：FULL 优先级 + FTS5 零命中（not use_fts 且非 deadline 超时）
+            # 与 spreading_activate 的区别：
+            #   SA 从已命中 chunk 沿 entity_edges 图扩散（需要非空 FTS5 结果）
+            #   TOT 在 FTS5 完全失败时，直接从 query 实体词查 entity_map（零命中补救）
+            _tot_fts_ids: set = set()
+            if (priority == "FULL"
+                    and not use_fts
+                    and not _check_deadline("tot_activate")):
+                try:
+                    from store_vfs import tot_activate as _tot_activate
+                    _tot_result = _tot_activate(
+                        conn, query, project,
+                        existing_ids=_tot_fts_ids,
+                        top_k=effective_top_k,
+                        base_score=0.25,
+                    )
+                    if _tot_result:
+                        # 批量加载 TOT 激活 chunk
+                        _tot_ids = list(_tot_result.keys())
+                        _tot_ph = ",".join("?" * len(_tot_ids))
+                        _tot_rows = conn.execute(
+                            f"SELECT id, summary, content, chunk_type, importance, "
+                            f"last_accessed, access_count, created_at, project, "
+                            f"info_class, lru_gen, emotional_weight, emotional_valence "
+                            f"FROM memory_chunks WHERE id IN ({_tot_ph})",
+                            _tot_ids,
+                        ).fetchall()
+                        _tot_col = ("id", "summary", "content", "chunk_type", "importance",
+                                    "last_accessed", "access_count", "created_at", "project",
+                                    "info_class", "lru_gen", "emotional_weight", "emotional_valence")
+                        _tot_final: list = []
+                        for row in _tot_rows:
+                            c = dict(zip(_tot_col, row))
+                            # 为 _score_chunk 提供兼容字段
+                            c.setdefault("fts_rank", 0.25)
+                            c.setdefault("retrievability", 1.0)
+                            c.setdefault("source_reliability", 0.7)
+                            c.setdefault("verification_status", "pending")
+                            c.setdefault("confidence_score", 0.7)
+                            c.setdefault("encoding_context", {})
+                            activation_bonus = _tot_result.get(c["id"], 0.0)
+                            base = _score_chunk(c, relevance=0.2)
+                            _tot_final.append((base + activation_bonus, c))
+                            _tot_fts_ids.add(c["id"])
+                        if _tot_final:
+                            # 仅在 TOT 激活有结果时跳过 BM25 全表扫描（减少噪音）
+                            _tot_final.sort(key=lambda x: x[0], reverse=True)
+                            top_k = _tot_final[:effective_top_k]
+                            candidates_count = len(_tot_final)
+                            use_fts = True  # 标记有结果，跳过 else 分支后续逻辑
+                            final = _tot_final
+                            _deferred.log(DMESG_DEBUG, "retriever",
+                                          f"tot_activate: {len(_tot_final)} chunks from entity_map "
+                                          f"query_entities={len(query.split())} tot_ids={_tot_ids[:3]}",
+                                          session_id=session_id, project=project)
+                            # 直接跳转到 scoring 之后的输出阶段（避免 BM25 全扫）
+                except Exception:
+                    pass  # TOT 失败不阻塞 BM25 fallback
+
             # ── 迭代141：BM25 Fallback Hard Deadline Pre-check ──────────────────
             # OS 类比：Linux kernel 长路径中的 need_resched() 检查点（schedule()）
             #   内核中长时间运行的路径（如 ext4 文件系统、内存压缩）会在每个"安全点"
@@ -2234,7 +2299,7 @@ def main():
             #     效果等价于 cond_resched()——检测到"截止时间已到"时放弃昂贵操作。
             #   注意：pre_bm25 检查的 is_hard=True 直接退出（无结果），而不像 post_scoring
             #     那样返回已有结果——因为此路径 FTS5 已失败（use_fts=False），没有 FTS5 结果可返回。
-            if _check_deadline("pre_bm25_fallback", is_hard=True):
+            if not use_fts and _check_deadline("pre_bm25_fallback", is_hard=True):
                 # hard deadline 到期 + FTS5 无结果：直接退出，不注入（优于等待 BM25 完成后再退出）
                 conn.close()
                 if len(_deferred) > 0:
@@ -2250,36 +2315,39 @@ def main():
 
             # Fallback：全表扫描 + Python BM25（FTS5 异常时，仅 FULL 优先级）
             # ── 迭代131：BM25 Fallback Global Discount — 跨项目噪音抑制 ──
+            # iter425: TOT 已恢复结果时跳过 BM25 全表扫描（TOT 更精确，BM25 噪音更高）
             # OS 类比：Linux NUMA Aware Scheduling — 强制 cross-node 分配时施加 migration cost
             #   BM25 全表扫描无法区分语义相关性和词汇偶然重叠。
-            #   global 项目高 importance chunk（如 kernel patch design_constraint, imp=0.95）
-            #   通过偶发词汇（如"记忆"出现在 kernel 规则描述中）获得虚高 BM25 relevance，
-            #   与 NUMA penalty(global)=0.05 叠加后仍能排名第一（score=1.299 > any relevant chunk）。
-            #   FTS5 路径无此问题（精确 bigram 匹配，偶发词汇重叠不会命中 FTS5 全词匹配）。
-            #   解决：BM25 fallback 专用 global discount，relevance × bm25_global_discount (0.4)，
-            #   相当于 NUMA distance = 0.6 × base_score，大幅压制跨项目内容的得分上限。
-            _bm25_global_discount = _sysctl("retriever.bm25_global_discount")
-            chunks = store_get_chunks(conn, project, chunk_types=_retrieve_types)
-            if not chunks:
-                sys.exit(0)
-            candidates_count = len(chunks)
+            #   解决：BM25 fallback 专用 global discount，relevance × bm25_global_discount (0.4)
+            if use_fts:
+                # iter425: TOT activated — skip BM25 full-table scan
+                pass
+            else:
+                _bm25_global_discount = _sysctl("retriever.bm25_global_discount")
+            if not use_fts:
+                # iter425: use_fts=False → BM25 full-table scan (TOT did not activate)
+                chunks = store_get_chunks(conn, project, chunk_types=_retrieve_types)
+                if not chunks:
+                    sys.exit(0)
+                candidates_count = len(chunks)
 
-            search_texts = [f"{c['summary']} {c['content']}" for c in chunks]
-            _cv = read_chunk_version()
-            raw_scores = bm25_scores_cached(query, search_texts, chunk_version=_cv)
-            relevance_scores = normalize(raw_scores)
+                search_texts = [f"{c['summary']} {c['content']}" for c in chunks]
+                _cv = read_chunk_version()
+                raw_scores = bm25_scores_cached(query, search_texts, chunk_version=_cv)
+                relevance_scores = normalize(raw_scores)
 
-            final = []
-            for i, chunk in enumerate(chunks):
-                relevance = relevance_scores[i]
-                # iter131: global 项目 chunk 在 BM25 fallback 路径中施加强化折扣
-                # 仅当当前 project 不是 global 时生效（global project 查询不折扣自身内容）
-                if (project != "global"
-                        and chunk.get("project", "") == "global"
-                        and _bm25_global_discount < 1.0):
-                    relevance = relevance * _bm25_global_discount
-                score = _score_chunk(chunk, relevance)
-                final.append((score, chunk))
+                final = []
+                for i, chunk in enumerate(chunks):
+                    relevance = relevance_scores[i]
+                    # iter131: global 项目 chunk 在 BM25 fallback 路径中施加强化折扣
+                    # 仅当当前 project 不是 global 时生效（global project 查询不折扣自身内容）
+                    if (project != "global"
+                            and chunk.get("project", "") == "global"
+                            and _bm25_global_discount < 1.0):
+                        relevance = relevance * _bm25_global_discount
+                    score = _score_chunk(chunk, relevance)
+                    final.append((score, chunk))
+            # else: use_fts=True (TOT activated) — final/candidates_count already set above
 
         # ── 迭代41：Hard Deadline 检查 — 评分完成后如果已超 hard deadline，提前返回 ──
         # OS 类比：deadline scheduler 的 deadline_expired()——请求到期后立即 dispatch

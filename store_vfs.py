@@ -5881,6 +5881,115 @@ _COMPILED_SCHEMA_RULES = [
 ]
 
 
+def tot_activate(
+    conn: "sqlite3.Connection",
+    query: str,
+    project: str,
+    existing_ids: set = None,
+    top_k: int = 5,
+    base_score: float = 0.25,
+) -> dict:
+    """
+    iter425: Tip-of-the-Tongue (TOT) 边缘激活补救
+    Brown & McNeill (1966) — 完全提取失败时的边缘激活状态，
+      通过语义邻居词触发完整回忆。
+
+    认知科学依据：
+      TOT 效应：人在无法完整回忆目标词时，仍能报告该词的首字母、音节数、
+      相关词——这些"边缘信息"（peripheral activation）可触发正确词的恢复。
+      memory-os 等价：FTS5 零命中时，仍可从 query 的实体词在 entity_map
+      中找到关联 chunk，作为"边缘激活"路径，补救零召回场景。
+
+    OS 类比：Linux mincore(2) — page cache miss 时回退 swap 预热：
+      主路径（FTS5）miss → 用 entity_map（类比 swap 分区）尝试恢复关联页。
+      entity_map 是 entity→chunk 的倒排索引，相当于 swap 中保留的"地址映射"。
+
+    与 spreading_activate 的区别：
+      spreading_activate — 从已命中 chunk 沿 entity_edges 图扩散（需要非空 FTS5）
+      tot_activate      — FTS5 完全 miss 时，直接从 query 实体词查 entity_map（零命中补救）
+
+    Args:
+      query:        用户查询字符串
+      project:      项目 ID（None = 全局）
+      existing_ids: 已在候选集中的 chunk ID 集合（去重用）
+      top_k:        最多返回 chunk 数量
+      base_score:   TOT 激活基础分（低于 FTS5 直接命中，但高于纯 BM25 fallback）
+
+    Returns:
+      {chunk_id: activation_score} — 边缘激活 chunk 及其分数
+    """
+    if not query:
+        return {}
+
+    existing_ids = existing_ids or set()
+
+    # 从 query 提取 entity 候选词（英文标识符 + CJK bigram）
+    entity_words: list = []
+    # 英文：>= 3 字符的字母数字标识符（避免噪音短词）
+    for m in re.finditer(r'[a-zA-Z][a-zA-Z0-9_]{2,}', query):
+        entity_words.append(m.group().lower())
+    # CJK bigram：相邻两个汉字
+    cjk_chars = re.sub(r'[^\u4e00-\u9fff]', '', query)
+    for i in range(len(cjk_chars) - 1):
+        entity_words.append(cjk_chars[i:i + 2])
+    # 去重，保留顺序
+    seen: set = set()
+    unique_words: list = []
+    for w in entity_words:
+        if w not in seen:
+            seen.add(w)
+            unique_words.append(w)
+    entity_words = unique_words[:20]  # 最多 20 个实体词，避免查询过慢
+
+    if not entity_words:
+        return {}
+
+    try:
+        # 查询 entity_map：entity_name 包含 query 实体词的 chunk_id
+        # 使用 LIKE 匹配（entity_name 通常是短词，精确匹配或包含匹配）
+        placeholders = ",".join("?" * len(entity_words))
+        if project and project != "global":
+            proj_cond = "AND em.project IN (?, 'global')"
+            proj_params = [project]
+        else:
+            proj_cond = ""
+            proj_params = []
+
+        sql = f"""
+            SELECT em.chunk_id, COUNT(DISTINCT em.entity_name) as match_count
+            FROM entity_map em
+            WHERE LOWER(em.entity_name) IN ({placeholders})
+              {proj_cond}
+            GROUP BY em.chunk_id
+            ORDER BY match_count DESC
+            LIMIT ?
+        """
+        params = entity_words + proj_params + [top_k * 3]
+        rows = conn.execute(sql, params).fetchall()
+
+        if not rows:
+            return {}
+
+        result: dict = {}
+        max_count = max(r[1] for r in rows) if rows else 1
+
+        for chunk_id, match_count in rows:
+            if chunk_id in existing_ids:
+                continue
+            # activation score = base_score × (match_count / max_count)
+            # 多个 entity 词命中同一 chunk → 更高分（类比多线索触发）
+            activation = base_score * (match_count / max_count)
+            result[chunk_id] = round(activation, 4)
+
+            if len(result) >= top_k:
+                break
+
+        return result
+
+    except Exception:
+        return {}
+
+
 def anchor_chunk_schema(
     conn: sqlite3.Connection,
     chunk_id: str,
