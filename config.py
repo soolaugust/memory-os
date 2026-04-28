@@ -231,6 +231,24 @@ _REGISTRY: dict = {
     "store_vfs.rdr_min_importance": (0.5, float, 0.0, 1.0, None,
         "iter435: 触发 RDR 保护的最低 importance 阈值（低重要性 chunk 不受保护，避免噪音积累）"),
 
+    # ── iter436: Output Interference — 同轮注入竞争性遗忘（Roediger 1978）──────────────────────────
+    # 认知科学依据：Roediger (1978) "Recall as a self-limiting process" —
+    #   在同一回忆测试中，回忆早期项目（output）干扰后续项目的工作记忆占用，
+    #   导致越靠后的序列位置的项目巩固效果越差（output interference 累积）。
+    #   Roediger & Schmidt (1980): 同次测试中序列位置 × 遗忘量呈线性关系。
+    #   与 RIF（iter434）区别：RIF=检索事件干扰竞争者（编码竞争）；OI=同次输出中的工作记忆干扰。
+    # OS 类比：Linux BFQ (Budget Fair Queue) dispatch batch budget 消耗 —
+    #   同一 dispatch batch 中，第一个 I/O 请求消耗大部分 budget，后续请求完成的 I/O 减少；
+    #   类比：同轮注入的第一个 chunk 占用工作记忆，后续 chunk 得到更少巩固 budget。
+    "store_vfs.oi_enabled": (True, bool, None, None, None,
+        "iter436: 是否启用 Output Interference — 同轮注入的后序 chunk 受早期 chunk 的工作记忆干扰"),
+    "store_vfs.oi_decay_factor": (0.99, float, 0.90, 1.00, None,
+        "iter436: Output Interference 基础衰减因子（position k 的 chunk: stability × factor^k，默认 0.99）"),
+    "store_vfs.oi_protect_importance": (0.85, float, 0.0, 1.0, None,
+        "iter436: importance >= 此值的 chunk 豁免 Output Interference（核心知识不受输出位置干扰）"),
+    "store_vfs.oi_max_coinjected": (5, int, 2, 20, None,
+        "iter436: 每条 trace 最多处理的同轮注入 chunk 数（超出部分不施加额外 OI 惩罚）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。

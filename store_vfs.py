@@ -7130,6 +7130,14 @@ def sleep_consolidate(
     except Exception:
         pass
 
+    # ── 子操作 5（iter436）：Output Interference — 同轮注入后序 chunk 的工作记忆竞争惩罚 ──
+    # OS 类比：BFQ dispatch batch budget 消耗 — 同 batch 后序 I/O 获得更少 budget
+    try:
+        oi_result = apply_output_interference(conn, project, window_hours=24.0)
+        result["oi_penalized"] = oi_result.get("penalized", 0)
+    except Exception:
+        pass
+
     return result
 
 
@@ -8340,6 +8348,142 @@ def apply_rif_by_summary(
         "total_examined": total_examined,
         "suppressed_ids": suppressed_ids[:10],  # 只返回前10个（调试用）
     }
+
+
+# ── iter436: Output Interference — 同轮注入竞争性遗忘（Roediger 1978）──────────────────
+# 认知科学依据：Roediger (1978) "Recall as a self-limiting process" —
+#   在一次回忆测试中，回忆早期项目（output）会干扰后续项目的提取（output interference）。
+#   机制：早期输出激活该语义领域的竞争记忆，通过抑制机制阻碍后续项目进入工作记忆。
+#   Roediger & Schmidt (1980): 同次测试中，越靠后的序列位置遗忘越多（OI 累积效应）。
+#   与 RIF（iter434）区别：
+#     RIF = 检索事件干扰"未被检索"的竞争者（编码竞争）
+#     OI  = 同次输出中早期项目干扰晚期项目的工作记忆占用（输出干扰）
+#
+# memory-os 等价：
+#   每次检索注入 N 个 chunk（recall_traces.top_k_json 记录），
+#   位置 0 = 最相关/最优先（OS: cache line 命中，无干扰）
+#   位置 k > 0 = 受前 k 个 chunk 的 output interference，巩固效果越来越差。
+#   在 sleep_consolidate 时扫描最近注入记录，对位置 >= 1 的 chunk 施加轻微 stability 惩罚。
+#
+# OS 类比：Linux BFQ (Budget Fair Queue) I/O 批处理 —
+#   同一 dispatch batch 中，第一个 I/O 请求消耗了大部分 budget；
+#   后续请求在 budget 耗尽前完成的 I/O 减少（batch output competition）。
+#   访问 cache line A 后，同 cache set 的 cache line B 在同一 dispatch cycle 中
+#   获得更少的 refill 机会（类比：同轮注入的后续 chunk 巩固机会减少）。
+
+def apply_output_interference(
+    conn: sqlite3.Connection,
+    project: str,
+    window_hours: float = 24.0,
+) -> dict:
+    """
+    iter436: Output Interference — 对同轮注入的后续 chunk 施加轻微 stability 惩罚。
+
+    扫描最近 window_hours 内注入成功的 recall_traces，
+    对每条 trace 的 top_k_json 中 position >= 1 的 chunk（位置越靠后干扰越强）
+    施加递增的 stability 惩罚（× oi_decay_factor ^ position）。
+
+    保护条件：
+      - importance >= oi_protect_importance（核心知识豁免）
+      - oi_enabled=False 时不执行
+      - position 0 的 chunk（最优先）不受影响
+
+    返回：{"penalized": N, "total_examined": N}
+    """
+    import json as _json
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    try:
+        import config as _cfg_oi
+    except ImportError:
+        return {"penalized": 0, "total_examined": 0}
+
+    try:
+        oi_enabled = _cfg_oi.get("store_vfs.oi_enabled")
+        if not oi_enabled:
+            return {"penalized": 0, "total_examined": 0}
+
+        oi_decay_factor = _cfg_oi.get("store_vfs.oi_decay_factor")
+        oi_protect_imp = _cfg_oi.get("store_vfs.oi_protect_importance")
+        oi_max_coinjected = _cfg_oi.get("store_vfs.oi_max_coinjected")
+    except Exception:
+        return {"penalized": 0, "total_examined": 0}
+
+    now = _dt.now(_tz.utc)
+    cutoff_iso = (now - _td(hours=window_hours)).isoformat()
+    now_iso = now.isoformat()
+
+    # 查询最近注入成功的 recall_traces（injected=1，top_k_json 非空）
+    try:
+        traces = conn.execute(
+            """SELECT top_k_json FROM recall_traces
+               WHERE project = ? AND injected = 1
+                 AND top_k_json IS NOT NULL
+                 AND timestamp >= ?
+               ORDER BY timestamp DESC LIMIT 200""",
+            (project, cutoff_iso),
+        ).fetchall()
+    except Exception:
+        return {"penalized": 0, "total_examined": 0}
+
+    penalized = 0
+    total_examined = 0
+
+    # 聚合：同一 chunk 在多条 trace 中出现时，取最靠后的 position（最大干扰）
+    # chunk_id → max_position_across_traces
+    chunk_positions: dict = {}
+
+    for (tkj,) in traces:
+        try:
+            if not tkj:
+                continue
+            items = _json.loads(tkj)
+            if not isinstance(items, list) or len(items) <= 1:
+                continue
+            # 只处理有多个注入 chunk 的 trace（单 chunk 无 OI）
+            n = min(len(items), oi_max_coinjected)
+            for pos in range(1, n):  # position 0 豁免
+                cid = items[pos].get("id") if isinstance(items[pos], dict) else None
+                if cid:
+                    # 取最大 position（最严重干扰）across traces
+                    if cid not in chunk_positions or chunk_positions[cid] < pos:
+                        chunk_positions[cid] = pos
+        except Exception:
+            continue
+
+    if not chunk_positions:
+        return {"penalized": 0, "total_examined": 0}
+
+    total_examined = len(chunk_positions)
+
+    for cid, pos in chunk_positions.items():
+        try:
+            row = conn.execute(
+                "SELECT stability, importance FROM memory_chunks WHERE id=? AND project=?",
+                (cid, project),
+            ).fetchone()
+            if not row:
+                continue
+            stab, imp = float(row[0] or 1.0), float(row[1] or 0.5)
+
+            # 高 importance → 豁免
+            if imp >= oi_protect_imp:
+                continue
+
+            # 惩罚：position 越大，惩罚越强（cumulative: factor^pos）
+            penalty = oi_decay_factor ** pos
+            new_stab = max(0.1, stab * penalty)
+            if abs(new_stab - stab) < 0.0001:
+                continue
+
+            conn.execute(
+                "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=?",
+                (round(new_stab, 4), now_iso, cid),
+            )
+            penalized += 1
+        except Exception:
+            continue
+
+    return {"penalized": penalized, "total_examined": total_examined}
 
 
 # ── iter432: Cumulative Interference Effect — 累积干扰加速遗忘（Underwood 1957）──
