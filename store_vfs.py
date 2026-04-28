@@ -7159,6 +7159,15 @@ def sleep_consolidate(
     except Exception:
         pass
 
+    # ── 子操作 8（iter439）：Encoding Depth Decay Resistance — 深度编码减慢衰减 ──
+    # OS 类比：ext4 extent tree depth — 深层 extent tree 的 inode 驱逐代价更高（更抗 reclaim）
+    try:
+        eddr_result = apply_encoding_depth_decay_resistance(conn, project, stale_days=stale_days)
+        result["eddr_deep_boosted"] = eddr_result.get("deep_boosted", 0)
+        result["eddr_shallow_penalized"] = eddr_result.get("shallow_penalized", 0)
+    except Exception:
+        pass
+
     return result
 
 
@@ -8723,6 +8732,118 @@ def apply_jost_law(
         conn.commit()
 
     return {"adjusted": adjusted, "total_examined": total_examined}
+
+
+# ── iter439: Encoding Depth Decay Resistance — 深度编码减慢衰减（Craik & Tulving 1975）──────────────
+# 认知科学依据：Craik & Tulving (1975) "Depth of processing and the retention of words in
+#   episodic memory" — 深度语义加工产生更强的记忆痕迹，对遗忘曲线有天然抵抗力。
+#   encode_context 中 entity 数量（iter411 LOP proxy）代理编码深度：
+#   entity_count >= eddr_deep_threshold → 深度编码，stability 轻微修复（减慢衰减）。
+#   entity_count <= eddr_shallow_threshold → 浅层编码，stability 轻微惩罚（加速衰减）。
+# OS 类比：Linux ext4 extent tree depth —
+#   深层 extent tree（多 entity）= I/O 代价更高 = kswapd 驱逐优先级更低（更抗衰减）。
+
+def apply_encoding_depth_decay_resistance(
+    conn: sqlite3.Connection,
+    project: str,
+    stale_days: int = 30,
+) -> dict:
+    """
+    iter439: Encoding Depth Decay Resistance — 根据 encode_context 实体数量调整 stability。
+
+    在 sleep_consolidate 中，decay_stability_by_type_with_ci 执行批量衰减后：
+    - 深度编码 chunk（entity_count >= deep_threshold）：轻微恢复 stability，模拟抗遗忘优势。
+    - 浅层编码 chunk（entity_count <= shallow_threshold）：轻微加速衰减，模拟快速遗忘。
+
+    深度修复：new_stab = current_stab × (1 + depth_bonus × 0.03)
+    浅层惩罚：new_stab = current_stab × (1 - shallow_penalty)
+
+    Returns:
+      {"deep_boosted": N, "shallow_penalized": N, "total_examined": N}
+    """
+    try:
+        import config as _cfg_eddr
+    except ImportError:
+        return {"deep_boosted": 0, "shallow_penalized": 0, "total_examined": 0}
+
+    try:
+        if not _cfg_eddr.get("store_vfs.eddr_enabled"):
+            return {"deep_boosted": 0, "shallow_penalized": 0, "total_examined": 0}
+        eddr_deep_threshold = _cfg_eddr.get("store_vfs.eddr_deep_threshold")    # 5
+        eddr_shallow_threshold = _cfg_eddr.get("store_vfs.eddr_shallow_threshold")  # 1
+        eddr_max_depth_bonus = _cfg_eddr.get("store_vfs.eddr_max_depth_bonus")  # 0.15
+        eddr_shallow_penalty = _cfg_eddr.get("store_vfs.eddr_shallow_penalty")  # 0.05
+    except Exception:
+        return {"deep_boosted": 0, "shallow_penalized": 0, "total_examined": 0}
+
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    now = _dt.now(_tz.utc)
+    now_iso = now.isoformat()
+    cutoff_stale = (now - _td(days=stale_days)).isoformat()
+
+    try:
+        # 候选：stale + access_count < 2（被 decay 扫描过的）
+        rows = conn.execute(
+            """SELECT id, stability, encode_context, importance
+               FROM memory_chunks
+               WHERE project = ?
+                 AND last_accessed < ?
+                 AND access_count < 2
+                 AND COALESCE(stability, 0.1) > 0.1
+               LIMIT 500""",
+            (project, cutoff_stale),
+        ).fetchall()
+    except Exception:
+        return {"deep_boosted": 0, "shallow_penalized": 0, "total_examined": 0}
+
+    total_examined = len(rows)
+    deep_boosted = 0
+    shallow_penalized = 0
+
+    for row in rows:
+        try:
+            cid, stab, encode_context, importance = row
+            stab_f = float(stab or 0.1)
+            if stab_f <= 0.1:
+                continue
+
+            # 计算 entity 数量（encode_context 是逗号分隔字符串）
+            if encode_context:
+                entity_count = len([e.strip() for e in encode_context.split(',') if e.strip()])
+            else:
+                entity_count = 0
+
+            new_stab = stab_f
+            if entity_count >= eddr_deep_threshold:
+                # 深度编码：stability 轻微修复（conservative 系数 0.03）
+                raw_bonus = min(eddr_max_depth_bonus, entity_count / 10.0 * eddr_max_depth_bonus)
+                new_stab = min(365.0, stab_f * (1.0 + raw_bonus * 0.03))
+                if new_stab > stab_f + 0.0001:
+                    deep_boosted += 1
+                else:
+                    continue
+            elif entity_count <= eddr_shallow_threshold:
+                # 浅层编码：轻微加速衰减
+                new_stab = max(0.1, stab_f * (1.0 - eddr_shallow_penalty))
+                if new_stab < stab_f - 0.0001:
+                    shallow_penalized += 1
+                else:
+                    continue
+            else:
+                continue  # 中等深度：不干预
+
+            conn.execute(
+                "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=?",
+                (round(new_stab, 4), now_iso, cid),
+            )
+        except Exception:
+            continue
+
+    if deep_boosted > 0 or shallow_penalized > 0:
+        conn.commit()
+
+    return {"deep_boosted": deep_boosted, "shallow_penalized": shallow_penalized,
+            "total_examined": total_examined}
 
 
 # ── iter432: Cumulative Interference Effect — 累积干扰加速遗忘（Underwood 1957）──

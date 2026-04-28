@@ -321,6 +321,36 @@ _REGISTRY: dict = {
     "store_vfs.jost_min_age_days": (14, int, 3, 365, None,
         "iter438: 应用 Jost's Law 的最小 chunk 年龄（天），默认 14 天"),
 
+    # ── iter439: Encoding Depth Decay Resistance — 深度编码减慢衰减（Craik & Tulving 1975）──────────────
+    # 认知科学依据：Craik & Tulving (1975) "Depth of processing and the retention of words in
+    #   episodic memory" (JEPG) — 深度加工（语义联想、自我参照、问题解答）比浅层加工（形状、语音）
+    #   产生更强的记忆痕迹，且深度编码记忆对时间性遗忘更有抵抗力（retention advantage）。
+    #   Craik & Lockhart (1972) Levels of Processing framework：编码深度 = 语义分析深度，
+    #   深度越深 → 记忆痕迹越强 → 保持时间越长。
+    #   实验数据：深度编码条件下 24h 后保留率比浅层编码高 50-80%（Craik & Tulving 1975, Exp. 2）。
+    #
+    # memory-os 等价：
+    #   encode_context 中的 entity 数量代理编码深度（iter411 LOP）：
+    #   entity_count >= eddr_deep_threshold（5）→ 深度编码，decay 减速（stability × 小幅提振）。
+    #   entity_count <= eddr_shallow_threshold（1）→ 浅层编码，decay 轻微加速（stability × 轻微惩罚）。
+    #   与 iter411（LOP 写入时加成）区别：iter411 = 写入时一次性 stability 加成；
+    #   iter439 = 运行时每次 sleep_consolidate 持续减速/加速（类比慢波睡眠记忆巩固的深浅差异）。
+    #
+    # OS 类比：Linux ext4 extent tree depth —
+    #   extent tree depth = 1（单层 extent）的文件，随机 I/O 需要 1次 block 读取；
+    #   depth = 3（三层 htree）的大文件需要 3次 block 读取（更深 = 更贵 = 更不愿意驱逐）。
+    #   深度编码 chunk（多 entity）= 深 extent tree = kswapd 驱逐代价高 = 更慢衰减。
+    "store_vfs.eddr_enabled": (True, bool, None, None, None,
+        "iter439: 是否启用 Encoding Depth Decay Resistance — 深度编码 chunk 衰减更慢，浅层编码加速"),
+    "store_vfs.eddr_deep_threshold": (5, int, 2, 20, None,
+        "iter439: 触发深度编码保护的最低 entity 数量（encode_context 中的 token 数，默认 5）"),
+    "store_vfs.eddr_shallow_threshold": (1, int, 0, 5, None,
+        "iter439: 浅层编码的最高 entity 数量（entity_count <= 此值触发轻微加速衰减，默认 1）"),
+    "store_vfs.eddr_max_depth_bonus": (0.15, float, 0.0, 0.50, None,
+        "iter439: 深度编码 stability 最大修复系数（deep_bonus = min(max_depth_bonus, entity_count/10 × scale)）"),
+    "store_vfs.eddr_shallow_penalty": (0.05, float, 0.0, 0.20, None,
+        "iter439: 浅层编码 stability 轻微衰减系数（shallow chunk stability × (1 - penalty)，默认 0.05）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。
