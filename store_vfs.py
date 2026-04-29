@@ -13,6 +13,7 @@ import sqlite3
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, List
+import config
 
 # ── 迭代154：Module-level bm25 imports — 消除 _fts5_escape/_cjk_tokenize 的内联 import 开销 ──
 # OS 类比：ELF 动态链接器 GOT/PLT — 符号在模块加载时一次性绑定，调用时直接查表，
@@ -425,6 +426,23 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     #   -1.0 = 上一 session 末尾写入（doorway effect → 短暂 retrieval penalty）
     _safe_add_column(conn, "memory_chunks", "boundary_proximity", "REAL DEFAULT 0.0")
     _safe_add_column(conn, "memory_chunks", "session_type_history", "TEXT DEFAULT ''")  # iter459 CIE
+
+    # ── iter461: HAC — chunk_coactivation 表（Hebbian 共激活次数追踪）──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS chunk_coactivation (
+            chunk_a     TEXT NOT NULL,
+            chunk_b     TEXT NOT NULL,
+            project     TEXT NOT NULL,
+            coact_count INTEGER DEFAULT 1,
+            last_coact  TEXT,
+            PRIMARY KEY (chunk_a, chunk_b, project)
+        )
+    """)
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_coact_a ON chunk_coactivation(chunk_a, project)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_coact_b ON chunk_coactivation(chunk_b, project)")
+    except Exception:
+        pass
 
     # ── 迭代317：knowledge_versions — 前摄干扰控制（Proactive Interference）──
     # OS 类比：Linux kernel module versioning — 加载新模块版本时标记旧版本为
@@ -2063,6 +2081,59 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
                                  (_eie_new, d["id"]))
     except Exception:
         pass  # EIE 写入失败不阻塞主流程
+
+    # ── iter462: SMB — Source Monitoring Boost（有明确来源的记忆编码更强，Johnson et al. 1993）──
+    # OS 类比：Linux inode i_generation — 有 generation 追踪的 inode 在 fsck 后可更快恢复
+    try:
+        if config.get("store_vfs.smb_enabled"):
+            _smb_source = d.get("source_session") or ""
+            if _smb_source.strip():  # 非空来源
+                _smb_imp = float(d.get("importance") or 0.0)
+                _smb_min_imp = config.get("store_vfs.smb_min_importance")
+                if _smb_imp >= _smb_min_imp:
+                    _smb_row = conn.execute(
+                        "SELECT stability FROM memory_chunks WHERE id=?", (d["id"],)
+                    ).fetchone()
+                    _smb_base = float(_smb_row[0]) if _smb_row else float(d.get("stability") or 1.0)
+                    _smb_factor = config.get("store_vfs.smb_boost_factor")   # 1.08
+                    _smb_max = config.get("store_vfs.smb_max_boost")          # 0.12
+                    _smb_raw = _smb_base * _smb_factor
+                    _smb_capped = min(_smb_base * (1.0 + _smb_max), _smb_raw)
+                    _smb_new = min(365.0, _smb_capped)
+                    conn.execute("UPDATE memory_chunks SET stability=? WHERE id=?",
+                                 (_smb_new, d["id"]))
+    except Exception:
+        pass  # SMB 写入失败不阻塞主流程
+
+    # ── iter464: KDEE — Keyword Density Encoding Effect（高信息密度内容编码更深，Craik & Lockhart 1972）──
+    # OS 类比：Linux ext4 extent tree — dense inode (many unique extents) → deeper B-tree → 更鲁棒检索
+    try:
+        if config.get("store_vfs.kdee_enabled"):
+            _kdee_imp = float(d.get("importance") or 0.0)
+            _kdee_min_imp = config.get("store_vfs.kdee_min_importance")
+            if _kdee_imp >= _kdee_min_imp:
+                _kdee_content = (d.get("content") or "").lower()
+                import re as _re_kdee
+                _kdee_words = _re_kdee.findall(r'\b\w+\b', _kdee_content)
+                _kdee_total = len(_kdee_words)
+                _kdee_min_words = config.get("store_vfs.kdee_min_words")
+                if _kdee_total >= _kdee_min_words:
+                    _kdee_unique_ratio = len(set(_kdee_words)) / _kdee_total
+                    _kdee_min_density = config.get("store_vfs.kdee_min_density")
+                    if _kdee_unique_ratio >= _kdee_min_density:
+                        _kdee_row = conn.execute(
+                            "SELECT stability FROM memory_chunks WHERE id=?", (d["id"],)
+                        ).fetchone()
+                        _kdee_base = float(_kdee_row[0]) if _kdee_row else float(d.get("stability") or 1.0)
+                        _kdee_factor = config.get("store_vfs.kdee_boost_factor")  # 1.10
+                        _kdee_max = config.get("store_vfs.kdee_max_boost")         # 0.20
+                        _kdee_raw = _kdee_base * _kdee_factor
+                        _kdee_capped = min(_kdee_base * (1.0 + _kdee_max), _kdee_raw)
+                        _kdee_new = min(365.0, _kdee_capped)
+                        conn.execute("UPDATE memory_chunks SET stability=? WHERE id=?",
+                                     (_kdee_new, d["id"]))
+    except Exception:
+        pass  # KDEE 写入失败不阻塞主流程
 
 
 # ── iter403：Cue-Dependent Forgetting — Context-Sensitive Retrieval（Tulving 1974）──
@@ -5243,6 +5314,34 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
     except Exception:
         pass
 
+    # ── iter461: HAC — 记录共激活事件（Hebbian Co-Activation Consolidation）──────────────
+    # Hebb (1949): cells that fire together, wire together → co-accessed chunks reinforce each other.
+    # OS 类比：Linux THP khugepaged — 共同访问的 pages 被合并为 huge page
+    try:
+        if len(chunk_ids) >= 2:
+            _hac_proj_row = conn.execute(
+                "SELECT project FROM memory_chunks WHERE id=?", (chunk_ids[0],)
+            ).fetchone()
+            if _hac_proj_row:
+                _hac_proj = _hac_proj_row[0] if isinstance(_hac_proj_row, (list, tuple)) else _hac_proj_row["project"]
+                record_coactivation(conn, chunk_ids, _hac_proj, now_iso=now_iso)
+    except Exception:
+        pass
+
+    # ── iter463: OIE — Output Interference Effect（顺序检索后位 chunk 受前项输出干扰）──────
+    # Postman & Underwood (1973): serial output interference — later items penalized.
+    # OS 类比：Linux TLB invalidation cascade — later TLB entries suffer higher invalidation latency
+    try:
+        if len(chunk_ids) >= 2:
+            _oie_proj_row = conn.execute(
+                "SELECT project FROM memory_chunks WHERE id=?", (chunk_ids[0],)
+            ).fetchone()
+            if _oie_proj_row:
+                _oie_proj = _oie_proj_row[0] if isinstance(_oie_proj_row, (list, tuple)) else _oie_proj_row["project"]
+                apply_output_interference_effect(conn, chunk_ids, _oie_proj, now_iso=now_iso)
+    except Exception:
+        pass
+
 def insert_trace(conn: sqlite3.Connection, trace_dict: dict) -> None:
     """写入 recall_traces 记录。迭代65：新增 ftrace_json 阶段级追踪。"""
     d = trace_dict
@@ -7443,6 +7542,14 @@ def sleep_consolidate(
     except Exception:
         pass
 
+    # ── 子操作 23（iter461）：Hebbian Co-Activation Consolidation — 共同激活的 chunk 在 sleep 时相互加固 ──
+    # OS 类比：Linux THP promotion — khugepaged 将共同访问的 pages 合并为 huge page，降低 TLB miss
+    try:
+        hac_result = apply_hebbian_coactivation_consolidation(conn, project)
+        result["hac_boosted"] = hac_result.get("hac_boosted", 0)
+    except Exception:
+        pass
+
     return result
 
 
@@ -8943,6 +9050,195 @@ def apply_contextual_interference_effect(
 
         result["cie_boosted"] = boosted
         result["total_examined"] = examined
+        return result
+    except Exception:
+        return result
+
+
+def record_coactivation(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+    project: str,
+    now_iso: str = None,
+) -> None:
+    """
+    iter461: HAC 辅助函数 — 记录 chunk 对的共激活事件到 chunk_coactivation 表。
+    在 update_accessed() 中调用（列表 >= 2 个 chunk 时）。
+    """
+    if len(chunk_ids) < 2:
+        return
+    if now_iso is None:
+        from datetime import datetime as _dt, timezone as _tz
+        now_iso = _dt.now(_tz.utc).isoformat()
+    try:
+        for i in range(len(chunk_ids)):
+            for j in range(i + 1, len(chunk_ids)):
+                a, b = sorted([chunk_ids[i], chunk_ids[j]])
+                conn.execute(
+                    """INSERT INTO chunk_coactivation (chunk_a, chunk_b, project, coact_count, last_coact)
+                       VALUES (?, ?, ?, 1, ?)
+                       ON CONFLICT(chunk_a, chunk_b, project) DO UPDATE SET
+                         coact_count = coact_count + 1,
+                         last_coact  = excluded.last_coact
+                    """,
+                    (a, b, project, now_iso),
+                )
+    except Exception:
+        pass
+
+
+def apply_hebbian_coactivation_consolidation(
+    conn: "sqlite3.Connection",
+    project: str,
+) -> dict:
+    """
+    iter461: Hebbian Co-Activation Consolidation (HAC) — 共同激活的 chunk 在 sleep 时相互加固。
+
+    认知科学依据：Hebb (1949) "The Organization of Behavior" —
+      "Cells that fire together, wire together" — 海马 Hebbian 可塑性：
+      两个神经元同时激活 → 突触连接增强（Long-Term Potentiation, LTP）。
+      Zeithamova et al. (2012): 睡眠期间共激活记忆对通过 SWR replay 相互巩固，
+      形成 schema-linked memory network（r=0.61, hippocampal-neocortical replay）。
+
+    OS 类比：Linux THP (Transparent Huge Pages) promotion —
+      同一 2MB PMD 内频繁共同访问的 pages 被 khugepaged 合并为 huge page，
+      降低 TLB miss 率（共激活 → 协同晋升到更稳定的存储层）。
+
+    Returns:
+      {"hac_boosted": N, "total_pairs_examined": M}
+    """
+    result = {"hac_boosted": 0, "total_pairs_examined": 0}
+    try:
+        import config as _cfg
+        from datetime import datetime as _dt, timezone as _tz
+        if not _cfg.get("store_vfs.hac_enabled"):
+            return result
+
+        min_coact   = int(_cfg.get("store_vfs.hac_min_coact"))       # 2
+        boost_factor = float(_cfg.get("store_vfs.hac_boost_factor")) # 1.05
+        max_boost   = float(_cfg.get("store_vfs.hac_max_boost"))      # 0.15
+        min_imp     = float(_cfg.get("store_vfs.hac_min_importance")) # 0.35
+        now_iso     = _dt.now(_tz.utc).isoformat()
+
+        # 找出共激活次数达到阈值的 chunk 对
+        pairs = conn.execute(
+            "SELECT chunk_a, chunk_b FROM chunk_coactivation "
+            "WHERE project=? AND coact_count >= ?",
+            (project, min_coact),
+        ).fetchall()
+        result["total_pairs_examined"] = len(pairs)
+
+        # 收集需要 boost 的 chunk ids（去重）
+        candidate_ids = set()
+        for row in pairs:
+            candidate_ids.add(row[0])
+            candidate_ids.add(row[1])
+        if not candidate_ids:
+            return result
+
+        # 获取候选 chunk 的 stability 和 importance
+        ph = ",".join("?" * len(candidate_ids))
+        cands = conn.execute(
+            f"SELECT id, stability, importance FROM memory_chunks "
+            f"WHERE id IN ({ph}) AND project=?",
+            list(candidate_ids) + [project],
+        ).fetchall()
+
+        boosted = 0
+        for row in cands:
+            cid = row[0]
+            stab = float(row[1] or 1.0)
+            imp = float(row[2] or 0.0)
+            if imp < min_imp:
+                continue
+            raw_new = stab * boost_factor
+            capped = min(stab * (1.0 + max_boost), raw_new)
+            new_stab = min(365.0, capped)
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=? AND project=?",
+                    (round(new_stab, 6), now_iso, cid, project),
+                )
+                boosted += 1
+
+        result["hac_boosted"] = boosted
+        return result
+    except Exception:
+        return result
+
+
+def apply_output_interference_effect(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+    project: str,
+    now_iso: str = None,
+) -> dict:
+    """
+    iter463: Output Interference Effect (OIE) — 顺序检索列表中后续 chunk 受前项输出干扰。
+
+    认知科学依据：Postman & Underwood (1973) "Critical issues in interference theory" —
+      顺序回忆（串行检索）中，后位项目受前位项目的"输出干扰"（output interference）。
+      Roediger (1974): 自由回忆中，回忆第 N 个词后，第 N+1 个词可及性下降约 5-8%。
+      Smith et al. (1978): 顺序输出干扰随列表长度增大而累积（serial position effect）。
+
+    OS 类比：Linux TLB invalidation cascade —
+      顺序 shootdown 多个 TLB entry 时，后续 entry 因 pipeline stall 累积而经历
+      更高的 invalidation latency（顺序依赖代价递增）；
+      IPI (Inter-Processor Interrupt) 后期 entries 遇到更多 broadcast collision。
+
+    Returns:
+      {"oie_penalized": N, "total_examined": M}
+    """
+    result = {"oie_penalized": 0, "total_examined": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        from datetime import datetime as _dt, timezone as _tz
+        if not _cfg.get("store_vfs.oie_enabled"):
+            return result
+
+        min_list_len = int(_cfg.get("store_vfs.oie_min_list_len"))   # 3
+        max_penalty  = float(_cfg.get("store_vfs.oie_max_penalty"))  # 0.05
+        min_imp      = float(_cfg.get("store_vfs.oie_min_importance"))# 0.25
+
+        if len(chunk_ids) < min_list_len:
+            return result
+        if now_iso is None:
+            now_iso = _dt.now(_tz.utc).isoformat()
+
+        n = len(chunk_ids)
+        penalized = 0
+
+        for i, cid in enumerate(chunk_ids):
+            position_ratio = i / (n - 1)  # 0.0 (first) to 1.0 (last)
+            if position_ratio <= 0.0:
+                continue  # first item: no penalty
+            penalty = position_ratio * max_penalty
+            if penalty <= 0.0:
+                continue
+
+            row = conn.execute(
+                "SELECT stability, importance FROM memory_chunks WHERE id=? AND project=?",
+                (cid, project),
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+            if imp < min_imp:
+                continue
+
+            result["total_examined"] += 1
+            new_stab = max(0.1, stab * (1.0 - penalty))
+            if new_stab < stab - 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=? AND project=?",
+                    (round(new_stab, 6), now_iso, cid, project),
+                )
+                penalized += 1
+
+        result["oie_penalized"] = penalized
         return result
     except Exception:
         return result

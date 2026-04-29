@@ -1317,6 +1317,87 @@ _REGISTRY: dict = {
     "store_vfs.ssde_min_importance": (0.45, float, 0.0, 1.0, None,
         "iter460: 触发 SSDE 的最低 importance 阈值（低重要性 chunk 不参与类型差异化巩固，默认 0.45）"),
 
+    # ── iter461: Hebbian Co-Activation Consolidation (HAC) — 共同激活的 chunk 在 sleep 时相互加固 ──
+    # 认知科学依据：Hebb (1949) "The Organization of Behavior" — "Cells that fire together, wire together"
+    #   海马 Hebbian 可塑性：两个神经元同时激活 → 突触连接增强（LTP）。
+    #   记忆网络中，共同被检索的知识片段形成更强的关联（Schema Theory, Bartlett 1932）。
+    #   Zeithamova et al. (2012): 睡眠期间共激活的记忆对通过 SWR replay 相互巩固。
+    # memory-os 等价：
+    #   同一 update_accessed() 调用中出现的 chunk_ids → 在 chunk_coactivation 表记录共激活次数；
+    #   sleep_consolidate 时，共激活次数 >= hac_min_coact 的 chunk 对，各自 stability × hac_boost_factor。
+    # OS 类比：Linux THP (Transparent Huge Pages) promotion —
+    #   同一 2MB 区域频繁被共同访问的页面 → 被透明提升为 huge page（降低 TLB miss，增强保留优先级）。
+    "store_vfs.hac_enabled": (True, bool, None, None, None,
+        "iter461: 是否启用 Hebbian Co-Activation Consolidation — 共同激活的 chunk 在 sleep 时相互加固"),
+    "store_vfs.hac_min_coact": (2, int, 1, 20, None,
+        "iter461: 触发 HAC 的最低共激活次数阈值（共激活 >= 此值时在 sleep 获得加成，默认 2）"),
+    "store_vfs.hac_boost_factor": (1.05, float, 1.0, 1.30, None,
+        "iter461: HAC stability 加成系数（stability × hac_boost_factor，默认 1.05 = 5% 加成）"),
+    "store_vfs.hac_max_boost": (0.15, float, 0.0, 0.40, None,
+        "iter461: HAC 最大加成上限（stability 最多增加 hac_max_boost 比例，默认 0.15 = 15%）"),
+    "store_vfs.hac_min_importance": (0.35, float, 0.0, 1.0, None,
+        "iter461: 触发 HAC 的最低 importance 阈值（低重要性 chunk 不参与共激活巩固，默认 0.35）"),
+
+    # ── iter462: Source Monitoring Boost (SMB) — 有来源溯源的记忆编码更强（Johnson et al. 1993）──
+    # 认知科学依据：Johnson, Hashtroudi & Lindsay (1993) "Source monitoring" (Psychological Bulletin) —
+    #   source monitoring = 区分"在哪里/什么情境下学到的"能力。
+    #   有清晰来源的记忆（episodic + semantic 双重标签）比来源模糊的记忆遗忘更慢。
+    #   Lindsay (2008): 来源清晰度与记忆精确度正相关（r=0.48），因为额外编码维度 = 更多检索线索。
+    # memory-os 等价：
+    #   insert_chunk 时，source_session 非空 → chunk 有明确来源 → stability × smb_boost_factor。
+    #   source_session 空 = 无法溯源 = 较弱编码。
+    # OS 类比：Linux inode i_generation — 有 generation 追踪的 inode 在 fsck 后可更快恢复（
+    #   溯源信息完整 = 更鲁棒的文件系统状态 = 更低恢复成本）。
+    "store_vfs.smb_enabled": (True, bool, None, None, None,
+        "iter462: 是否启用 Source Monitoring Boost — 有明确来源的 chunk 获得 stability 加成"),
+    "store_vfs.smb_boost_factor": (1.08, float, 1.0, 1.30, None,
+        "iter462: SMB stability 加成系数（source_session 非空时 stability × smb_boost_factor，默认 1.08）"),
+    "store_vfs.smb_max_boost": (0.12, float, 0.0, 0.30, None,
+        "iter462: SMB 最大加成上限（stability 最多增加 smb_max_boost 比例，默认 0.12）"),
+    "store_vfs.smb_min_importance": (0.30, float, 0.0, 1.0, None,
+        "iter462: 触发 SMB 的最低 importance 阈值（低重要性 chunk 不参与来源监控加成，默认 0.30）"),
+
+    # ── iter463: Output Interference Effect (OIE) — 顺序检索中后续 chunk 受前项干扰（Postman 1971）──
+    # 认知科学依据：Postman & Underwood (1973) "Critical issues in interference theory" —
+    #   顺序回忆（串行检索）中，后位项目受前位项目输出干扰（output interference）。
+    #   Roediger (1974): 自由回忆中，回忆第 N 个词后，第 N+1 个词的可及性下降约 5-8%。
+    # memory-os 等价：
+    #   update_accessed(chunk_ids=[c1,c2,...,cN]) 时，第 i 位置（0-based）的 chunk
+    #   受 (i/N) × oie_max_penalty 比例的 stability 惩罚；第一个 chunk 无惩罚。
+    # OS 类比：Linux TLB invalidation cascade — 顺序 shootdown 多个 TLB entry 时，
+    #   后续 entry 因 pipeline stall 累积而经历更高的 invalidation latency（顺序依赖代价递增）。
+    "store_vfs.oie_enabled": (True, bool, None, None, None,
+        "iter463: 是否启用 Output Interference Effect — 顺序检索中后续 chunk 受前项干扰"),
+    "store_vfs.oie_max_penalty": (0.05, float, 0.0, 0.20, None,
+        "iter463: OIE 最大惩罚系数（列表末尾 chunk stability 最多降低 oie_max_penalty 比例，默认 0.05 = 5%）"),
+    "store_vfs.oie_min_list_len": (3, int, 2, 20, None,
+        "iter463: 触发 OIE 的最小 chunk_ids 列表长度（列表长度 < 此值时不应用 OIE，默认 3）"),
+    "store_vfs.oie_min_importance": (0.25, float, 0.0, 1.0, None,
+        "iter463: 触发 OIE 的最低 importance 阈值（低重要性 chunk 不受 OIE 惩罚，默认 0.25）"),
+
+    # ── iter464: Keyword Density Encoding Effect (KDEE) — 信息密度高的内容编码更深（Craik & Lockhart 1972）──
+    # 认知科学依据：Craik & Lockhart (1972) "Levels of processing" (Journal of Verbal Learning) —
+    #   深度加工（semantic processing）比浅层加工（phonological/orthographic）产生更持久的记忆痕迹。
+    #   信息密度高（unique words / total words 比率高）= 需要更深的语义处理 = 更强编码。
+    #   Kintsch (1974): 文本命题密度与长期记忆保留量正相关（r=0.62）。
+    # memory-os 等价：
+    #   insert_chunk 时，计算 content 的 unique_word_ratio = len(unique_words) / max(1, len(words))；
+    #   unique_word_ratio >= kdee_min_density → stability × kdee_boost_factor（一次性深度编码加成）。
+    # OS 类比：Linux ext4 extent tree depth — 有大量唯一文件块（extent）的 inode 具有更深的 B-tree
+    #   索引结构，提供更鲁棒的随机访问性能（信息密度高 = 更深索引 = 更快检索）。
+    "store_vfs.kdee_enabled": (True, bool, None, None, None,
+        "iter464: 是否启用 Keyword Density Encoding Effect — 高信息密度内容获得 stability 加成"),
+    "store_vfs.kdee_min_density": (0.60, float, 0.0, 1.0, None,
+        "iter464: 触发 KDEE 的最低 unique_word_ratio 阈值（unique_words/total_words >= 此值，默认 0.60）"),
+    "store_vfs.kdee_min_words": (6, int, 1, 50, None,
+        "iter464: 触发 KDEE 的最少词数（content 总词数 < 此值时不计算密度，默认 6）"),
+    "store_vfs.kdee_boost_factor": (1.10, float, 1.0, 1.50, None,
+        "iter464: KDEE stability 加成系数（high-density content stability × kdee_boost_factor，默认 1.10）"),
+    "store_vfs.kdee_max_boost": (0.20, float, 0.0, 0.40, None,
+        "iter464: KDEE 最大加成上限（stability 最多增加 kdee_max_boost 比例，默认 0.20）"),
+    "store_vfs.kdee_min_importance": (0.30, float, 0.0, 1.0, None,
+        "iter464: 触发 KDEE 的最低 importance 阈值（低重要性 chunk 不参与密度编码加成，默认 0.30）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。

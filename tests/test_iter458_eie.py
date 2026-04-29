@@ -175,14 +175,14 @@ def test_ei5_boost_factor_1_15(conn):
     eie_max_boost = config.get("store_vfs.eie_max_boost")         # 0.30
     base = 5.0
 
-    # baseline：不触发 EIE（0 个连接词）
-    content_base = "The system encountered an issue with the config file."
+    # baseline：不触发 EIE（0 个连接词，低密度避免 KDEE）
+    content_base = "the the the the the the the the the the the the the"
     chunk_base = _make_chunk("eie_5_base", content=content_base, importance=0.6, stability=base)
     insert_chunk(conn, chunk_base)
     stab_base = _get_stability(conn, "eie_5_base")
 
-    # EIE 分支：2 个连接词触发
-    content_eie = "This happens because of X. Therefore we should do Y."
+    # EIE 分支：2 个连接词触发（低密度内容避免 KDEE 同时触发）
+    content_eie = "the the the the because the the the the therefore the the the"
     chunk_eie = _make_chunk("eie_5_eie", content=content_eie, importance=0.6, stability=base)
     insert_chunk(conn, chunk_eie)
     stab_eie = _get_stability(conn, "eie_5_eie")
@@ -210,10 +210,11 @@ def test_ei6_max_boost_cap(conn):
 
     eie_max_boost = config.get("store_vfs.eie_max_boost")  # 0.30
     base = 5.0
-    content = "This happens because of X. Therefore we should do Y. Hence the result."
+    # 低密度内容（重复词多）避免 KDEE 同时触发，只有连接词 because/therefore/hence 触发 EIE
+    content = "the the the the because the therefore the the hence the the the"
 
     # baseline（无连接词）
-    content_base = "The system was updated and the issue was resolved."
+    content_base = "the the the the the the the the the the the the the the"
     chunk_base = _make_chunk("eie_6_base", content=content_base, importance=0.6, stability=base)
     with mock.patch.object(config, 'get', side_effect=patched_get_large):
         insert_chunk(conn, chunk_base)
@@ -246,14 +247,14 @@ def test_ei7_stability_cap_365(conn):
     eie_max_boost = config.get("store_vfs.eie_max_boost")  # 0.30
     base = 5.0
 
-    # baseline（无连接词）
-    content_base = "The system config was updated and the issue was resolved."
+    # baseline（无连接词，低密度）
+    content_base = "the the the the the the the the the the the the the"
     chunk_base = _make_chunk("eie_7_base", content=content_base, importance=0.8, stability=base)
     insert_chunk(conn, chunk_base)
     stab_base = _get_stability(conn, "eie_7_base")
 
-    # EIE chunk（2 个连接词触发 EIE）
-    content_eie = "This happens because of X. Therefore we should do Y."
+    # EIE chunk（2 个连接词触发 EIE，低密度避免 KDEE 同时触发）
+    content_eie = "the the the the because the the the therefore the the the"
     chunk_eie = _make_chunk("eie_7_eie", content=content_eie, importance=0.8, stability=base)
     insert_chunk(conn, chunk_eie)
     stab_eie = _get_stability(conn, "eie_7_eie")

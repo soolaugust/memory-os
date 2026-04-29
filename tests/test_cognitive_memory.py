@@ -236,10 +236,13 @@ def test_sleep_consolidate_boosts_active_chunks(conn):
 def test_sleep_consolidate_decays_stale_chunks(conn):
     """长期未访问 chunk stability × decay。"""
     # last_accessed 在 31 天前（超过 stale_days=30）
-    _insert_chunk(conn, "c_stale", "过时模块", access_count=0, stability=14.0,
+    # 使用 chunk_type="episodic"（不在 SSDE 类型列表中），避免 SSDE 加成干扰
+    _insert_chunk(conn, "c_stale", "过时模块", chunk_type="episodic",
+                  access_count=0, stability=14.0,
                   last_accessed_days_ago=31)
     # 近期访问 chunk 不受 decay
-    _insert_chunk(conn, "c_recent", "近期模块", access_count=3, stability=14.0,
+    _insert_chunk(conn, "c_recent", "近期模块", chunk_type="episodic",
+                  access_count=3, stability=14.0,
                   last_accessed_days_ago=1)
 
     result = sleep_consolidate(conn, project="test", session_id="sess",
