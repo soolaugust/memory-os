@@ -424,6 +424,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     #    0.0 = 中性（会话中间写入，无边界效应）
     #   -1.0 = 上一 session 末尾写入（doorway effect → 短暂 retrieval penalty）
     _safe_add_column(conn, "memory_chunks", "boundary_proximity", "REAL DEFAULT 0.0")
+    _safe_add_column(conn, "memory_chunks", "session_type_history", "TEXT DEFAULT ''")  # iter459 CIE
 
     # ── 迭代317：knowledge_versions — 前摄干扰控制（Proactive Interference）──
     # OS 类比：Linux kernel module versioning — 加载新模块版本时标记旧版本为
@@ -2034,6 +2035,34 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
             )
     except Exception:
         pass  # PME 写入失败不阻塞主流程
+
+    # ── iter458: Elaborative Interrogation Effect — 因果解释型 chunk 获得 stability 加成（Pressley et al. 1992）──
+    # 因果连接词密度代理"因果性解释质量"，高密度 = 深度推理编码 → stability 加成
+    try:
+        if config.get("store_vfs.eie_enabled"):
+            _eie_importance = float(d.get("importance") or 0.0)
+            _eie_min_imp = config.get("store_vfs.eie_min_importance")
+            if _eie_importance >= _eie_min_imp:
+                _eie_content = (d.get("content") or "") + " " + (d.get("summary") or "")
+                _eie_connectives = [
+                    "because", "therefore", "causes", "hence", "consequently",
+                    "因为", "导致", "因此", "所以", "由于", "是因为", "的原因是"
+                ]
+                _eie_count = sum(_eie_content.lower().count(c) for c in _eie_connectives)
+                if _eie_count >= config.get("store_vfs.eie_min_connectives"):
+                    _eie_row = conn.execute(
+                        "SELECT stability FROM memory_chunks WHERE id=?", (d["id"],)
+                    ).fetchone()
+                    _eie_base = float(_eie_row[0]) if _eie_row else float(d.get("stability") or 1.0)
+                    _eie_factor = config.get("store_vfs.eie_boost_factor")   # default 1.15
+                    _eie_max = config.get("store_vfs.eie_max_boost")         # default 0.30
+                    _eie_raw = _eie_base * _eie_factor
+                    _eie_capped = min(_eie_base * (1.0 + _eie_max), _eie_raw)
+                    _eie_new = min(365.0, _eie_capped)
+                    conn.execute("UPDATE memory_chunks SET stability=? WHERE id=?",
+                                 (_eie_new, d["id"]))
+    except Exception:
+        pass  # EIE 写入失败不阻塞主流程
 
 
 # ── iter403：Cue-Dependent Forgetting — Context-Sensitive Retrieval（Tulving 1974）──
@@ -5197,6 +5226,23 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
     except Exception:
         pass
 
+    # ── iter459：Contextual Interference Effect (CIE) ──────────────────────────────────────────
+    # Shea & Morgan (1979): cross-session_type access history → +57% delayed retention.
+    # 跨多种 session_type 被访问的 chunk 获得 stability 加成。
+    try:
+        if chunk_ids:
+            _cie_proj_row = conn.execute(
+                "SELECT project FROM memory_chunks WHERE id=?", (chunk_ids[0],)
+            ).fetchone()
+            if _cie_proj_row:
+                _cie_proj = _cie_proj_row[0] if isinstance(_cie_proj_row, (list, tuple)) else _cie_proj_row["project"]
+                _cie_session_type = (kwargs.get("session_type") if kwargs else None)
+                apply_contextual_interference_effect(
+                    conn, chunk_ids, _cie_proj, session_type=_cie_session_type,
+                )
+    except Exception:
+        pass
+
 def insert_trace(conn: sqlite3.Connection, trace_dict: dict) -> None:
     """写入 recall_traces 记录。迭代65：新增 ftrace_json 阶段级追踪。"""
     d = trace_dict
@@ -7378,6 +7424,25 @@ def sleep_consolidate(
     except Exception:
         pass
 
+    # ── 子操作 21（iter457）：Cue Overload Consolidation Penalty — 同类型 chunk 过多时 sleep 巩固效益下降 ──
+    # OS 类比：CPU cache set-associativity saturation — 同 set 太多 cache line → per-line 保留概率下降
+    # 机制：同类型 chunk N_type > cocp_type_threshold 时，对该类型 chunk 施加轻微 stability 惩罚
+    try:
+        cocp_result = apply_cue_overload_consolidation_penalty(conn, project)
+        result["cocp_penalized"] = cocp_result.get("cocp_penalized", 0)
+    except Exception:
+        pass
+
+    # ── 子操作 22（iter460）：Sleep Spindle Density Effect — 陈述性记忆 chunk 在 sleep 时获得更强巩固加成 ──
+    # OS 类比：Linux NUMA-aware writeback priority — data/metadata/journal 有不同 writeback 优先级策略；
+    #   陈述性记忆类型（spindle-preferred）获得更强加成，程序性类型（REM-preferred）获得较弱加成
+    try:
+        ssde_result = apply_sleep_spindle_density_effect(conn, project)
+        result["ssde_boosted"] = ssde_result.get("ssde_boosted", 0)
+        result["ssde_reduced"] = ssde_result.get("ssde_reduced", 0)
+    except Exception:
+        pass
+
     return result
 
 
@@ -8639,6 +8704,245 @@ def apply_retrieval_practice_consolidation_asymmetry(
             boosted += 1
 
         result["rpca_boosted"] = boosted
+        return result
+    except Exception:
+        return result
+
+
+def apply_cue_overload_consolidation_penalty(
+    conn: "sqlite3.Connection",
+    project: str,
+) -> dict:
+    """
+    iter457: Cue Overload Consolidation Penalty (COCP) — 同类型 chunk 过多时 sleep 巩固效益下降。
+
+    认知科学依据：Watkins & Watkins (1975) "Build-up of proactive inhibition as a cue-overload effect" —
+      过多记忆项共享同一检索线索时，每个项目的单独可提取性下降（cue overload）。
+      N_same_type > threshold → sleep 巩固时对该类型 chunk 施加轻微 stability 惩罚。
+
+    OS 类比：Linux CPU cache set-associativity saturation —
+      太多 cache line 映射到同一 set → 每次新写入导致更频繁的 LRU eviction（巩固效益边际递减）。
+
+    Returns:
+      {"cocp_penalized": N, "total_examined": M}
+    """
+    result = {"cocp_penalized": 0, "total_examined": 0}
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.cocp_enabled"):
+            return result
+
+        threshold         = int(_cfg.get("store_vfs.cocp_type_threshold"))   # 15
+        scale_factor      = float(_cfg.get("store_vfs.cocp_scale_factor"))   # 20.0
+        max_penalty       = float(_cfg.get("store_vfs.cocp_max_penalty"))    # 0.10
+        protect_imp       = float(_cfg.get("store_vfs.cocp_protect_importance"))  # 0.80
+        protect_types_str = str(_cfg.get("store_vfs.cocp_protect_types"))    # "design_constraint,procedure"
+        protect_types     = {t.strip() for t in protect_types_str.split(",") if t.strip()}
+
+        # Count per type (only active chunks)
+        type_count_rows = conn.execute(
+            "SELECT chunk_type, COUNT(*) FROM memory_chunks "
+            "WHERE project=? AND importance > 0 GROUP BY chunk_type",
+            (project,)
+        ).fetchall()
+        type_counts = {row[0]: row[1] for row in type_count_rows}
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        penalized = 0
+        examined  = 0
+
+        for chunk_type, n_type in type_counts.items():
+            if n_type <= threshold:
+                continue
+            if chunk_type in protect_types:
+                continue
+
+            # overload_factor grows linearly: 0 at threshold → max_penalty at threshold + scale_factor
+            overload_factor = min(max_penalty, (n_type - threshold) / scale_factor)
+            if overload_factor <= 0.0:
+                continue
+
+            chunks = conn.execute(
+                "SELECT id, COALESCE(stability,1.0), COALESCE(importance,0.5) "
+                "FROM memory_chunks WHERE project=? AND chunk_type=? AND importance > 0",
+                (project, chunk_type)
+            ).fetchall()
+
+            for ch in chunks:
+                examined += 1
+                cid  = ch[0]
+                stab = float(ch[1])
+                imp  = float(ch[2])
+
+                # High-importance chunks are exempt (core knowledge)
+                if imp >= protect_imp:
+                    continue
+
+                new_stab = max(0.1, stab * (1.0 - overload_factor))
+                if abs(new_stab - stab) > 1e-6:
+                    conn.execute(
+                        "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=? AND project=?",
+                        (round(new_stab, 6), now_iso, cid, project)
+                    )
+                    penalized += 1
+
+        result["cocp_penalized"] = penalized
+        result["total_examined"] = examined
+        return result
+    except Exception:
+        return result
+
+
+def apply_sleep_spindle_density_effect(
+    conn: "sqlite3.Connection",
+    project: str,
+) -> dict:
+    """iter460: Sleep Spindle Density Effect (SSDE) — 根据 chunk_type 差异化 sleep 巩固系数。"""
+    result = {"ssde_boosted": 0, "ssde_reduced": 0, "total_examined": 0}
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.ssde_enabled"):
+            return result
+        decl_mult  = float(_cfg.get("store_vfs.ssde_declarative_multiplier"))
+        proc_mult  = float(_cfg.get("store_vfs.ssde_procedural_multiplier"))
+        min_imp    = float(_cfg.get("store_vfs.ssde_min_importance"))
+        decl_types = {t.strip() for t in str(_cfg.get("store_vfs.ssde_declarative_types")).split(",") if t.strip()}
+        proc_types = {t.strip() for t in str(_cfg.get("store_vfs.ssde_procedural_types")).split(",") if t.strip()}
+        rows = conn.execute(
+            "SELECT id, chunk_type, COALESCE(stability,1.0), COALESCE(importance,0.5) "
+            "FROM memory_chunks WHERE project=? AND importance >= ?",
+            (project, min_imp)
+        ).fetchall()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        boosted = 0; reduced = 0; examined = 0
+        for row in rows:
+            cid = row[0]; ctype = row[1]; stab = float(row[2]); imp = float(row[3])
+            examined += 1
+            if ctype in decl_types:
+                new_stab = min(365.0, stab * decl_mult)
+                if new_stab > stab + 1e-6:
+                    conn.execute(
+                        "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=? AND project=?",
+                        (round(new_stab, 6), now_iso, cid, project))
+                    boosted += 1
+            elif ctype in proc_types:
+                new_stab = max(0.1, stab * proc_mult)
+                if new_stab < stab - 1e-6:
+                    conn.execute(
+                        "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=? AND project=?",
+                        (round(new_stab, 6), now_iso, cid, project))
+                    reduced += 1
+        result["ssde_boosted"]   = boosted
+        result["ssde_reduced"]   = reduced
+        result["total_examined"] = examined
+        return result
+    except Exception:
+        return result
+
+
+def apply_contextual_interference_effect(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+    project: str,
+    session_type: str = None,
+) -> dict:
+    """
+    iter459: Contextual Interference Effect (CIE) — 跨多种 session_type 访问的 chunk 获得 stability 加成。
+
+    认知科学依据：Shea & Morgan (1979) "Contextual interference effects on the acquisition,
+      retention, and transfer of a motor skill" —
+      随机（mixed）练习顺序比集中（blocked）练习在延迟测试中成绩高 57%。
+      机制：随机练习迫使大脑在每次执行前重构运动程序（elaborative encoding）。
+
+    OS 类比：Linux blk-mq — 不同 queue depth / CPU 的混合调度在多种 I/O pattern
+      混合时表现优于单一 queue（cross-queue diversity = CI effect）。
+
+    Returns:
+      {"cie_boosted": N, "total_examined": M}
+    """
+    result = {"cie_boosted": 0, "total_examined": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.cie_enabled"):
+            return result
+
+        ref_types     = int(_cfg.get("store_vfs.cie_ref_types"))        # 4
+        cie_scale     = float(_cfg.get("store_vfs.cie_scale"))          # 0.10
+        min_unique    = int(_cfg.get("store_vfs.cie_min_unique_types")) # 2
+        min_imp       = float(_cfg.get("store_vfs.cie_min_importance")) # 0.40
+        max_history   = int(_cfg.get("store_vfs.cie_max_history"))      # 20
+
+        placeholders = ",".join("?" * len(chunk_ids))
+        rows = conn.execute(
+            f"SELECT id, COALESCE(stability,1.0), COALESCE(importance,0.5), "
+            f"COALESCE(session_type_history,'') "
+            f"FROM memory_chunks WHERE id IN ({placeholders}) AND project=?",
+            list(chunk_ids) + [project]
+        ).fetchall()
+
+        now_iso  = datetime.now(timezone.utc).isoformat()
+        boosted  = 0
+        examined = 0
+
+        for row in rows:
+            cid      = row[0]
+            stab     = float(row[1])
+            imp      = float(row[2])
+            history  = str(row[3]) if row[3] else ""
+            examined += 1
+
+            if imp < min_imp:
+                # Still update history even for low-importance chunks
+                if session_type:
+                    entries = [e for e in history.split(",") if e.strip()] if history else []
+                    entries.append(session_type)
+                    if len(entries) > max_history:
+                        entries = entries[-max_history:]
+                    new_history = ",".join(entries)
+                    conn.execute(
+                        "UPDATE memory_chunks SET session_type_history=?, updated_at=? WHERE id=? AND project=?",
+                        (new_history, now_iso, cid, project)
+                    )
+                continue
+
+            # Append current session_type to history (FIFO, max cie_max_history)
+            entries = [e for e in history.split(",") if e.strip()] if history else []
+            if session_type:
+                entries.append(session_type)
+            if len(entries) > max_history:
+                entries = entries[-max_history:]
+            new_history = ",".join(entries)
+
+            # Compute diversity_score
+            unique_types = len(set(e for e in entries if e)) if entries else 0
+            if unique_types < min_unique:
+                conn.execute(
+                    "UPDATE memory_chunks SET session_type_history=?, updated_at=? WHERE id=? AND project=?",
+                    (new_history, now_iso, cid, project)
+                )
+                continue
+
+            diversity_score = min(1.0, (unique_types - 1) / max(1, ref_types - 1))
+            cie_bonus = diversity_score * cie_scale
+
+            if cie_bonus <= 0.0:
+                conn.execute(
+                    "UPDATE memory_chunks SET session_type_history=?, updated_at=? WHERE id=? AND project=?",
+                    (new_history, now_iso, cid, project)
+                )
+                continue
+
+            new_stab = min(365.0, stab * (1.0 + cie_bonus))
+            conn.execute(
+                "UPDATE memory_chunks SET stability=?, session_type_history=?, updated_at=? WHERE id=? AND project=?",
+                (round(new_stab, 6), new_history, now_iso, cid, project)
+            )
+            boosted += 1
+
+        result["cie_boosted"] = boosted
+        result["total_examined"] = examined
         return result
     except Exception:
         return result

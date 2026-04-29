@@ -1144,6 +1144,179 @@ _REGISTRY: dict = {
     "store_vfs.rpca_min_importance": (0.40, float, 0.0, 1.0, None,
         "iter456: 触发 RPCA 的最低 importance 阈值（低重要性 chunk 不参与，默认 0.40）"),
 
+    # ── iter457: Cue Overload Consolidation Penalty (COCP) — 检索线索过载降低巩固效益（Watkins & Watkins 1975）──
+    # 认知科学依据：
+    #   Watkins & Watkins (1975) "Build-up of proactive inhibition as a cue-overload effect"
+    #     (Journal of Experimental Psychology: Human Learning and Memory) —
+    #     当过多的记忆项共享同一检索线索（cue）时，每个项目的单独可提取性下降（cue overload）。
+    #     机制：检索线索的"扇入扇出"信息量有限（fan effect），线索对应项目越多，
+    #     每次巩固时分配到该线索下每个记忆的"巩固资源"越少。
+    #     Rundus (1973) "Negative effects of using list items as recall cues" —
+    #       同一列表内互相作为提示词时，反而降低彼此的回忆率（列表内干扰）。
+    #     Roediger (1978) "Recall as a self-limiting process" — 同类记忆越多，单个记忆的
+    #       recall probability 越低（呈次线性关系：P(recall) ∝ 1/√N_same_cue）。
+    #   适用场景：同一项目内同 chunk_type 数量过多（N_same_type > threshold）时，
+    #     sleep_consolidate 对该类型的 chunk 施加轻微 stability 惩罚，
+    #     模拟"线索过载"：同类 chunk 互相竞争有限的巩固路径。
+    # memory-os 等价：
+    #   sleep_consolidate 时，统计 project 内每种 chunk_type 的数量 N_type；
+    #   N_type > cocp_threshold 时，对该类型的 chunk 施加：
+    #     overload_factor = min(cocp_max_penalty, (N_type - cocp_threshold) / cocp_scale_factor)
+    #     new_stab = max(0.1, stab × (1 - overload_factor))
+    #   importance >= cocp_protect_importance 的 chunk 豁免（核心知识不受线索过载影响）。
+    # 与 iter432 累积干扰（CI）的区别：
+    #   CI：同类型 chunk 数量增加导致每个 chunk 的 sleep decay 加速（CI 乘以更大 decay rate）
+    #   COCP：sleep_consolidate boost 时对过多同类 chunk 施加巩固惩罚（减少 boost 量）
+    #   两者互补：CI 模拟编码竞争（Underwood 1957）；COCP 模拟检索线索饱和（Watkins 1975）
+    # OS 类比：Linux CPU cache set-associativity saturation —
+    #   太多 cache line 映射到同一 set（= 同一检索线索下太多记忆）→
+    #   每次新写入导致更频繁的 LRU eviction（= 巩固效益边际递减）；
+    #   COCP = cache set-associativity 饱和后的 per-line 保留概率下降。
+    "store_vfs.cocp_enabled": (True, bool, None, None, None,
+        "iter457: 是否启用 Cue Overload Consolidation Penalty — 同类型 chunk 过多时 sleep 巩固效益下降"),
+    "store_vfs.cocp_type_threshold": (15, int, 3, 100, None,
+        "iter457: 触发 COCP 的同类型 chunk 数量阈值（超过此值时该类型 chunk 受巩固惩罚，默认 15）"),
+    "store_vfs.cocp_scale_factor": (20.0, float, 5.0, 100.0, None,
+        "iter457: COCP 惩罚缩放因子：overload_factor = (N - threshold) / scale_factor，"
+        "N=threshold+scale_factor 时惩罚达到 cocp_max_penalty（默认 20）"),
+    "store_vfs.cocp_max_penalty": (0.10, float, 0.0, 0.30, None,
+        "iter457: COCP 最大惩罚系数（new_stab = stab × (1 - penalty)，最大 10% 惩罚，默认 0.10）"),
+    "store_vfs.cocp_protect_importance": (0.80, float, 0.5, 1.0, None,
+        "iter457: importance >= 此值的 chunk 豁免 COCP（核心知识不受线索过载影响，默认 0.80）"),
+    "store_vfs.cocp_protect_types": ("design_constraint,procedure", str, None, None, None,
+        "iter457: 豁免 COCP 的 chunk_type 列表（逗号分隔；这些类型即使数量多也不受惩罚）"),
+
+    # ── iter458: Elaborative Interrogation Effect (EIE) — 因果性解释显著增强记忆编码（Pressley et al. 1992）──
+    # 认知科学依据：
+    #   Pressley et al. (1992) "Elaborative interrogation and memory for prose" —
+    #     要求学生解释"为什么这个事实是真的"（elaborative interrogation）比被动阅读
+    #     使记忆保留率提升 72%（passage retention: EI=72%, control=37%）。
+    #     机制：因果性解释触发更深层的语义加工（elaborative encoding），
+    #     将新信息整合进已有知识网络中（assimilation），
+    #     形成更多检索路径（retrieval routes）。
+    #   Woloshyn et al. (1992) "Use of elaborative interrogation to help students acquire information" —
+    #     自我生成的因果解释比被动接受的解释记忆更强（generation advantage + elaboration advantage）。
+    #   Martin & Pressley (1991) "Elaborative interrogation effects depend on the nature of the question" —
+    #     "why" 问题比"what" 问题更有效；因果性越强（causal connective 越明确），编码越深。
+    # memory-os 等价：
+    #   insert_chunk() 时，检测 content 中的因果连接词（because/therefore/causes/hence/
+    #   consequently/以为/导致/因此/所以/由于/是因为/的原因是）密度；
+    #   causal_connective_count >= eie_min_connectives → 该 chunk 被判定为"因果解释型"，
+    #   initial_stability × eie_boost_factor（写入时一次性加成，类比深度编码）。
+    #   只对 importance >= eie_min_importance 的 chunk 应用。
+    # 与 iter411 LOP（Levels of Processing）的区别：
+    #   LOP：encode_context entity 密度代理编码深度（量化代理）
+    #   EIE：content 中的因果连接词密度直接检测因果推理（文本内容分析）
+    #   两者互补：LOP 检测知识图谱深度；EIE 检测语义推理质量
+    # 与 iter406 Generation Effect 的区别：
+    #   GE：推理标记（I think/therefore/let's/because...）= 主动生成信号
+    #   EIE：因果连接词密度 ≥ 阈值 = 专门检测因果解释（subset of GE，更专注因果推理）
+    #   EIE 的 boost 发生在 insert_chunk 时（与 GE 不同触发点），强调"why"的力量
+    # OS 类比：Linux ext4 htree directory indexing — 深度索引（因果关联 = htree depth 深）
+    #   使得同一目录下的文件查找从 O(N) 降到 O(log N)（更多检索路径 = 更快提取）；
+    #   因果解释型 chunk = 有深度 htree 的目录 = 更低的"检索代价"（更高 stability）。
+    "store_vfs.eie_enabled": (True, bool, None, None, None,
+        "iter458: 是否启用 Elaborative Interrogation Effect — 因果解释型 chunk 写入时获得 stability 加成"),
+    "store_vfs.eie_min_connectives": (2, int, 1, 10, None,
+        "iter458: 触发 EIE 的最低因果连接词数量（content 中 >= 此值才视为'因果解释型'，默认 2）"),
+    "store_vfs.eie_boost_factor": (1.15, float, 1.0, 2.0, None,
+        "iter458: EIE stability 加成系数（initial_stability × factor，默认 1.15 ≈ +15%，"
+        "对应 Pressley 1992 EI 比对照组高约 +35% 的折半估计）"),
+    "store_vfs.eie_min_importance": (0.40, float, 0.0, 1.0, None,
+        "iter458: 触发 EIE 的最低 importance 阈值（低重要性 chunk 不参与，默认 0.40）"),
+    "store_vfs.eie_max_boost": (0.30, float, 0.0, 0.60, None,
+        "iter458: EIE 最大 stability 加成系数上限（base × (1 + max_boost)，防止过激，默认 0.30 = +30%）"),
+
+    # ── iter459: Contextual Interference Effect (CIE) — 变化练习历史提升延迟测试成绩（Shea & Morgan 1979）──
+    # 认知科学依据：
+    #   Shea & Morgan (1979) "Contextual interference effects on the acquisition,
+    #     retention, and transfer of a motor skill" (Journal of Experimental Psychology: HPP) —
+    #     随机（mixed）练习顺序（每次不同任务）比集中（blocked）练习在延迟测试中成绩高 57%，
+    #     虽然集中练习在当场表现更好（acquisition paradox）。
+    #     机制：随机练习迫使大脑在每次执行前重构运动程序（elaborative encoding + action plan）；
+    #     集中练习只需维持同一程序在工作记忆中（无需重构 → 浅层编码）。
+    #   Brady (2008) Meta-analysis — CI effect: d=0.56，跨多种技能（运动/认知/记忆）均显著。
+    #   Simon & Bjork (2001) "Contextual interference effects in skill acquisition" —
+    #     CI 效应与间隔效应（SE）的交互：CI+SE 的组合是最强的学习条件（CI × SE 乘法效应）。
+    # memory-os 等价：
+    #   chunk 的 session_type_history（TEXT，逗号分隔的历史 session_type 序列）记录历次访问的情境类型。
+    #   update_accessed() 时更新 session_type_history，增加当次 session 的 session_type。
+    #   apply_contextual_interference_effect() 计算 session_type 多样性：
+    #     unique_types = len(set(session_type_history.split(',')))
+    #     diversity_score = min(1.0, (unique_types - 1) / cie_ref_types)
+    #     cie_bonus = diversity_score × cie_scale
+    #     new_stab = min(365.0, stab × (1 + cie_bonus))
+    #   与 iter415 Encoding Variability（EV）的区别：
+    #     EV：encode_context token 增长（知识图谱情境多样性）
+    #     CIE：session_type 切换历史（任务类型情境多样性）
+    #     维度不同：EV=语义空间多样性；CIE=任务类型多样性（debug vs design vs refactor）
+    # OS 类比：Linux Multi-Queue Block I/O (blk-mq) — 不同 queue depth / CPU 的混合调度
+    #   在多种 I/O pattern 混合时表现优于单一 queue（cross-queue diversity = CI effect）；
+    #   类比：跨多种 session_type 被访问的 chunk（= multi-queue mixed pattern）获得额外 stability 加成。
+    "store_vfs.cie_enabled": (True, bool, None, None, None,
+        "iter459: 是否启用 Contextual Interference Effect — 跨多种 session_type 访问的 chunk 获得 stability 加成"),
+    "store_vfs.cie_ref_types": (4, int, 2, 20, None,
+        "iter459: diversity_score=1.0 所需的 unique session_type 数量（默认 4：4 种不同任务类型时达到满分）"),
+    "store_vfs.cie_scale": (0.10, float, 0.0, 0.30, None,
+        "iter459: CIE stability 加成系数：cie_bonus = diversity_score × scale，"
+        "diversity=1.0 时最大 bonus=cie_scale（默认 0.10 ≈ 10%，"
+        "对应 Shea & Morgan 1979 随机练习比集中练习高 57% 的折半折三估计）"),
+    "store_vfs.cie_min_unique_types": (2, int, 2, 10, None,
+        "iter459: 触发 CIE 的最少 unique session_type 数量（默认 2：至少 2 种不同任务类型才算'混合'）"),
+    "store_vfs.cie_min_importance": (0.40, float, 0.0, 1.0, None,
+        "iter459: 触发 CIE 的最低 importance 阈值（低重要性 chunk 不参与混合加成，默认 0.40）"),
+    "store_vfs.cie_max_history": (20, int, 5, 100, None,
+        "iter459: session_type_history 最大记录数量（FIFO 滚动，超出时删除最旧记录，默认 20）"),
+
+    # ── iter460: Sleep Spindle Density Effect (SSDE) — 慢波睡眠纺锤波密度对陈述性记忆的差异性增强（Stickgold 2005）──
+    # 认知科学依据：
+    #   Stickgold (2005) "Sleep-dependent memory consolidation" (Nature 437) —
+    #     睡眠期间，NREM Stage 2 的 sleep spindles（12-15 Hz）密度与陈述性记忆巩固量正相关；
+    #     REM 睡眠则与程序性（procedural）记忆的巩固更相关。
+    #     Spindle density 预测 declarative memory consolidation：r=0.71（p<0.001）。
+    #   Gais et al. (2002) "Learning-dependent increases in sleep spindle density" (Journal of Neuroscience) —
+    #     实验后与对照组相比，学习组睡眠 spindle 密度显著增加（+17%），
+    #     且增加量与次日记忆保留率高度相关（选择性增强：declarative > procedural）。
+    #   Walker & Stickgold (2004) "Sleep-dependent learning and motor-skill complexity" —
+    #     不同记忆类型有不同睡眠阶段偏好：
+    #     陈述性（episodic/semantic）→ NREM SWS + spindles（慢波巩固）
+    #     程序性（motor/procedural）→ REM（快动眼期巩固）
+    #     情绪性（flashbulb/emotional）→ NREM + amygdala reactivation
+    # memory-os 等价：
+    #   sleep_consolidate 时，根据 chunk_type 应用差异化的巩固系数（type-specific spindle preference）：
+    #     陈述性类型（decision/design_constraint/reasoning_chain/quantitative_evidence/causal_chain）
+    #       → 获得更强的 sleep 巩固加成（spindle-boosted declarative）
+    #     程序性类型（procedure/task_state）
+    #       → 获得较弱的 sleep 巩固加成（REM-boosted procedural，不需 spindles）
+    #     中性类型（其他）→ 默认加成（无 SSDE 调整）
+    #   SSDE 作为 sleep_consolidate boost_factor 的乘子：
+    #     effective_boost = base_boost × ssde_type_multiplier[chunk_type]
+    # 与 iter413 Sleep Consolidation（SC）的区别：
+    #   SC：importance >= 0.70 的 chunk 一律 × boost_factor（importance-based gate）
+    #   SSDE：根据 chunk_type 应用差异化 boost multiplier（type-specific gate）
+    #   两者叠加：SSDE 调整 SC 的 boost_factor，使不同类型记忆获得与神经科学一致的差异化巩固
+    # OS 类比：Linux NUMA-aware writeback priority —
+    #   不同类型的 dirty page（data/metadata/journal）有不同的 writeback 优先级策略：
+    #   data page（陈述性）→ pdflush 优先处理；
+    #   journal page（程序性）→ jbd2 单独管理；
+    #   类比：spindle-preferred 类型（陈述性）在 sleep_consolidate 中获得更强优先级。
+    "store_vfs.ssde_enabled": (True, bool, None, None, None,
+        "iter460: 是否启用 Sleep Spindle Density Effect — 陈述性记忆 chunk 在 sleep 时获得更强巩固加成"),
+    "store_vfs.ssde_declarative_multiplier": (1.20, float, 1.0, 2.0, None,
+        "iter460: 陈述性记忆类型的 sleep boost 乘子（默认 1.20：spindle-boosted，"
+        "对应 Gais 2002 spindle density +17% ≈ consolidation +20% 的估计）"),
+    "store_vfs.ssde_procedural_multiplier": (0.85, float, 0.5, 1.0, None,
+        "iter460: 程序性记忆类型的 sleep boost 乘子（默认 0.85：REM-preferred，"
+        "NREM spindles 对 procedural 记忆贡献较少，轻微降权）"),
+    "store_vfs.ssde_declarative_types": (
+        "decision,design_constraint,reasoning_chain,quantitative_evidence,causal_chain",
+        str, None, None, None,
+        "iter460: 陈述性记忆 chunk_type 列表（逗号分隔，这些类型获得 ssde_declarative_multiplier 加成）"),
+    "store_vfs.ssde_procedural_types": ("procedure,task_state", str, None, None, None,
+        "iter460: 程序性记忆 chunk_type 列表（逗号分隔，这些类型获得 ssde_procedural_multiplier 减权）"),
+    "store_vfs.ssde_min_importance": (0.45, float, 0.0, 1.0, None,
+        "iter460: 触发 SSDE 的最低 importance 阈值（低重要性 chunk 不参与类型差异化巩固，默认 0.45）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。
