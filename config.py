@@ -1806,6 +1806,81 @@ _REGISTRY: dict = {
     "store_vfs.ior_min_importance": (0.15, float, 0.0, 1.0, None,
         "iter488: 触发 IOR 的最低 importance 阈值（默认 0.15）"),
 
+    # ── iter489: Encoding Variability Effect (EVE) — 多样化访问上下文增强长期保留（Martin 1972）──
+    # 认知科学依据：Martin (1972) Psych Review — 同一信息在不同上下文中编码，形成多条检索路径，
+    #   提升长期保留效果（encoding variability hypothesis）；
+    #   同一 chunk 在不同 session_type（对话/检索/写入）中被访问，stability 额外提升。
+    # OS 类比：multi-path I/O（DM-multipath） — 同一 block device 通过多条路径访问，
+    #   降低单路径失效风险；多条检索路径 = 多路径冗余，降低记忆遗忘概率。
+    "store_vfs.eve_enabled": (True, bool, None, None, None,
+        "iter489: 是否启用 Encoding Variability Effect（默认 True）"),
+    "store_vfs.eve_min_unique_session_types": (2, int, 1, 10, None,
+        "iter489: 触发 EVE 所需的最少不同 session_type 数（默认 2）"),
+    "store_vfs.eve_bonus_per_type": (0.04, float, 0.0, 0.15, None,
+        "iter489: 每个额外不同 session_type 带来的 stability 加成（默认 0.04）"),
+    "store_vfs.eve_max_boost": (0.15, float, 0.0, 0.40, None,
+        "iter489: EVE 最大 stability 加成比例（默认 0.15 = 15%）"),
+    "store_vfs.eve_min_importance": (0.20, float, 0.0, 1.0, None,
+        "iter489: 触发 EVE 的最低 importance 阈值（默认 0.20）"),
+
+    # ── iter490: Zeigarnik Effect (ZEF) — 未完成任务 chunk 记忆更持久（Zeigarnik 1927）──
+    # 认知科学依据：Zeigarnik (1927) — 未完成任务比已完成任务记忆更持久（持续认知激活）；
+    #   chunk 内容含 TODO/FIXME/PENDING/UNRESOLVED 等未完成信号词 → 稳定性更高；
+    #   Ovsiankina (1928): 中断任务产生恢复冲动，维持工作记忆激活。
+    # OS 类比：dirty page tracking — 含未刷新（dirty）数据的 page 受保护不被回收，
+    #   等待 fsync 完成；未完成任务 = dirty page = 受保护的工作状态。
+    "store_vfs.zef_enabled": (True, bool, None, None, None,
+        "iter490: 是否启用 Zeigarnik Effect（默认 True）"),
+    "store_vfs.zef_todo_keywords": (
+        ["TODO", "FIXME", "PENDING", "UNRESOLVED", "WIP", "BLOCKED", "IN PROGRESS", "待完成", "未完成"],
+        list, None, None, None,
+        "iter490: 触发 Zeigarnik Effect 的未完成信号关键词列表"),
+    "store_vfs.zef_stability_bonus": (0.12, float, 0.0, 0.40, None,
+        "iter490: 含未完成信号时 stability 加成比例（默认 0.12 = 12%）"),
+    "store_vfs.zef_max_boost": (0.20, float, 0.0, 0.50, None,
+        "iter490: ZEF 最大 stability 加成（默认 0.20 = 20%）"),
+    "store_vfs.zef_min_importance": (0.15, float, 0.0, 1.0, None,
+        "iter490: 触发 ZEF 的最低 importance 阈值（默认 0.15）"),
+
+    # ── iter491: von Restorff Isolation Effect (VRE) — 与周围不同的 chunk 记忆更深（von Restorff 1933）──
+    # 认知科学依据：von Restorff (1933) — 同质列表中的独特项目记忆保留率更高（isolation effect）；
+    #   chunk 类型/内容与同 session 其他 chunk 显著不同 → retrieval practice 更有效；
+    #   Hunt & Lamb (2001) J Exp Psych — isolation effect 在语义上下文中依然稳健。
+    # OS 类比：hot/cold page separation（Linux LRU gen=0 vs gen>0）—
+    #   在 cold page 中"热"的孤立 page（LRU gen=0）更难被回收；
+    #   独特 chunk = gen=0 hot page in cold pool，保留优先级更高。
+    "store_vfs.vre_enabled": (True, bool, None, None, None,
+        "iter491: 是否启用 von Restorff Isolation Effect（默认 True）"),
+    "store_vfs.vre_rarity_threshold": (0.20, float, 0.0, 1.0, None,
+        "iter491: 触发 VRE 的 chunk_type 稀有度阈值（该类型占比低于此值，默认 0.20）"),
+    "store_vfs.vre_stability_bonus": (0.10, float, 0.0, 0.30, None,
+        "iter491: 稀有类型 chunk 的 stability 加成（默认 0.10 = 10%）"),
+    "store_vfs.vre_max_boost": (0.18, float, 0.0, 0.40, None,
+        "iter491: VRE 最大 stability 加成（默认 0.18 = 18%）"),
+    "store_vfs.vre_min_importance": (0.20, float, 0.0, 1.0, None,
+        "iter491: 触发 VRE 的最低 importance 阈值（默认 0.20）"),
+    "store_vfs.vre_min_session_chunks": (3, int, 1, 50, None,
+        "iter491: 计算稀有度所需的最少 session chunk 数（默认 3）"),
+
+    # ── iter492: Production Effect (PEF) — 大声朗读比默读产生更强记忆（MacLeod 2010）──
+    # 认知科学依据：MacLeod et al. (2010) J Exp Psych — 大声朗读（production effect）比
+    #   默读在再认测试中高 ~10-15%；更高质量的处理操作（production/write）= 更深编码。
+    #   chunk_type=decision/observation/reflection 等"输出类"操作 → stability 额外奖励。
+    # OS 类比：write-back vs write-through cache — 写回操作（生产型 chunk）
+    #   需要额外处理，但数据一致性更高，equivalent 生命周期更长。
+    "store_vfs.pef_enabled": (True, bool, None, None, None,
+        "iter492: 是否启用 Production Effect（默认 True）"),
+    "store_vfs.pef_production_types": (
+        ["decision", "reflection", "hypothesis", "insight", "action"],
+        list, None, None, None,
+        "iter492: 视为'输出类操作'的 chunk_type 列表（这些类型获得 production bonus）"),
+    "store_vfs.pef_stability_bonus": (0.08, float, 0.0, 0.25, None,
+        "iter492: 输出类 chunk_type 的 stability 加成（默认 0.08 = 8%）"),
+    "store_vfs.pef_max_boost": (0.15, float, 0.0, 0.35, None,
+        "iter492: PEF 最大 stability 加成（默认 0.15 = 15%）"),
+    "store_vfs.pef_min_importance": (0.15, float, 0.0, 1.0, None,
+        "iter492: 触发 PEF 的最低 importance 阈值（默认 0.15）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。

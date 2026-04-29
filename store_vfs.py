@@ -5528,6 +5528,35 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
     except Exception:
         pass
 
+    # ── iter489: EVE — Encoding Variability Effect（多样化访问上下文增强记忆，Martin 1972）──
+    # OS 类比：DM-multipath — 同一 device 多条 I/O 路径，任一失效不影响整体可用性
+    try:
+        apply_encoding_variability(conn, chunk_ids)
+    except Exception:
+        pass
+
+    # ── iter490: ZEF — Zeigarnik Effect（未完成任务 chunk 稳定性更高，Zeigarnik 1927）──
+    # OS 类比：dirty page tracking — 含未刷新数据的 page 受 writeback 保护
+    try:
+        apply_zeigarnik_effect(conn, chunk_ids)
+    except Exception:
+        pass
+
+    # ── iter491: VRE — von Restorff Isolation Effect（稀有类型 chunk 记忆更深，von Restorff 1933）──
+    # OS 类比：MGLRU gen=0 page in old pool — 稀有类型 = LRU gen=0，eviction 时受额外保护
+    try:
+        _vre_session = session_id or ""
+        apply_von_restorff_isolation(conn, chunk_ids, session_id=_vre_session)
+    except Exception:
+        pass
+
+    # ── iter492: PEF — Production Effect（输出类 chunk_type 编码更深，MacLeod 2010）──
+    # OS 类比：write-back cache — 输出类操作需额外处理但生命周期更长
+    try:
+        apply_production_effect(conn, chunk_ids)
+    except Exception:
+        pass
+
 def insert_trace(conn: sqlite3.Connection, trace_dict: dict) -> None:
     """写入 recall_traces 记录。迭代65：新增 ftrace_json 阶段级追踪。"""
     d = trace_dict
@@ -11502,6 +11531,298 @@ def apply_inhibition_of_return(
                     "UPDATE memory_chunks SET stability=? WHERE id=?", (penalized_stab, chunk_id)
                 )
                 result["ior_penalized"] += 1
+        return result
+    except Exception:
+        return result
+
+
+def apply_encoding_variability(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+) -> dict:
+    """iter489: Encoding Variability Effect (EVE) — 同一 chunk 在多种不同 session_type 下
+    被访问时，形成多条检索路径，stability 额外提升（Martin 1972）。
+
+    认知科学依据：
+      Martin (1972) Psychological Review — 编码变异假说：同一刺激在不同上下文中编码，
+        产生多条独立检索路径，降低单次遗忘的全局影响；
+      Glenberg (1979): 上下文多样性与长期保留显著正相关（r≈0.60）；
+      Estes (1955) context fluctuation model — 学习时的上下文在记忆中被编码，
+        上下文多样 → 检索线索更丰富。
+
+    OS 类比：DM-multipath (Device Mapper Multipath) —
+      同一 block device 通过多条 I/O 路径访问，任一路径失效不影响整体可用性；
+      多条检索路径 = 多路径冗余，单一遗忘不影响整体提取成功率。
+
+    实现：从 session_type_history 字段提取不同 session 类型数量，
+    不同类型数超过 min_unique_session_types 时触发 stability 加成。
+    """
+    result = {"eve_boosted": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        import json as _json
+        if not _cfg.get("store_vfs.eve_enabled"):
+            return result
+
+        min_types = int(_cfg.get("store_vfs.eve_min_unique_session_types"))
+        bonus_per_type = float(_cfg.get("store_vfs.eve_bonus_per_type"))
+        max_boost = float(_cfg.get("store_vfs.eve_max_boost"))
+        min_importance = float(_cfg.get("store_vfs.eve_min_importance"))
+
+        for chunk_id in chunk_ids:
+            row = conn.execute(
+                "SELECT stability, importance, session_type_history "
+                "FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+            if imp < min_importance:
+                continue
+
+            sth = row[2] or ""
+            # session_type_history 存储格式：逗号分隔的 session_type 记录
+            # 或 JSON 数组
+            try:
+                if sth.startswith("["):
+                    types_list = _json.loads(sth)
+                else:
+                    types_list = [t.strip() for t in sth.split(",") if t.strip()]
+            except Exception:
+                types_list = [t.strip() for t in sth.split(",") if t.strip()]
+
+            unique_types = len(set(types_list))
+            if unique_types < min_types:
+                continue
+
+            # 额外多样性：超过最低要求的每个类型各增加 bonus_per_type
+            extra_types = unique_types - min_types + 1  # >= 1
+            bonus_ratio = min(max_boost, bonus_per_type * extra_types)
+            new_stab = min(365.0, stab * (1.0 + bonus_ratio))
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+                )
+                result["eve_boosted"] += 1
+        return result
+    except Exception:
+        return result
+
+
+def apply_zeigarnik_effect(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+) -> dict:
+    """iter490: Zeigarnik Effect (ZEF) — 含"未完成"信号的 chunk 比已完成 chunk 稳定性更高。
+
+    认知科学依据：
+      Zeigarnik (1927) Psychologische Forschung — 未完成任务比完成任务的回忆率高 ~90%；
+      持续激活假说：中断任务产生认知张力（cognitive tension），维持工作记忆激活；
+      Ovsiankina (1928): 中断任务自发产生恢复冲动（resumption intention），维持记忆优先级。
+
+    OS 类比：dirty page tracking (mm/page-writeback.c) —
+      含未刷新（dirty）数据的 page 受 writeback 保护，不被 kswapd 主动回收；
+      等待 fsync 完成 = 等待任务完成 = 受保护的工作状态。
+
+    实现：扫描 content + summary 字段，检测 TODO/FIXME/PENDING 等信号词，
+    若存在则提升 stability。
+    """
+    result = {"zef_boosted": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.zef_enabled"):
+            return result
+
+        todo_keywords = _cfg.get("store_vfs.zef_todo_keywords") or []
+        stability_bonus = float(_cfg.get("store_vfs.zef_stability_bonus"))
+        max_boost = float(_cfg.get("store_vfs.zef_max_boost"))
+        min_importance = float(_cfg.get("store_vfs.zef_min_importance"))
+
+        for chunk_id in chunk_ids:
+            row = conn.execute(
+                "SELECT stability, importance, content, summary "
+                "FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+            if imp < min_importance:
+                continue
+
+            content_lower = (row[2] or "").lower()
+            summary_lower = (row[3] or "").lower()
+            combined = content_lower + " " + summary_lower
+
+            # 检测未完成信号词
+            if not any(kw.lower() in combined for kw in todo_keywords):
+                continue
+
+            bonus_ratio = min(max_boost, stability_bonus)
+            new_stab = min(365.0, stab * (1.0 + bonus_ratio))
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+                )
+                result["zef_boosted"] += 1
+        return result
+    except Exception:
+        return result
+
+
+def apply_von_restorff_isolation(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+    session_id: str = "",
+) -> dict:
+    """iter491: von Restorff Isolation Effect (VRE) — 在 session 中 chunk_type 稀少的
+    chunk（独特项目）获得额外 stability 提升。
+
+    认知科学依据：
+      von Restorff (1933) Psychologische Forschung — 同质列表中的孤立（独特）项目
+        被记住的频率显著高于普通项目（isolation effect）；
+      Hunt & Lamb (2001) J Exp Psych — isolation effect 在语义上下文中稳健，
+        效果量 d ≈ 0.80；
+      Fabiani & Donchin (1995): isolation effect 与 P300 波幅（注意力增强）正相关。
+
+    OS 类比：Linux LRU generation aging (MGLRU) —
+      在主要由 old-gen page 组成的 list 中，gen=0（newly accessed）的 page
+      在 eviction 时受到额外保护；稀有类型 = LRU gen=0 in old pool。
+
+    实现：统计当前 session 中各 chunk_type 的比例，
+    比例低于 vre_rarity_threshold 的类型视为"稀有/独特"，触发 stability 加成。
+    """
+    result = {"vre_boosted": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.vre_enabled"):
+            return result
+
+        rarity_threshold = float(_cfg.get("store_vfs.vre_rarity_threshold"))
+        stability_bonus = float(_cfg.get("store_vfs.vre_stability_bonus"))
+        max_boost = float(_cfg.get("store_vfs.vre_max_boost"))
+        min_importance = float(_cfg.get("store_vfs.vre_min_importance"))
+        min_session_chunks = int(_cfg.get("store_vfs.vre_min_session_chunks"))
+
+        # 统计 session 中各 chunk_type 的数量
+        if session_id:
+            type_counts = {}
+            rows = conn.execute(
+                "SELECT chunk_type, COUNT(*) as cnt FROM memory_chunks "
+                "WHERE source_session=? GROUP BY chunk_type", (session_id,)
+            ).fetchall()
+            total = sum(r[1] for r in rows)
+            if total < min_session_chunks:
+                # session 内 chunk 不足，用全局比例
+                rows = conn.execute(
+                    "SELECT chunk_type, COUNT(*) as cnt FROM memory_chunks GROUP BY chunk_type"
+                ).fetchall()
+                total = sum(r[1] for r in rows)
+            for r in rows:
+                type_counts[r[0]] = r[1]
+        else:
+            # 无 session id，用全局比例
+            rows = conn.execute(
+                "SELECT chunk_type, COUNT(*) as cnt FROM memory_chunks GROUP BY chunk_type"
+            ).fetchall()
+            total = sum(r[1] for r in rows)
+            type_counts = {r[0]: r[1] for r in rows}
+
+        if total < min_session_chunks:
+            return result
+
+        for chunk_id in chunk_ids:
+            row = conn.execute(
+                "SELECT stability, importance, chunk_type "
+                "FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+            if imp < min_importance:
+                continue
+
+            ctype = row[2] or "observation"
+            type_ratio = type_counts.get(ctype, 0) / max(total, 1)
+            if type_ratio >= rarity_threshold:
+                continue  # 不稀有，不触发
+
+            bonus_ratio = min(max_boost, stability_bonus)
+            new_stab = min(365.0, stab * (1.0 + bonus_ratio))
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+                )
+                result["vre_boosted"] += 1
+        return result
+    except Exception:
+        return result
+
+
+def apply_production_effect(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+) -> dict:
+    """iter492: Production Effect (PEF) — 输出类（生产型）chunk 的编码更深，stability 更高。
+
+    认知科学依据：
+      MacLeod et al. (2010) J Exp Psych: General — 大声朗读（production）比默读
+        在再认测试中高 ~10-15%（production effect）；
+      MacLeod & Bodner (2017): production effect 的核心是"增强区分度"而非简单重复；
+      Forrin et al. (2012): 写作产生效果与大声朗读相当，均优于默读。
+
+    OS 类比：write-back vs write-through cache —
+      write-back（输出类 chunk）需要额外处理步骤（将数据写入 dirty page），
+      但获得更长的"in-memory"生命周期（delayed writeback = 更稳固的编码）；
+      decision/reflection 等 = write-back operation = higher stability.
+    """
+    result = {"pef_boosted": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.pef_enabled"):
+            return result
+
+        production_types = _cfg.get("store_vfs.pef_production_types") or []
+        stability_bonus = float(_cfg.get("store_vfs.pef_stability_bonus"))
+        max_boost = float(_cfg.get("store_vfs.pef_max_boost"))
+        min_importance = float(_cfg.get("store_vfs.pef_min_importance"))
+
+        # 规范化 production_types
+        prod_set = {t.lower().strip() for t in production_types}
+
+        for chunk_id in chunk_ids:
+            row = conn.execute(
+                "SELECT stability, importance, chunk_type "
+                "FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+            if imp < min_importance:
+                continue
+
+            ctype = (row[2] or "").lower().strip()
+            if ctype not in prod_set:
+                continue  # 非生产型 chunk_type
+
+            bonus_ratio = min(max_boost, stability_bonus)
+            new_stab = min(365.0, stab * (1.0 + bonus_ratio))
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+                )
+                result["pef_boosted"] += 1
         return result
     except Exception:
         return result
