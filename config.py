@@ -1675,6 +1675,137 @@ _REGISTRY: dict = {
     "store_vfs.fap_min_importance": (0.25, float, 0.0, 1.0, None,
         "iter480: 触发 FAP 的最低 importance 阈值（默认 0.25）"),
 
+    # ── iter481: Testing Effect / Retrieval Practice Effect (TPE) — 检索比复习更强化记忆（Roediger & Karpicke 2006）──
+    # 认知科学依据：Roediger & Karpicke (2006) Science —
+    #   纯检索（test）vs 纯复习（restudy）：1周后保留率 64% vs 40%；Cohen's d ≈ 1.0。
+    #   机制：主动检索激活"检索练习"路径，比被动复习更强化长时记忆（检索练习效应）。
+    # OS 类比：CPU TLB hit — 从 TLB 命中（主动检索）的 page 比从页表查找（被动复习）更新 LRU，降低 eviction 概率。
+    "store_vfs.tpe_enabled": (True, bool, None, None, None,
+        "iter481: 是否启用 Testing Effect（默认 True）"),
+    "store_vfs.tpe_boost_factor": (0.05, float, 0.0, 0.20, None,
+        "iter481: 检索命中带来的额外 stability 加成比例（默认 0.05 = 5%）"),
+    "store_vfs.tpe_max_boost": (0.15, float, 0.0, 0.40, None,
+        "iter481: TPE 最大加成比例（默认 0.15 = 15%）"),
+    "store_vfs.tpe_min_importance": (0.25, float, 0.0, 1.0, None,
+        "iter481: 触发 TPE 的最低 importance 阈值（默认 0.25）"),
+    "store_vfs.tpe_lookback_minutes": (5, int, 1, 60, None,
+        "iter481: 查找最近 recall_traces 的时间窗口（分钟，默认 5）"),
+
+    # ── iter482: Spacing Effect Bonus (SEB) — 间隔越长每次访问稳定性增益越大（Ebbinghaus 1885）──
+    # 认知科学依据：Ebbinghaus (1885) + Cepeda et al. (2006) meta-analysis (n=317) d=0.70 —
+    #   最优间隔 = retention interval × 10-20%；间隔越长，每次访问带来的 stability 增益越大。
+    # OS 类比：Linux page access bit TLB aging — 距上次访问越久，下次命中优先级越高。
+    "store_vfs.seb_enabled": (True, bool, None, None, None,
+        "iter482: 是否启用 Spacing Effect Bonus（默认 True）"),
+    "store_vfs.seb_min_gap_hours": (4, int, 1, 48, None,
+        "iter482: 触发 SEB 所需的最小间隔时间（小时，默认 4）"),
+    "store_vfs.seb_base_bonus": (0.03, float, 0.0, 0.10, None,
+        "iter482: 基础间隔奖励比例（每倍增间隔增加，默认 0.03）"),
+    "store_vfs.seb_max_bonus": (0.12, float, 0.0, 0.30, None,
+        "iter482: SEB 最大奖励比例（默认 0.12 = 12%）"),
+    "store_vfs.seb_min_importance": (0.25, float, 0.0, 1.0, None,
+        "iter482: 触发 SEB 的最低 importance 阈值（默认 0.25）"),
+
+    # ── iter483: Priming Effect (PE) — 已有相似 chunk 启动新 chunk 的编码稳定性（Meyer & Schvaneveldt 1971）──
+    # 认知科学依据：Meyer & Schvaneveldt (1971) JEPS — 已激活相关概念使目标识别更快更稳固；
+    #   编码时的语义启动（prime）提升新内容的编码质量（提供语义脚手架）。
+    # OS 类比：Linux dentry cache warm — 相关目录项已缓存，新文件路径解析更快更稳定。
+    "store_vfs.pe_enabled": (True, bool, None, None, None,
+        "iter483: 是否启用 Priming Effect（默认 True）"),
+    "store_vfs.pe_min_similarity": (0.25, float, 0.0, 1.0, None,
+        "iter483: 启动源与新 chunk 的最低 Jaccard 相似度（默认 0.25）"),
+    "store_vfs.pe_boost_per_prime": (0.04, float, 0.0, 0.10, None,
+        "iter483: 每个启动源带来的 stability 加成（默认 0.04）"),
+    "store_vfs.pe_max_boost": (0.10, float, 0.0, 0.25, None,
+        "iter483: PE 最大 stability 加成比例（默认 0.10 = 10%）"),
+    "store_vfs.pe_min_importance": (0.25, float, 0.0, 1.0, None,
+        "iter483: 触发 PE 的最低 importance 阈值（默认 0.25）"),
+    "store_vfs.pe_min_primes": (1, int, 1, 10, None,
+        "iter483: 触发 PE 所需的最少启动源数（默认 1）"),
+
+    # ── iter484: Cross-Session Consolidation Effect (CCE) — 跨 session 访问获巩固奖励（Walker & Stickgold 2004）──
+    # 认知科学依据：Walker & Stickgold (2004) Neuron — 睡眠/休息期海马-皮质巩固使记忆更稳固；
+    #   跨 session 间隔 ≈ 睡眠/休息 → 下次访问时 stability 额外提升 6-12%。
+    # OS 类比：Linux kswapd background reclaim — 空闲期（session 间隔）整理 page → 降低下次分配压力。
+    "store_vfs.cce_enabled": (True, bool, None, None, None,
+        "iter484: 是否启用 Cross-Session Consolidation Effect（默认 True）"),
+    "store_vfs.cce_min_gap_hours": (6, int, 1, 48, None,
+        "iter484: 触发 CCE 的跨 session 最小时间间隔（小时，默认 6）"),
+    "store_vfs.cce_base_bonus": (0.04, float, 0.0, 0.15, None,
+        "iter484: 基础跨 session 巩固奖励（默认 0.04 = 4%）"),
+    "store_vfs.cce_max_boost": (0.10, float, 0.0, 0.30, None,
+        "iter484: CCE 最大奖励比例（默认 0.10 = 10%）"),
+    "store_vfs.cce_min_importance": (0.25, float, 0.0, 1.0, None,
+        "iter484: 触发 CCE 的最低 importance 阈值（默认 0.25）"),
+
+    # ── iter485: Desirable Difficulty Effect (DDE2) — 提取难度高时记忆更持久（Bjork 1994）──
+    # 认知科学依据：Bjork (1994) "Memory and metamemory considerations" — 适度困难的检索任务
+    #   强化编码深度；检索难度通过 retrievability 低、stability 低的组合衡量；难提取→成功提取收益更大。
+    # OS 类比：Linux TLB miss penalty → miss 时触发完整 page walk，但同时更新 TLB，后续命中更快。
+    "store_vfs.dde2_enabled": (True, bool, None, None, None,
+        "iter485: 是否启用 Desirable Difficulty Effect（默认 True）"),
+    "store_vfs.dde2_retrievability_threshold": (0.40, float, 0.0, 1.0, None,
+        "iter485: 触发 DDE2 的最大 retrievability 阈值（低于此值才算'难'，默认 0.40）"),
+    "store_vfs.dde2_stability_threshold": (10.0, float, 0.1, 100.0, None,
+        "iter485: 触发 DDE2 的最大 stability 阈值（低于此值才算'难'，默认 10.0 天）"),
+    "store_vfs.dde2_bonus_per_difficulty": (0.08, float, 0.0, 0.30, None,
+        "iter485: 难度调用成功后 stability 增益系数（默认 0.08 = 8%）"),
+    "store_vfs.dde2_max_boost": (0.20, float, 0.0, 0.50, None,
+        "iter485: DDE2 最大 stability 加成比例（默认 0.20 = 20%）"),
+    "store_vfs.dde2_min_importance": (0.20, float, 0.0, 1.0, None,
+        "iter485: 触发 DDE2 的最低 importance 阈值（默认 0.20）"),
+
+    # ── iter486: Contextual Reinstatement Effect (CRE2) — 恢复编码上下文增强提取（Godden & Baddeley 1975）──
+    # 认知科学依据：Godden & Baddeley (1975) British J Psych — 在与编码相同的上下文（session tags/namespace）
+    #   中检索，提取成功率提高 ~40%；相同 namespace 或相似 tag 集合视为"上下文匹配"。
+    # OS 类比：CPU cache locality — 访问与之前同一 working set 的 page，TLB/cache 命中率更高。
+    "store_vfs.cre2_enabled": (True, bool, None, None, None,
+        "iter486: 是否启用 Contextual Reinstatement Effect（默认 True）"),
+    "store_vfs.cre2_namespace_match_bonus": (0.06, float, 0.0, 0.20, None,
+        "iter486: namespace 相同时 retrievability 加成（默认 0.06）"),
+    "store_vfs.cre2_tag_overlap_bonus": (0.04, float, 0.0, 0.15, None,
+        "iter486: tag 集合重叠率超过阈值时额外加成（默认 0.04）"),
+    "store_vfs.cre2_tag_overlap_threshold": (0.50, float, 0.0, 1.0, None,
+        "iter486: 触发 tag 重叠加成所需的最低 Jaccard 相似度（默认 0.50）"),
+    "store_vfs.cre2_max_boost": (0.12, float, 0.0, 0.30, None,
+        "iter486: CRE2 最大 retrievability 加成（默认 0.12）"),
+    "store_vfs.cre2_min_importance": (0.20, float, 0.0, 1.0, None,
+        "iter486: 触发 CRE2 的最低 importance 阈值（默认 0.20）"),
+
+    # ── iter487: Emotion Tagging Effect (ETE2) — 高情绪价值 chunk 遗忘更慢（McGaugh 2000）──
+    # 认知科学依据：McGaugh (2000) Science "Memory — a century of consolidation" — 杏仁核通过 NE/
+    #   cortisol 调节海马巩固；情绪唤起（高 importance 或含情绪关键词）使记忆更持久，稳定性衰减更慢。
+    # OS 类比：cgroup memory.min 保护层 — 高优先级进程的 pages 受保护，不被 kswapd 回收。
+    "store_vfs.ete2_enabled": (True, bool, None, None, None,
+        "iter487: 是否启用 Emotion Tagging Effect（默认 True）"),
+    "store_vfs.ete2_importance_threshold": (0.70, float, 0.0, 1.0, None,
+        "iter487: 触发 ETE2 的最低 importance 阈值（高情绪唤起，默认 0.70）"),
+    "store_vfs.ete2_stability_decay_reduction": (0.15, float, 0.0, 0.50, None,
+        "iter487: 高情绪 chunk 的 stability 衰减减免比例（默认 0.15 = 减少 15% 衰减）"),
+    "store_vfs.ete2_keyword_bonus": (0.05, float, 0.0, 0.20, None,
+        "iter487: 含情绪关键词时额外的衰减减免（默认 0.05）"),
+    "store_vfs.ete2_emotion_keywords": (
+        ["urgent", "critical", "important", "error", "fail", "success", "breakthrough", "problem", "solve"],
+        list, None, None, None,
+        "iter487: 触发关键词奖励的情绪关键词列表"),
+    "store_vfs.ete2_max_decay_reduction": (0.30, float, 0.0, 0.60, None,
+        "iter487: ETE2 最大衰减减免比例（默认 0.30）"),
+
+    # ── iter488: Inhibition of Return (IOR) — 短时间内重复访问同一 chunk 收益递减（Posner 1984）──
+    # 认知科学依据：Posner & Cohen (1984) Attention & Performance — 注意力短时间内不会重返刚刚访问的
+    #   位置；记忆领域对应：刚访问的 chunk 重复访问时 stability 增益递减（注意力已转移）。
+    # OS 类比：Linux madvise(MADV_RANDOM) — 预取器对刚读取的 page 降低预取优先级，资源分配给新页。
+    "store_vfs.ior_enabled": (True, bool, None, None, None,
+        "iter488: 是否启用 Inhibition of Return（默认 True）"),
+    "store_vfs.ior_inhibition_window_secs": (300, int, 30, 3600, None,
+        "iter488: 触发 IOR 的重复访问时间窗口（秒，默认 300=5分钟）"),
+    "store_vfs.ior_penalty_factor": (0.50, float, 0.0, 1.0, None,
+        "iter488: 窗口内重复访问时 stability 增益的衰减系数（默认 0.50 = 减半）"),
+    "store_vfs.ior_min_interval_secs": (60, int, 10, 600, None,
+        "iter488: 完全抑制所需的最小间隔（秒，默认 60）"),
+    "store_vfs.ior_min_importance": (0.15, float, 0.0, 1.0, None,
+        "iter488: 触发 IOR 的最低 importance 阈值（默认 0.15）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。

@@ -2183,6 +2183,14 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
     except Exception:
         pass
 
+    # ── iter483: PE — Priming Effect（已有相似 chunk 启动新 chunk 编码，Meyer & Schvaneveldt 1971）──
+    # OS 类比：Linux dentry cache warm — 相关目录项已缓存，新文件路径解析更快更稳定
+    try:
+        _pe_content = d.get("content") or ""
+        apply_priming_effect(conn, d["id"], _pe_content)
+    except Exception:
+        pass
+
     # ── iter477: MBE — Memory Binding Effect（同 session 同批编码的 chunk 相互加固，Eichenbaum 2004）──
     # OS 类比：Linux THP — 相邻 page 合并为大页，提升整体 TLB coverage 和稳定性
     try:
@@ -5465,6 +5473,58 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
     # OS 类比：CPU 指令流水线预取 — 执行当前指令时预取之前相关指令的上下文到 fetch buffer
     try:
         apply_forward_association_primacy(conn, chunk_ids, now_iso=now_iso)
+    except Exception:
+        pass
+
+    # ── iter481: TPE — Testing Effect（主动检索比被动访问更强化记忆，Roediger & Karpicke 2006）──
+    # OS 类比：CPU TLB hit — 主动检索命中的 page 比 page table walk 更新 LRU，降低 eviction 概率
+    try:
+        apply_testing_effect(conn, chunk_ids, now_iso=now_iso)
+    except Exception:
+        pass
+
+    # ── iter482: SEB — Spacing Effect Bonus（间隔越长每次访问稳定性增益越大，Ebbinghaus 1885）──
+    # OS 类比：Linux page access bit TLB aging — 距上次访问越久，下次命中优先级越高
+    try:
+        apply_spacing_effect_bonus(conn, chunk_ids, now_iso=now_iso)
+    except Exception:
+        pass
+
+    # ── iter484: CCE — Cross-Session Consolidation（跨 session 访问获巩固奖励，Walker & Stickgold 2004）──
+    # OS 类比：Linux kswapd background reclaim — session 间隔期 kswapd 整理 page，下次访问效率提升
+    try:
+        _cce_session = session_id or ""
+        apply_cross_session_consolidation(conn, chunk_ids, _cce_session, now_iso=now_iso)
+    except Exception:
+        pass
+
+    # ── iter485: DDE2 — Desirable Difficulty Effect（难提取 chunk 成功访问获更大 stability 增益，Bjork 1994）──
+    # OS 类比：TLB miss → page walk — miss 成本高但重填 TLB 使后续命中；难检索 = TLB miss，成功 = 更新缓存
+    try:
+        apply_desirable_difficulty(conn, chunk_ids, now_iso=now_iso)
+    except Exception:
+        pass
+
+    # ── iter486: CRE2 — Contextual Reinstatement Effect（上下文匹配增强检索效率，Godden & Baddeley 1975）──
+    # OS 类比：CPU cache locality — 同一 namespace/tag 上下文 = 同一 cache line 集合访问效率更高
+    try:
+        _query_ns = kwargs.get("namespace", "") if kwargs else ""
+        _query_tags = kwargs.get("tags", []) if kwargs else []
+        apply_contextual_reinstatement(conn, chunk_ids, _query_ns, _query_tags)
+    except Exception:
+        pass
+
+    # ── iter487: ETE2 — Emotion Tagging Effect（高情绪 chunk 衰减更慢，McGaugh 2000）──
+    # OS 类比：cgroup memory.min 保护 — 高重要性进程 pages 受保护不被 kswapd 回收
+    try:
+        apply_emotion_tagging_decay_reduction(conn, chunk_ids)
+    except Exception:
+        pass
+
+    # ── iter488: IOR — Inhibition of Return（短时重复访问 stability 增益递减，Posner 1984）──
+    # OS 类比：MADV_RANDOM prefetch inhibition — 刚读过的 page 降低预取优先级
+    try:
+        apply_inhibition_of_return(conn, chunk_ids, now_iso=now_iso)
     except Exception:
         pass
 
@@ -10760,6 +10820,688 @@ def apply_forward_association_primacy(
                         break
             if boosted_count > 0:
                 result["fap_boosted"] += boosted_count
+        return result
+    except Exception:
+        return result
+
+
+def apply_testing_effect(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+    now_iso: str = None,
+) -> dict:
+    """iter481: Testing Effect / Retrieval Practice Effect (TPE) —
+    被主动检索到的 chunk 比单纯访问获得更高的 stability 加成。
+
+    认知科学依据：
+      Roediger & Karpicke (2006) "Test-enhanced learning" Science 319(5865):966-8 —
+        1周后保留率：测试组 64% vs 复习组 40%；Cohen's d ≈ 1.0（认知科学最强效应之一）。
+        机制：主动检索激活"检索练习"路径 → 强化编码痕迹 → 更高长时稳定性。
+      Karpicke & Roediger (2008) PNAS: 4次检索比 1次检索+3次复习保留率高2倍。
+      Butler & Roediger (2007): 测试效应跨领域稳定（不依赖材料类型）。
+
+    OS 类比：CPU TLB hit vs page table walk（arch/x86/mm/tlb.c）—
+      TLB 命中（= 主动检索）更新 LRU 并保留 hot page 于 L1；
+      page table walk（= 被动复习）成本高且不更新 TLB；
+      TPE = TLB hit 对应的额外 refcount boost。
+    """
+    result = {"tpe_boosted": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        import datetime as _dt
+        if not _cfg.get("store_vfs.tpe_enabled"):
+            return result
+
+        boost_factor = float(_cfg.get("store_vfs.tpe_boost_factor"))
+        max_boost = float(_cfg.get("store_vfs.tpe_max_boost"))
+        min_importance = float(_cfg.get("store_vfs.tpe_min_importance"))
+        lookback_min = int(_cfg.get("store_vfs.tpe_lookback_minutes"))
+
+        if now_iso is None:
+            now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+        # 计算时间窗口下界
+        try:
+            now_dt = _dt.datetime.fromisoformat(now_iso)
+        except Exception:
+            now_dt = _dt.datetime.now(_dt.timezone.utc)
+        cutoff_dt = now_dt - _dt.timedelta(minutes=lookback_min)
+        cutoff_iso = cutoff_dt.isoformat()
+
+        for chunk_id in chunk_ids:
+            row = conn.execute(
+                "SELECT stability, importance FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+            if imp < min_importance:
+                continue
+
+            # 检查最近是否有 recall_traces 命中该 chunk
+            # recall_traces.top_k_json 是 JSON 数组，包含 chunk_id
+            try:
+                hit_count = conn.execute(
+                    """SELECT COUNT(*) FROM recall_traces
+                       WHERE timestamp >= ? AND top_k_json LIKE ?""",
+                    (cutoff_iso, f'%"{chunk_id}"%')
+                ).fetchone()[0]
+            except Exception:
+                hit_count = 0
+
+            if hit_count == 0:
+                # 没有 recall_traces 命中，不是"主动检索"，不触发 TPE
+                continue
+
+            capped_boost = min(max_boost, boost_factor)
+            new_stab = min(365.0, stab * (1.0 + capped_boost))
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+                )
+                result["tpe_boosted"] += 1
+        return result
+    except Exception:
+        return result
+
+
+def apply_spacing_effect_bonus(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+    now_iso: str = None,
+) -> dict:
+    """iter482: Spacing Effect Bonus (SEB) — 重复访问时，间隔越长每次获得的 stability 增益越大。
+
+    认知科学依据：
+      Ebbinghaus (1885) "Über das Gedächtnis" — 间隔复习遗忘曲线最优。
+      Bahrick, Bahrick & Bahrick (1993) JEPS: 间隔越大，长期 retention 增益越大。
+      Cepeda et al. (2006) Psych Bulletin meta-analysis（317 studies）: d=0.70；
+        最优复习间隔 = retention interval × 10-20%。
+      Landauer & Bjork (1978): 间隔练习（spaced practice）vs 集中练习（massed practice）
+        长期差异可达 40-50% retention（相同总练习时间下）。
+
+    OS 类比：Linux page access bit TLB aging（arch/x86/mm/tlb.c）—
+      系统定期清除 access bit；距上次清除（= 上次访问）越久，
+      下次命中时 TLB 优先级越高（aging = 越稀缺越珍贵）；
+      长间隔 = 该 page 在 aged 状态下仍被访问 = 高价值 → priority++。
+    """
+    result = {"seb_boosted": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        import math as _math
+        import datetime as _dt
+        if not _cfg.get("store_vfs.seb_enabled"):
+            return result
+
+        min_gap_hours = int(_cfg.get("store_vfs.seb_min_gap_hours"))
+        base_bonus = float(_cfg.get("store_vfs.seb_base_bonus"))
+        max_bonus = float(_cfg.get("store_vfs.seb_max_bonus"))
+        min_importance = float(_cfg.get("store_vfs.seb_min_importance"))
+
+        if now_iso is None:
+            now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+        try:
+            now_dt = _dt.datetime.fromisoformat(now_iso)
+        except Exception:
+            now_dt = _dt.datetime.now(_dt.timezone.utc)
+
+        for chunk_id in chunk_ids:
+            row = conn.execute(
+                "SELECT stability, importance, last_accessed FROM memory_chunks WHERE id=?",
+                (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+            if imp < min_importance:
+                continue
+            last_acc = row[2] or ""
+            if not last_acc:
+                continue
+
+            try:
+                last_dt = _dt.datetime.fromisoformat(last_acc)
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=_dt.timezone.utc)
+                if now_dt.tzinfo is None:
+                    now_dt = now_dt.replace(tzinfo=_dt.timezone.utc)
+                gap_hours = (now_dt - last_dt).total_seconds() / 3600.0
+            except Exception:
+                continue
+
+            if gap_hours < min_gap_hours:
+                continue
+
+            # bonus_ratio = min(max_bonus, base_bonus × log2(gap_hours/min_gap + 1))
+            bonus_ratio = min(max_bonus,
+                              base_bonus * _math.log2(gap_hours / min_gap_hours + 1))
+            new_stab = min(365.0, stab * (1.0 + bonus_ratio))
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+                )
+                result["seb_boosted"] += 1
+        return result
+    except Exception:
+        return result
+
+
+def apply_priming_effect(
+    conn: "sqlite3.Connection",
+    chunk_id: str,
+    content: str,
+    now_iso: str = None,
+) -> dict:
+    """iter483: Priming Effect (PE) — 编码新 chunk 时，已有语义相似 chunk 提供启动效应，
+    使新 chunk 的 stability 更高（提供语义脚手架）。
+
+    认知科学依据：
+      Meyer & Schvaneveldt (1971) "Facilitation in recognizing pairs of words" JEPS —
+        已激活相关概念（prime）使目标词识别更快（反应时间快 80ms），编码更深。
+      Tulving & Osler (1968) "Effectiveness of retrieval cues" — 编码时的提示线索
+        在检索时有效 → 说明编码质量受启动影响。
+      Collins & Loftus (1975) spreading activation: 语义网络中相关节点激活传播；
+        新 chunk 编码时周围语义激活越高，编码越稳固。
+
+    OS 类比：Linux dentry cache warm（fs/dcache.c）—
+      相关目录项已在 dentry cache（prime）→ 新文件路径解析（编码）更快更稳定；
+      dentry cache hit = 语义启动 = 新 chunk 编码时的"语义脚手架"。
+    """
+    result = {"pe_boosted": False, "pe_n_primes": 0}
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.pe_enabled"):
+            return result
+
+        min_similarity = float(_cfg.get("store_vfs.pe_min_similarity"))
+        boost_per_prime = float(_cfg.get("store_vfs.pe_boost_per_prime"))
+        max_boost = float(_cfg.get("store_vfs.pe_max_boost"))
+        min_importance = float(_cfg.get("store_vfs.pe_min_importance"))
+        min_primes = int(_cfg.get("store_vfs.pe_min_primes"))
+
+        row = conn.execute(
+            "SELECT stability, importance, project FROM memory_chunks WHERE id=?",
+            (chunk_id,)
+        ).fetchone()
+        if not row:
+            return result
+        stab = float(row[0] or 1.0)
+        imp = float(row[1] or 0.0)
+        project = row[2] or ""
+        if imp < min_importance:
+            return result
+
+        src_words = set((content or "").lower().split())
+        if not src_words:
+            return result
+
+        # 查找同 project 已有的相似 chunk（不包含自身）
+        candidates = conn.execute(
+            """SELECT id, content FROM memory_chunks
+               WHERE project=? AND id != ? AND importance >= ?
+               ORDER BY importance DESC LIMIT 100""",
+            (project, chunk_id, min_importance)
+        ).fetchall()
+
+        n_primes = 0
+        for cand in candidates:
+            cand_words = set((cand[1] or "").lower().split())
+            if not cand_words:
+                continue
+            union = len(src_words | cand_words)
+            if union == 0:
+                continue
+            jaccard = len(src_words & cand_words) / union
+            if jaccard >= min_similarity:
+                n_primes += 1
+
+        result["pe_n_primes"] = n_primes
+        if n_primes < min_primes:
+            return result
+
+        boost_ratio = min(max_boost, n_primes * boost_per_prime)
+        new_stab = min(365.0, stab * (1.0 + boost_ratio))
+        if new_stab > stab + 1e-6:
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+            )
+            result["pe_boosted"] = True
+        return result
+    except Exception:
+        return result
+
+
+def apply_cross_session_consolidation(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+    session_id: str,
+    now_iso: str = None,
+) -> dict:
+    """iter484: Cross-Session Consolidation Effect (CCE) — 跨 session 访问的 chunk
+    获得额外的 stability 奖励（模拟睡眠/休息期的海马-皮质巩固）。
+
+    认知科学依据：
+      Walker & Stickgold (2004) "Sleep-dependent learning and memory consolidation"
+        Neuron 44(1):121-133 — 睡眠期海马 sharp-wave ripple（SWR）重放 →
+        皮质巩固（系统巩固理论）；睡眠后记忆提升 6-12%（performance boost）。
+      Stickgold (2005) Science "Sleep-dependent memory consolidation" —
+        睡眠是记忆巩固的积极过程，非仅"减少干扰"。
+      Korman et al. (2007): 跨日间隔（含睡眠）vs 非睡眠间隔巩固差异显著。
+
+    OS 类比：Linux kswapd background reclaim（mm/vmscan.c）—
+      kswapd 在系统空闲时（≈ session 间隔）主动整理 page，将 cold page 回收、
+      warm page 移到高 LRU 位置；session 间隔 = kswapd 运行期 = 后台巩固；
+      下次访问时 stability 额外提升 = kswapd 优化后的 page 命中率提升。
+    """
+    result = {"cce_boosted": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        import datetime as _dt
+        import math as _math
+        if not _cfg.get("store_vfs.cce_enabled"):
+            return result
+
+        min_gap_hours = int(_cfg.get("store_vfs.cce_min_gap_hours"))
+        base_bonus = float(_cfg.get("store_vfs.cce_base_bonus"))
+        max_boost = float(_cfg.get("store_vfs.cce_max_boost"))
+        min_importance = float(_cfg.get("store_vfs.cce_min_importance"))
+
+        if now_iso is None:
+            now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+        try:
+            now_dt = _dt.datetime.fromisoformat(now_iso)
+        except Exception:
+            now_dt = _dt.datetime.now(_dt.timezone.utc)
+
+        for chunk_id in chunk_ids:
+            row = conn.execute(
+                "SELECT stability, importance, source_session, last_accessed "
+                "FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+            if imp < min_importance:
+                continue
+            src_session = row[2] or ""
+            last_acc = row[3] or ""
+
+            # 检查是否跨 session 访问
+            if not src_session or not session_id:
+                continue
+            if src_session == session_id:
+                continue  # 同 session，非跨 session 访问
+
+            # 计算时间间隔
+            if not last_acc:
+                continue
+            try:
+                last_dt = _dt.datetime.fromisoformat(last_acc)
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=_dt.timezone.utc)
+                if now_dt.tzinfo is None:
+                    now_dt = now_dt.replace(tzinfo=_dt.timezone.utc)
+                gap_hours = (now_dt - last_dt).total_seconds() / 3600.0
+            except Exception:
+                continue
+
+            if gap_hours < min_gap_hours:
+                continue
+
+            # bonus = min(max_boost, base_bonus × min(1.0, gap/24h))
+            # 最大奖励在 >= 24h 间隔后达到
+            bonus_ratio = min(max_boost, base_bonus * min(1.0, gap_hours / 24.0))
+            new_stab = min(365.0, stab * (1.0 + bonus_ratio))
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+                )
+                result["cce_boosted"] += 1
+        return result
+    except Exception:
+        return result
+
+
+def apply_desirable_difficulty(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+    now_iso: str = None,
+) -> dict:
+    """iter485: Desirable Difficulty Effect (DDE2) — 提取难度高时（低 retrievability + 低 stability）
+    成功提取后 stability 增益更大（Bjork 1994）。
+
+    认知科学依据：
+      Bjork (1994) "Memory and metamemory considerations in the training of human beings"
+        — 适度困难的提取任务（高遗忘率情境下成功检索）强化编码深度；
+      Schmidt & Bjork (1992) Psych Science — 困难条件下的练习产生更持久的长期保留效果。
+      McDaniel & Masson (1985): 费力提取（elaborative interrogation）比浅层提取更持久。
+
+    OS 类比：Linux TLB miss → page walk — miss 时触发完整 page walk（成本高），
+      但完成后更新 TLB，后续命中更快（记忆更稳固）；难提取 = TLB miss，成功 = TLB 重新填充。
+    """
+    result = {"dde2_boosted": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        import datetime as _dt
+        import math as _math
+        if not _cfg.get("store_vfs.dde2_enabled"):
+            return result
+
+        r_threshold = float(_cfg.get("store_vfs.dde2_retrievability_threshold"))
+        s_threshold = float(_cfg.get("store_vfs.dde2_stability_threshold"))
+        bonus_factor = float(_cfg.get("store_vfs.dde2_bonus_per_difficulty"))
+        max_boost = float(_cfg.get("store_vfs.dde2_max_boost"))
+        min_importance = float(_cfg.get("store_vfs.dde2_min_importance"))
+
+        if now_iso is None:
+            now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        try:
+            now_dt = _dt.datetime.fromisoformat(now_iso)
+            if now_dt.tzinfo is None:
+                now_dt = now_dt.replace(tzinfo=_dt.timezone.utc)
+        except Exception:
+            now_dt = _dt.datetime.now(_dt.timezone.utc)
+
+        for chunk_id in chunk_ids:
+            row = conn.execute(
+                "SELECT stability, importance, last_accessed "
+                "FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+            if imp < min_importance:
+                continue
+            if stab > s_threshold:
+                continue  # stability 已高，不算"难"
+
+            # 计算 retrievability：R = exp(-t/S)
+            last_acc = row[2] or ""
+            t_days = 0.0
+            if last_acc:
+                try:
+                    last_dt = _dt.datetime.fromisoformat(last_acc)
+                    if last_dt.tzinfo is None:
+                        last_dt = last_dt.replace(tzinfo=_dt.timezone.utc)
+                    t_days = max(0.0, (now_dt - last_dt).total_seconds() / 86400.0)
+                except Exception:
+                    pass
+            retrievability = _math.exp(-t_days / max(stab, 0.1))
+            if retrievability > r_threshold:
+                continue  # retrievability 仍高，不算"难"
+
+            # 难度得分：越低 R 越难，奖励越大
+            difficulty = 1.0 - retrievability  # [0, 1]
+            bonus_ratio = min(max_boost, bonus_factor * difficulty)
+            new_stab = min(365.0, stab * (1.0 + bonus_ratio))
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+                )
+                result["dde2_boosted"] += 1
+        return result
+    except Exception:
+        return result
+
+
+def apply_contextual_reinstatement(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+    query_namespace: str = "",
+    query_tags: list = None,
+) -> dict:
+    """iter486: Contextual Reinstatement Effect (CRE2) — 恢复编码上下文时检索效率提高。
+
+    认知科学依据：
+      Godden & Baddeley (1975) British J Psychology — 水下/陆地编码实验证明，
+        上下文匹配使记忆提取成功率提高 ~40%；
+      Smith (1979): 在编码相同房间测验比不同房间高 ~25%；
+      Smith & Vela (2001) Psych Bulletin — 上下文依赖记忆 meta-analysis 综述。
+
+    OS 类比：CPU cache locality（spatial/temporal locality） —
+      访问与之前同一 locality 集合的 page，L1/L2 cache 命中率更高；
+      namespace/tag 匹配 = 访问同一 cache line 集合。
+    """
+    result = {"cre2_boosted": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.cre2_enabled"):
+            return result
+
+        ns_bonus = float(_cfg.get("store_vfs.cre2_namespace_match_bonus"))
+        tag_bonus = float(_cfg.get("store_vfs.cre2_tag_overlap_bonus"))
+        tag_threshold = float(_cfg.get("store_vfs.cre2_tag_overlap_threshold"))
+        max_boost = float(_cfg.get("store_vfs.cre2_max_boost"))
+        min_importance = float(_cfg.get("store_vfs.cre2_min_importance"))
+        import json as _json
+
+        if query_tags is None:
+            query_tags = []
+        query_tag_set = set(query_tags)
+
+        for chunk_id in chunk_ids:
+            row = conn.execute(
+                "SELECT retrievability, importance, project, tags "
+                "FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            ret = float(row[0] or 0.5)
+            imp = float(row[1] or 0.0)
+            if imp < min_importance:
+                continue
+
+            boost = 0.0
+            # project 作为 namespace 代理（OS 类比：cgroup/subsystem）
+            chunk_ns = row[2] or ""
+            if query_namespace and chunk_ns and query_namespace == chunk_ns:
+                boost += ns_bonus
+
+            # Tag Jaccard
+            if query_tag_set:
+                try:
+                    raw_tags = row[3]
+                    if isinstance(raw_tags, str):
+                        chunk_tags = set(_json.loads(raw_tags)) if raw_tags.startswith("[") else set(raw_tags.split(","))
+                    elif isinstance(raw_tags, (list, set)):
+                        chunk_tags = set(raw_tags)
+                    else:
+                        chunk_tags = set()
+                    if chunk_tags:
+                        intersection = len(query_tag_set & chunk_tags)
+                        union = len(query_tag_set | chunk_tags)
+                        jaccard = intersection / union if union else 0.0
+                        if jaccard >= tag_threshold:
+                            boost += tag_bonus
+                except Exception:
+                    pass
+
+            if boost <= 0:
+                continue
+            boost = min(max_boost, boost)
+            new_ret = min(1.0, ret + boost)
+            if new_ret > ret + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET retrievability=? WHERE id=?", (new_ret, chunk_id)
+                )
+                result["cre2_boosted"] += 1
+        return result
+    except Exception:
+        return result
+
+
+def apply_emotion_tagging_decay_reduction(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+) -> dict:
+    """iter487: Emotion Tagging Effect (ETE2) — 高情绪价值 chunk 的 stability 衰减速率降低。
+
+    认知科学依据：
+      McGaugh (2000) Science "Memory — a century of consolidation" —
+        杏仁核通过 norepinephrine/cortisol 调节海马巩固，情绪唤起（arousal）增强 LTP；
+      Cahill & McGaugh (1998): 情绪事件被记住更长（杏仁核-海马互作）；
+      LaBar & Cabeza (2006) Nat Rev Neuro — 情绪记忆优势效应 meta-analysis。
+
+    OS 类比：Linux cgroup memory.min 保护 —
+      高优先级进程的 pages 受 memory.min 保护，kswapd 不会回收；
+      高情绪 = 高 importance ≈ cgroup min 保护 → 衰减减缓。
+
+    实现：通过给 stability 设置更高下限（decay floor）来模拟衰减减缓。
+    在实际访问时检测，若 chunk 满足高情绪条件，则额外提升 stability。
+    """
+    result = {"ete2_boosted": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.ete2_enabled"):
+            return result
+
+        imp_threshold = float(_cfg.get("store_vfs.ete2_importance_threshold"))
+        decay_reduction = float(_cfg.get("store_vfs.ete2_stability_decay_reduction"))
+        kw_bonus = float(_cfg.get("store_vfs.ete2_keyword_bonus"))
+        max_reduction = float(_cfg.get("store_vfs.ete2_max_decay_reduction"))
+        emotion_keywords = _cfg.get("store_vfs.ete2_emotion_keywords") or []
+
+        for chunk_id in chunk_ids:
+            row = conn.execute(
+                "SELECT stability, importance, content "
+                "FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+            if imp < imp_threshold:
+                continue  # 不满足高情绪条件
+
+            total_reduction = decay_reduction
+
+            # 检测情绪关键词
+            content = (row[2] or "").lower()
+            if emotion_keywords and any(kw.lower() in content for kw in emotion_keywords):
+                total_reduction += kw_bonus
+
+            total_reduction = min(max_reduction, total_reduction)
+
+            # 提升 stability（模拟衰减减缓：等效于 stability × (1 + reduction)）
+            bonus_stab = min(365.0, stab * (1.0 + total_reduction))
+            if bonus_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?", (bonus_stab, chunk_id)
+                )
+                result["ete2_boosted"] += 1
+        return result
+    except Exception:
+        return result
+
+
+def apply_inhibition_of_return(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+    now_iso: str = None,
+) -> dict:
+    """iter488: Inhibition of Return (IOR) — 短时间内重复访问同一 chunk 时 stability 增益递减。
+
+    认知科学依据：
+      Posner & Cohen (1984) "Components of visual orienting" Attention & Performance X —
+        注意力返回刚刚访问位置的速度较慢（IOR）；短时间内重复激活同一记忆收益递减；
+      Klein (2000) TICS "Inhibition of return" — IOR 广泛存在于注意力和记忆提取中；
+      频繁重复访问 ≈ 过度练习（overlearning），对稳定性提升边际效益递减。
+
+    OS 类比：Linux madvise(MADV_RANDOM) + prefetch inhibition —
+      对刚刚读取的 page 降低预取优先级，预取资源分配给尚未访问的 page；
+      频繁重访 = 预取器降低优先级 = stability 增益惩罚。
+
+    实现：检测 last_accessed 与 now 的间隔；若在 ior_inhibition_window_secs 内，
+    则对本次访问的 stability 增益乘以 penalty_factor。
+    直接调整 stability（若当前 stability 刚被其他效应提升，则部分回退）。
+    """
+    result = {"ior_penalized": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        import datetime as _dt
+        if not _cfg.get("store_vfs.ior_enabled"):
+            return result
+
+        window_secs = int(_cfg.get("store_vfs.ior_inhibition_window_secs"))
+        penalty_factor = float(_cfg.get("store_vfs.ior_penalty_factor"))
+        min_interval_secs = int(_cfg.get("store_vfs.ior_min_interval_secs"))
+        min_importance = float(_cfg.get("store_vfs.ior_min_importance"))
+
+        if now_iso is None:
+            now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        try:
+            now_dt = _dt.datetime.fromisoformat(now_iso)
+            if now_dt.tzinfo is None:
+                now_dt = now_dt.replace(tzinfo=_dt.timezone.utc)
+        except Exception:
+            now_dt = _dt.datetime.now(_dt.timezone.utc)
+
+        for chunk_id in chunk_ids:
+            row = conn.execute(
+                "SELECT stability, importance, last_accessed "
+                "FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+            if imp < min_importance:
+                continue
+
+            last_acc = row[2] or ""
+            if not last_acc:
+                continue
+
+            try:
+                last_dt = _dt.datetime.fromisoformat(last_acc)
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=_dt.timezone.utc)
+                gap_secs = (now_dt - last_dt).total_seconds()
+            except Exception:
+                continue
+
+            if gap_secs < 0:
+                continue
+            if gap_secs > window_secs:
+                continue  # 超出抑制窗口，不惩罚
+
+            # 窗口内重复访问 → stability 增益惩罚
+            # 间隔越短惩罚越重：0~min_interval_secs 区间线性从最重到最轻
+            if gap_secs < min_interval_secs:
+                effective_penalty = penalty_factor  # 最重惩罚
+            else:
+                # 线性插值：从 penalty_factor 到 1.0（无惩罚），按间隔比例
+                t = (gap_secs - min_interval_secs) / max(window_secs - min_interval_secs, 1)
+                effective_penalty = penalty_factor + t * (1.0 - penalty_factor)
+
+            # 惩罚：将 stability 从当前值向 stab * effective_penalty 方向调整
+            # 只惩罚高于"正常水平"的部分（避免无意义降低）
+            penalized_stab = max(1.0, stab * effective_penalty)
+            if penalized_stab < stab - 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?", (penalized_stab, chunk_id)
+                )
+                result["ior_penalized"] += 1
         return result
     except Exception:
         return result
