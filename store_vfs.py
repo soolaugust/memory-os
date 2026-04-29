@@ -2183,6 +2183,13 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
     except Exception:
         pass
 
+    # ── iter477: MBE — Memory Binding Effect（同 session 同批编码的 chunk 相互加固，Eichenbaum 2004）──
+    # OS 类比：Linux THP — 相邻 page 合并为大页，提升整体 TLB coverage 和稳定性
+    try:
+        apply_memory_binding_effect(conn, [d["id"]])
+    except Exception:
+        pass
+
     # ── iter473: MIE — Memory Interference Effect（同类内容密集写入互相干扰，McGeoch 1932）──
     # 注意：MIE 在最后执行，作为对其他正向效应的"自然拮抗"（认知真实性）
     # OS 类比：Linux cache thrashing — working set > memory 时 page 频繁换入换出
@@ -5443,6 +5450,21 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
     # OS 类比：L1 cache MRU slot — 最近访问的 chunk 短期可达性最高
     try:
         apply_serial_position_recency(conn, chunk_ids, now_iso=now_iso)
+    except Exception:
+        pass
+
+    # ── iter479: UDP — Use-Dependent Plasticity（共同访问的 chunk 互相加固，Hebb 1949）──
+    # OS 类比：Linux working set model — 共同访问的 page 各自 refcount 递增，更难被回收
+    try:
+        if len(chunk_ids) >= 2:
+            apply_use_dependent_plasticity(conn, chunk_ids, now_iso=now_iso)
+    except Exception:
+        pass
+
+    # ── iter480: FAP — Forward Association Primacy（访问当前 chunk 提升较早 session sibling，Kahana 2002）──
+    # OS 类比：CPU 指令流水线预取 — 执行当前指令时预取之前相关指令的上下文到 fetch buffer
+    try:
+        apply_forward_association_primacy(conn, chunk_ids, now_iso=now_iso)
     except Exception:
         pass
 
@@ -10417,6 +10439,327 @@ def apply_cognitive_load_penalty(
                 "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
             )
             result["clp_penalized"] = True
+        return result
+    except Exception:
+        return result
+
+
+def apply_memory_binding_effect(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+    now_iso: str = None,
+) -> dict:
+    """iter477: Memory Binding Effect (MBE) — 同 session 同批编码的 chunk 相互加固 stability。
+
+    认知科学依据：
+      Eichenbaum (2004) "Hippocampus: cognitive processes and neural representations
+      that underlie declarative memory" — 海马体在情节编码时将同一事件内的记忆元素
+      绑定（binding）在一起，形成关联记忆结构，共同激活使各部分稳定性相互增强。
+      Norman & Eichenbaum (2014): 绑定程度 ∝ 编码时的共同激活强度。
+      Howard & Kahana (2002): 同一时间窗口内编码的条目具有更强的联想连接。
+
+    OS 类比：Linux THP（Transparent Huge Pages）—
+      相邻的 4K page 合并为 2MB 大页（/sys/kernel/mm/transparent_hugepage/enabled）；
+      合并后 TLB coverage 更大、访问局部性更好；
+      同 session 同批 chunk = 相邻 page → 合并为大页 → 整体稳定性提升。
+    """
+    result = {"mbe_boosted": 0, "mbe_total_bound": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.mbe_enabled"):
+            return result
+
+        window_sec = int(_cfg.get("store_vfs.mbe_window_seconds"))
+        boost_factor = float(_cfg.get("store_vfs.mbe_boost_factor"))
+        max_boost = float(_cfg.get("store_vfs.mbe_max_boost"))
+        max_neighbors = int(_cfg.get("store_vfs.mbe_max_neighbors"))
+        min_importance = float(_cfg.get("store_vfs.mbe_min_importance"))
+
+        for chunk_id in chunk_ids:
+            row = conn.execute(
+                "SELECT stability, importance, source_session, project, created_at "
+                "FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+            if imp < min_importance:
+                continue
+            session_id = row[2] or ""
+            project = row[3] or ""
+            created_at = row[4] or ""
+            if not session_id:
+                continue
+
+            # 查找同 session 内在时间窗口内的其他 chunk
+            neighbors = conn.execute(
+                """SELECT id FROM memory_chunks
+                   WHERE source_session=? AND project=? AND id != ?
+                   AND ABS(JULIANDAY(created_at) - JULIANDAY(?)) * 86400 <= ?
+                   ORDER BY created_at
+                   LIMIT ?""",
+                (session_id, project, chunk_id, created_at, window_sec, max_neighbors)
+            ).fetchall()
+
+            n_bound = len(neighbors)
+            if n_bound == 0:
+                continue
+
+            raw_boost = n_bound * boost_factor
+            capped_boost = min(max_boost, raw_boost)
+            new_stab = min(365.0, stab * (1.0 + capped_boost))
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+                )
+                result["mbe_boosted"] += 1
+                result["mbe_total_bound"] += n_bound
+        return result
+    except Exception:
+        return result
+
+
+def apply_directed_forgetting_effect(
+    conn: "sqlite3.Connection",
+    chunk_id: str,
+    project: str,
+    old_importance: float,
+    new_importance: float,
+) -> dict:
+    """iter478: Directed Forgetting Effect (DFE) — importance 显著下降时向相似 chunk 扩散遗忘。
+
+    认知科学依据：
+      Bjork (1972) "Directed forgetting: Some methodological and theoretical considerations" —
+        当被明确指示"忘记"某项内容时，相关记忆也受到抑制（category inhibition mechanism）。
+        机制：主动抑制目标记忆 → 压制同类竞争记忆（避免干扰）→ 相关记忆检索率降低 10-20%。
+      Bjork & Woodward (1973): TBF（to-be-forgotten）条目及其关联条目均受抑制。
+      MacLeod (1998): DFE 在元认知层（"这个重要性下降了"）也适用。
+
+    OS 类比：Linux MADV_FREE（mm/madvise.c）—
+      进程标记页面为"懒惰释放（lazy free）"→ 内核标记为可回收但尚未实际回收；
+      当内存压力到来时页面被驱逐（类比 importance 下降触发被动遗忘传播）。
+      DFE = importance drop event → 相似 chunk 标记为"被动遗忘候选" → stability 微降。
+    """
+    result = {"dfe_propagated": False, "dfe_neighbors_decayed": 0}
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.dfe_enabled"):
+            return result
+
+        min_drop = float(_cfg.get("store_vfs.dfe_min_importance_drop"))
+        importance_drop = old_importance - new_importance
+        if importance_drop < min_drop:
+            return result
+
+        min_similarity = float(_cfg.get("store_vfs.dfe_min_similarity"))
+        decay_factor = float(_cfg.get("store_vfs.dfe_decay_factor"))
+        max_decay = float(_cfg.get("store_vfs.dfe_max_decay"))
+        max_neighbors = int(_cfg.get("store_vfs.dfe_max_neighbors"))
+        min_importance = float(_cfg.get("store_vfs.dfe_min_importance"))
+
+        # 获取源 chunk 的内容
+        row = conn.execute(
+            "SELECT content FROM memory_chunks WHERE id=?", (chunk_id,)
+        ).fetchone()
+        if not row:
+            return result
+        src_content = row[0] or ""
+        src_words = set((src_content or "").lower().split())
+        if not src_words:
+            return result
+
+        # 查找同 project 的候选邻居
+        candidates = conn.execute(
+            """SELECT id, content, stability, importance FROM memory_chunks
+               WHERE project=? AND id != ? AND importance >= ?
+               ORDER BY importance DESC LIMIT 200""",
+            (project, chunk_id, min_importance)
+        ).fetchall()
+
+        decayed_count = 0
+        for nb in candidates:
+            if decayed_count >= max_neighbors:
+                break
+            nb_words = set((nb[1] or "").lower().split())
+            if not nb_words:
+                continue
+            union = len(src_words | nb_words)
+            if union == 0:
+                continue
+            jaccard = len(src_words & nb_words) / union
+            if jaccard < min_similarity:
+                continue
+
+            nb_stab = float(nb[2] or 1.0)
+            # 衰减比例 = min(max_decay, (1 - decay_factor) * jaccard)
+            decay_ratio = min(max_decay, (1.0 - decay_factor) * jaccard)
+            new_stab = max(0.1, nb_stab * (1.0 - decay_ratio))
+            if new_stab < nb_stab - 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, nb[0])
+                )
+                decayed_count += 1
+
+        if decayed_count > 0:
+            result["dfe_propagated"] = True
+            result["dfe_neighbors_decayed"] = decayed_count
+        return result
+    except Exception:
+        return result
+
+
+def apply_use_dependent_plasticity(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+    now_iso: str = None,
+) -> dict:
+    """iter479: Use-Dependent Plasticity (UDP) — 共同访问的 chunk 互相加固 stability。
+
+    认知科学依据：
+      Hebb (1949) "The Organization of Behavior" — "Neurons that fire together wire together"：
+        共同激活的神经元之间突触连接加强（Hebbian plasticity）。
+        记忆等价：同时被检索激活的记忆节点 → 相互间连接（stability）增强。
+      Bhattacharya & Bhattacharya (2009) long-term potentiation（LTP）:
+        重复共同激活 → AMPA receptor density 上调 → 突触效能永久增强。
+      Shastri & Ajjanagadde (1993) 绑定问题：
+        共同激活的概念在工作记忆中形成临时绑定 → 反复共激活转为长时连接。
+
+    OS 类比：Linux working set model（mm/vmscan.c refcount）—
+      page A 和 page B 经常被同一进程同时访问 → 两者 refcount 都高 →
+      page reclaim 优先考虑低 refcount page；共激活 = 共享高 refcount = 更不易被回收。
+    """
+    result = {"udp_boosted": 0}
+    if not chunk_ids or len(chunk_ids) < 2:
+        return result
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.udp_enabled"):
+            return result
+
+        boost_per_peer = float(_cfg.get("store_vfs.udp_boost_per_peer"))
+        max_boost = float(_cfg.get("store_vfs.udp_max_boost"))
+        max_peers = int(_cfg.get("store_vfs.udp_max_peers"))
+        min_importance = float(_cfg.get("store_vfs.udp_min_importance"))
+
+        # 每个 chunk 都从其他 chunk 中获益
+        peer_list = list(chunk_ids)
+        for chunk_id in chunk_ids:
+            row = conn.execute(
+                "SELECT stability, importance FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+            if imp < min_importance:
+                continue
+
+            # 参与的对等数（排除自身，最多 max_peers 个）
+            n_peers = min(max_peers, len(peer_list) - 1)
+            if n_peers <= 0:
+                continue
+
+            raw_boost = n_peers * boost_per_peer
+            capped_boost = min(max_boost, raw_boost)
+            new_stab = min(365.0, stab * (1.0 + capped_boost))
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+                )
+                result["udp_boosted"] += 1
+        return result
+    except Exception:
+        return result
+
+
+def apply_forward_association_primacy(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+    now_iso: str = None,
+) -> dict:
+    """iter480: Forward Association Primacy (FAP) — 访问当前 chunk 时，较早的 session sibling
+    retrievability 提升（前向联想比后向联想强）。
+
+    认知科学依据：
+      Kahana (2002) "Associative symmetry and memory theory" —
+        自由回忆中前向转换（forward transition: item_i → item_{i+1}）概率比后向转换高 ~1.5:1。
+        机制：序列编码时，先编码的项目成为"前向联想提示"，后续项目访问时激活先前项目。
+      Howard & Kahana (1999) "Contextual variability and serial position effects in free recall":
+        前向联想（forward asymmetry）在情节记忆中持续稳定（跨文化, d ≈ 0.4）。
+      Raaijmakers & Shiffrin (1981) SAM 模型: 编码顺序 → 强非对称联想权重。
+
+    OS 类比：CPU 指令流水线预取（arch/x86/lib/usercopy.S）—
+      执行当前指令时，CPU 同时预取后续 N 条指令到 fetch buffer；
+      这里"访问当前 chunk" = 触发对 session 中较早 chunk 的前向联想提升（逆向）—
+      实际上后来的 chunk 访问 → 前面的 chunk retrievability 升高（符合 Kahana 的前向方向定义）。
+    """
+    result = {"fap_boosted": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.fap_enabled"):
+            return result
+
+        retr_boost = float(_cfg.get("store_vfs.fap_retr_boost"))
+        max_boost = float(_cfg.get("store_vfs.fap_max_boost"))
+        lookback_window = int(_cfg.get("store_vfs.fap_lookback_window"))
+        min_session_size = int(_cfg.get("store_vfs.fap_min_session_size"))
+        min_importance = float(_cfg.get("store_vfs.fap_min_importance"))
+
+        for chunk_id in chunk_ids:
+            row = conn.execute(
+                "SELECT importance, source_session, project, created_at "
+                "FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            imp = float(row[0] or 0.0)
+            if imp < min_importance:
+                continue
+            session_id = row[1] or ""
+            project = row[2] or ""
+            created_at = row[3] or ""
+            if not session_id:
+                continue
+
+            # 检查 session 大小
+            session_size = conn.execute(
+                "SELECT COUNT(*) FROM memory_chunks WHERE source_session=? AND project=?",
+                (session_id, project)
+            ).fetchone()[0]
+            if session_size < min_session_size:
+                continue
+
+            # 查找该 chunk 在 session 中较早创建的 chunk（前向联想来源）
+            earlier_chunks = conn.execute(
+                """SELECT id, retrievability, importance FROM memory_chunks
+                   WHERE source_session=? AND project=? AND id != ?
+                   AND created_at < ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (session_id, project, chunk_id, created_at, lookback_window)
+            ).fetchall()
+
+            boosted_count = 0
+            for ec in earlier_chunks:
+                ec_retr = float(ec[1] or 0.0)
+                ec_imp = float(ec[2] or 0.0)
+                if ec_imp < min_importance:
+                    continue
+                new_retr = min(1.0, ec_retr + retr_boost)
+                if new_retr > ec_retr + 1e-6:
+                    conn.execute(
+                        "UPDATE memory_chunks SET retrievability=? WHERE id=?",
+                        (new_retr, ec[0])
+                    )
+                    boosted_count += 1
+                    if ec_retr + retr_boost >= max_boost + ec_retr:
+                        break
+            if boosted_count > 0:
+                result["fap_boosted"] += boosted_count
         return result
     except Exception:
         return result

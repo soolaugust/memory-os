@@ -1610,6 +1610,71 @@ _REGISTRY: dict = {
     "store_vfs.clp_min_importance": (0.30, float, 0.0, 1.0, None,
         "iter476: 触发 CLP 的最低 importance 阈值（默认 0.30）"),
 
+    # ── iter477: Memory Binding Effect (MBE) — 同 session 共同编码的 chunk 相互加固（Eichenbaum 2004）──
+    # 认知科学依据：Eichenbaum (2004) 海马体情节绑定 — 同一编码事件中的记忆被绑定在一起，
+    #   共同激活使各部分稳定性相互加成（episodic binding）。OS 类比：Linux THP — 相邻页合并为大页。
+    "store_vfs.mbe_enabled": (True, bool, None, None, None,
+        "iter477: 是否启用 Memory Binding Effect（默认 True）"),
+    "store_vfs.mbe_window_seconds": (300, int, 10, 3600, None,
+        "iter477: 同 session 内被视为同批编码的时间窗口（秒，默认 300=5min）"),
+    "store_vfs.mbe_boost_factor": (0.03, float, 0.0, 0.15, None,
+        "iter477: 每个绑定邻居带来的 stability 加成比例（默认 0.03）"),
+    "store_vfs.mbe_max_boost": (0.10, float, 0.0, 0.30, None,
+        "iter477: MBE 最大 stability 加成比例（默认 0.10 = 10%）"),
+    "store_vfs.mbe_max_neighbors": (5, int, 1, 20, None,
+        "iter477: 最多参与绑定的邻居数（默认 5）"),
+    "store_vfs.mbe_min_importance": (0.25, float, 0.0, 1.0, None,
+        "iter477: 触发 MBE 的最低 importance 阈值（默认 0.25）"),
+
+    # ── iter478: Directed Forgetting Effect (DFE) — importance 下降时向关联 chunk 扩散遗忘（Bjork 1972）──
+    # 认知科学依据：Bjork (1972) 定向遗忘 — 当被明确告知"忘记某项"时，
+    #   相关记忆的检索也受到抑制（category inhibition）。OS 类比：MADV_FREE — 页标记为可回收。
+    "store_vfs.dfe_enabled": (True, bool, None, None, None,
+        "iter478: 是否启用 Directed Forgetting Effect（默认 True）"),
+    "store_vfs.dfe_min_importance_drop": (0.20, float, 0.0, 1.0, None,
+        "iter478: 触发 DFE 所需的 importance 降幅阈值（默认 0.20）"),
+    "store_vfs.dfe_min_similarity": (0.30, float, 0.0, 1.0, None,
+        "iter478: 邻居需达到的 Jaccard 相似度阈值（默认 0.30）"),
+    "store_vfs.dfe_decay_factor": (0.95, float, 0.5, 1.0, None,
+        "iter478: 遗忘扩散时邻居 stability 的衰减系数（默认 0.95，即降 5%）"),
+    "store_vfs.dfe_max_decay": (0.10, float, 0.0, 0.40, None,
+        "iter478: 最大衰减比例（默认 0.10 = 10%）"),
+    "store_vfs.dfe_max_neighbors": (8, int, 1, 30, None,
+        "iter478: 最多受影响的邻居数（默认 8）"),
+    "store_vfs.dfe_min_importance": (0.20, float, 0.0, 1.0, None,
+        "iter478: 邻居被影响所需的最低 importance（默认 0.20）"),
+
+    # ── iter479: Use-Dependent Plasticity (UDP) — 共同访问的 chunk 互相加固稳定性（Hebb 1949）──
+    # 认知科学依据：Hebb (1949) "Neurons that fire together wire together" —
+    #   共同激活的记忆节点间连接加强。OS 类比：Linux Working Set 共享页面 refcount++。
+    "store_vfs.udp_enabled": (True, bool, None, None, None,
+        "iter479: 是否启用 Use-Dependent Plasticity（默认 True）"),
+    "store_vfs.udp_boost_per_peer": (0.02, float, 0.0, 0.10, None,
+        "iter479: 每个共同访问邻居带来的 stability 加成（默认 0.02）"),
+    "store_vfs.udp_max_boost": (0.08, float, 0.0, 0.25, None,
+        "iter479: UDP 最大 stability 加成比例（默认 0.08 = 8%）"),
+    "store_vfs.udp_max_peers": (5, int, 1, 20, None,
+        "iter479: 最多参与共塑的对等 chunk 数（默认 5）"),
+    "store_vfs.udp_min_importance": (0.25, float, 0.0, 1.0, None,
+        "iter479: 触发 UDP 的最低 importance 阈值（默认 0.25）"),
+
+    # ── iter480: Forward Association Primacy (FAP) — 前向关联优先（Kahana 2002）──
+    # 认知科学依据：Kahana (2002) 序列学习中前向联想比后向联想强 ~1.5:1 —
+    #   访问后来的 chunk 时，较早的 session-sibling 的可达性提升（正向联想方向）。
+    #   OS 类比：CPU 指令流水线预取 — 按顺序预取后续指令到 fetch buffer。
+    "store_vfs.fap_enabled": (True, bool, None, None, None,
+        "iter480: 是否启用 Forward Association Primacy（默认 True）"),
+    "store_vfs.fap_retr_boost": (0.04, float, 0.0, 0.15, None,
+        "iter480: 前向关联 retrievability 加成（默认 0.04）"),
+    "store_vfs.fap_max_boost": (0.12, float, 0.0, 0.30, None,
+        "iter480: FAP 最大 retrievability 加成（默认 0.12）"),
+    "store_vfs.fap_lookback_window": (10, int, 1, 50, None,
+        "iter480: 查找当前 chunk 之前的 session sibling 数量（默认 10）"),
+    "store_vfs.fap_min_session_size": (3, int, 1, 20, None,
+        "iter480: 触发 FAP 所需的最小 session 大小（默认 3）"),
+    "store_vfs.fap_min_importance": (0.25, float, 0.0, 1.0, None,
+        "iter480: 触发 FAP 的最低 importance 阈值（默认 0.25）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。
