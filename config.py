@@ -927,6 +927,67 @@ _REGISTRY: dict = {
         "iter452: session 内注入统计时间窗口（小时）：只统计过去 N 小时内的 recall_traces，"
         "覆盖本 session 的工作区间（默认 24h，与 sleep_consolidate.window_hours 对应）"),
 
+    # ── iter453: Prediction Error Memory Enhancement — 意外命中触发多巴胺强化（Rescorla-Wagner 1972 / Schultz 1997）──
+    # 认知科学依据：
+    #   Rescorla & Wagner (1972) "A theory of Pavlovian conditioning" (Classical Conditioning II) —
+    #     条件反射的强化量取决于预测误差（ΔV = α × β × (λ - V)）：
+    #     当结果优于预期（λ > V，正向预测误差）→ 强化量最大；
+    #     当结果完全符合预期（λ = V）→ 无强化（预测误差=0）。
+    #     记忆形成效率与预测误差正比：surprise 越大，记忆越强。
+    #   Schultz, Dayan & Montague (1997) Science "A Neural Substrate of Prediction and Reward" —
+    #     VTA 多巴胺神经元精确编码时间差分预测误差（TD error）：
+    #     意外奖励 → 多巴胺爆发（burst）→ 强化 CS-US 关联（学习）；
+    #     预期内奖励 → 无多巴胺变化（学习率=0）；
+    #     预期奖励未出现 → 多巴胺抑制（dip）→ 弱化期望。
+    #     实验：猴子 VTA 记录：意外果汁奖励 → dopamine burst；预期果汁奖励（有 CS 提示）→ 无 burst。
+    #   Lisman & Grace (2005) Neuron "The hippocampal-VTA loop" —
+    #     海马→VTA 投射检测"新奇性"（novelty/surprise）：海马发现预测误差信号 →
+    #     激活 VTA 多巴胺 → 强化当前检索路径的海马-新皮层突触（LTP 诱导）。
+    #     等价：memory-os 中"意外命中"（低历史预期但当前高相关）= 新奇信号 → LTP 加成。
+    #   Wagner (1981) "SOP: A model of automatic memory processing in animal behavior" —
+    #     意外/新奇刺激（A1 state）比预期刺激（A2 state）触发更强的记忆巩固（A1 > A2 in processing）。
+    #     A1 = primary activation（意外）；A2 = primed/expected activation（预期内，复述）。
+    #
+    # memory-os 等价：
+    #   update_accessed() 时，若 chunk 同时满足：
+    #     ① access_count（检索前）<= peme_max_access（历史上很少被检索 = 低预期相关性）
+    #     ② retrievability_at_access < peme_low_retrievability（已部分遗忘 = 系统预期不相关）
+    #     ③ importance >= peme_min_importance（有记忆价值）
+    #   = "系统预测该 chunk 不相关（低预期），但当前 query 检索到它（正向预测误差）"
+    #   = Rescorla-Wagner 的 surprise 事件 → Schultz 多巴胺 burst → stability 加成：
+    #     surprise_score = (1 - retrievability_at_access) × (1 - access_count/peme_max_access)
+    #     peme_bonus = surprise_score × peme_scale
+    #     new_stab = min(365.0, stab × (1 + peme_bonus))
+    #
+    # 与 iter412 Testing Effect（TE）的区别：
+    #   TE：retrievability 低 → 检索难度高 → SM-2 quality bonus（"desirable difficulty"驱动）
+    #   PEME：retrievability 低 AND access_count 低 → 意外性（surprise）驱动稳定性加成
+    #   触发条件：TE 只需低 retrievability；PEME 额外要求 access_count 也低（= 历史上不预期被召回）
+    #   机制：TE = "这次检索很难" → 难度奖励；PEME = "没想到系统认为这个相关" → 惊喜奖励
+    #
+    # 与 iter388 Temporal Priming（TP）的区别：
+    #   TP：最近被检索 → 再次相关时加分（近期激活 → 降低检索阈值）= 减少 surprise
+    #   PEME：长期未被检索（低 access_count）→ 意外命中 = 最大化 surprise
+    #   两者效果互补但方向相反：TP 保护近期热点；PEME 救活长期冷知识
+    #
+    # OS 类比：CPU branch predictor misprediction → forced L1 cache line promotion —
+    #   分支预测失败（BPU 预测 not-taken，但实际 taken）→ pipeline flush + 强制将目标路径
+    #   cache line 提升到 L1（misprediction penalty = cache warmup benefit for future hits）；
+    #   类比：低历史召回率 chunk 被意外命中（= 分支预测失败）→ stability 强制提升（= L1 强制提升），
+    #   确保后续检索能更稳定地命中该路径（减少未来的"预测误差"开销）。
+    "store_vfs.peme_enabled": (True, bool, None, None, None,
+        "iter453: 是否启用 Prediction Error Memory Enhancement — 意外命中（低预期+当前高相关）触发 stability 加成"),
+    "store_vfs.peme_max_access": (5, int, 1, 50, None,
+        "iter453: 意外命中触发条件之一：检索前 access_count <= 此值（历史低召回 = 低预期，默认 5）"),
+    "store_vfs.peme_low_retrievability": (0.50, float, 0.0, 1.0, None,
+        "iter453: 意外命中触发条件之二：retrievability < 此值（记忆已部分遗忘 = 系统低预期，默认 0.50）"),
+    "store_vfs.peme_scale": (0.15, float, 0.0, 0.50, None,
+        "iter453: 预测误差加成系数：peme_bonus = surprise_score × scale，"
+        "surprise_score=1.0（完全意外）时 bonus=peme_scale（默认 0.15 ≈ 15%，"
+        "对应 Schultz 1997 多巴胺 burst 的 ~15-20% LTP 诱导增强）"),
+    "store_vfs.peme_min_importance": (0.45, float, 0.0, 1.0, None,
+        "iter453: 触发 PEME 的最低 importance 阈值（低重要性 chunk 不参与，避免噪音固化，默认 0.45）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。

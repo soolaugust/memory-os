@@ -4904,12 +4904,18 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
         now_iso = datetime.now(timezone.utc).isoformat()
     placeholders = ",".join("?" * len(chunk_ids))
     # iter389: Read last_accessed + stability BEFORE update (needed for reconsolidation gap calc + iter412 Testing Effect)
+    # iter453: also read access_count, retrievability, importance for PEME
     _pre_access_rows = conn.execute(
-        f"SELECT id, last_accessed, COALESCE(stability,1.0) FROM memory_chunks WHERE id IN ({placeholders})",
+        f"SELECT id, last_accessed, COALESCE(stability,1.0), COALESCE(access_count,0), "
+        f"COALESCE(retrievability,0.5), COALESCE(importance,0.5) "
+        f"FROM memory_chunks WHERE id IN ({placeholders})",
         chunk_ids,
     ).fetchall()
     _pre_access_map = {row[0]: row[1] for row in _pre_access_rows}
     _pre_stability_map = {row[0]: float(row[2]) for row in _pre_access_rows}
+    _pre_access_count_map = {row[0]: int(row[3]) for row in _pre_access_rows}
+    _pre_retrievability_map = {row[0]: float(row[4]) for row in _pre_access_rows}
+    _pre_importance_map = {row[0]: float(row[5]) for row in _pre_access_rows}
     conn.execute(
         f"UPDATE memory_chunks SET last_accessed=?, access_count=COALESCE(access_count,0)+1 "
         f"WHERE id IN ({placeholders})",
@@ -5101,6 +5107,28 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
         if _rif434_proj_row:
             _rif434_proj = _rif434_proj_row[0] if isinstance(_rif434_proj_row, (list, tuple)) else _rif434_proj_row["project"]
             apply_rif_by_summary(conn, _rif434_proj, chunk_ids)
+    except Exception:
+        pass
+
+    # ── iter453: PEME — Prediction Error Memory Enhancement ──────────────────
+    # OS 类比：CPU branch predictor misprediction → forced L1 cache line promotion
+    # 意外命中（低历史预期 + 当前被检索）触发多巴胺 burst → stability 加成
+    try:
+        for _peme_cid in chunk_ids:
+            _peme_acc_before = _pre_access_count_map.get(_peme_cid, 0)
+            _peme_ret = _pre_retrievability_map.get(_peme_cid, 0.5)
+            _peme_imp = _pre_importance_map.get(_peme_cid, 0.5)
+            _peme_stab = _pre_stability_map.get(_peme_cid, 1.0)
+            # 获取 project
+            _peme_proj_row = conn.execute(
+                "SELECT project FROM memory_chunks WHERE id=?", (_peme_cid,)
+            ).fetchone()
+            if _peme_proj_row:
+                _peme_proj = _peme_proj_row[0] if isinstance(_peme_proj_row, (list, tuple)) else _peme_proj_row["project"]
+                apply_prediction_error_enhancement(
+                    conn, _peme_cid, _peme_proj,
+                    _peme_acc_before, _peme_ret, _peme_imp, _peme_stab,
+                )
     except Exception:
         pass
 
@@ -8174,6 +8202,72 @@ def apply_predictive_memory_encoding(
         return new_stab
     except Exception:
         return base_stability
+
+
+def apply_prediction_error_enhancement(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    project: str,
+    access_count_before: int,
+    retrievability: float,
+    importance: float,
+    stability: float,
+) -> float:
+    """
+    iter453: Prediction Error Memory Enhancement — 意外命中触发多巴胺强化（Rescorla-Wagner 1972 / Schultz 1997）。
+
+    触发条件（同时满足）：
+      ① access_count_before <= peme_max_access（历史低召回 = 低预期相关性）
+      ② retrievability < peme_low_retrievability（已部分遗忘 = 系统预期不相关）
+      ③ importance >= peme_min_importance（有记忆价值）
+
+    formula:
+      surprise_score = (1 - retrievability) × (1 - access_count_before / peme_max_access)
+      peme_bonus = surprise_score × peme_scale
+      new_stab = min(365.0, stability × (1 + peme_bonus))
+
+    OS 类比：CPU branch predictor misprediction → forced L1 cache line promotion。
+    """
+    if not chunk_id or not project:
+        return stability
+    try:
+        import config as _config
+        if not _config.get("store_vfs.peme_enabled"):
+            return stability
+
+        peme_min_importance = float(_config.get("store_vfs.peme_min_importance") or 0.45)
+        if importance < peme_min_importance:
+            return stability
+
+        peme_max_access = int(_config.get("store_vfs.peme_max_access") or 5)
+        peme_low_retrievability = float(_config.get("store_vfs.peme_low_retrievability") or 0.50)
+
+        if access_count_before > peme_max_access:
+            return stability
+        if retrievability >= peme_low_retrievability:
+            return stability
+
+        r_surprise = max(0.0, 1.0 - retrievability)
+        a_surprise = max(0.0, 1.0 - access_count_before / max(1, peme_max_access))
+        surprise_score = r_surprise * a_surprise
+
+        if surprise_score < 0.001:
+            return stability
+
+        peme_scale = float(_config.get("store_vfs.peme_scale") or 0.15)
+        peme_bonus = surprise_score * peme_scale
+        new_stab = min(365.0, stability * (1.0 + peme_bonus))
+
+        if new_stab > stability + 0.001:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=? AND project=?",
+                (new_stab, now_iso, chunk_id, project)
+            )
+            return new_stab
+        return stability
+    except Exception:
+        return stability
 
 
 def compute_emotional_valence(text: str) -> float:
