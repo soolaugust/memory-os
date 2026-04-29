@@ -1398,6 +1398,78 @@ _REGISTRY: dict = {
     "store_vfs.kdee_min_importance": (0.30, float, 0.0, 1.0, None,
         "iter464: 触发 KDEE 的最低 importance 阈值（低重要性 chunk 不参与密度编码加成，默认 0.30）"),
 
+    # ── iter465: Lag-Dependent Spacing Boost (LDSB) — 间隔检索效应：长间隔召回获得更大 stability 加成 ──
+    # 认知科学依据：Landauer & Bjork (1978) "Optimum rehearsal patterns" —
+    #   扩张间隔练习（expanding spacing）比固定间隔更有效：回忆越难（间隔越长）→ 加固效果越强。
+    #   SM-2 算法（Wozniak 1987）的核心：interval/stability 比率越大，spacing bonus 越高。
+    # OS 类比：Linux page aging（mm/vmscan.c）— 在 inactive list 停留时间越长的 page
+    #   在被 kswapd 访问时获得更高的 active list 优先级（长期低温 page 被标记为 high-value）。
+    "store_vfs.ldsb_enabled": (True, bool, None, None, None,
+        "iter465: 是否启用 Lag-Dependent Spacing Boost — 长间隔回忆获得更大 stability 加成"),
+    "store_vfs.ldsb_min_lag_hours": (2.0, float, 0.0, 24.0, None,
+        "iter465: 触发 LDSB 的最短间隔（小时），低于此值不给加成（默认 2h = 避免短期重复）"),
+    "store_vfs.ldsb_max_boost": (0.15, float, 0.0, 0.40, None,
+        "iter465: LDSB 最大加成上限（最多增加 ldsb_max_boost 比例，默认 0.15）"),
+    "store_vfs.ldsb_min_importance": (0.25, float, 0.0, 1.0, None,
+        "iter465: 触发 LDSB 的最低 importance 阈值（默认 0.25）"),
+
+    # ── iter466: Emotional Intensity Effect (ETE) — 情绪性内容获得杏仁核增强编码（Cahill et al. 1994）──
+    # 认知科学依据：Cahill, Prins, Weber & McGaugh (1994) "Beta-adrenergic activation and memory" —
+    #   情绪唤醒（norepinephrine释放）增强杏仁核→海马双向连接 → 情绪内容记忆更持久（AUC提升40%）。
+    #   LaBar & Cabeza (2006) "Cognitive neuroscience of emotional memory": 情绪强度与记忆精确度正相关(r=0.53)。
+    # OS 类比：Linux OOM killer priority scoring — oom_adj/oom_score_adj 高的进程（关键系统进程）
+    #   获得保护，不被 OOM killer 优先终止（情绪显著内容 = 高 oom_adj → 受保护）。
+    "store_vfs.ete_enabled": (True, bool, None, None, None,
+        "iter466: 是否启用 Emotional Tagging Effect — 情绪性关键词内容获得 stability 加成"),
+    "store_vfs.ete_boost_factor": (1.12, float, 1.0, 1.50, None,
+        "iter466: ETE stability 加成系数（情绪内容 stability × ete_boost_factor，默认 1.12）"),
+    "store_vfs.ete_max_boost": (0.18, float, 0.0, 0.40, None,
+        "iter466: ETE 最大加成上限（stability 最多增加 ete_max_boost 比例，默认 0.18）"),
+    "store_vfs.ete_min_importance": (0.30, float, 0.0, 1.0, None,
+        "iter466: 触发 ETE 的最低 importance 阈值（默认 0.30）"),
+    "store_vfs.ete_keywords": (
+        "critical,error,bug,fail,urgent,crisis,breakthrough,alarm,panic,catastrophe,"
+        "关键,错误,故障,紧急,危机,突破,崩溃,警报,重大",
+        str, None, None, None,
+        "iter466: 触发 ETE 的情绪性关键词列表（逗号分隔，英中文混合，默认包含故障/紧急/突破等词）"),
+
+    # ── iter467: Desirable Difficulty Effect (DDE) — 认知努力越大的内容编码越深（Bjork 1994）──
+    # 认知科学依据：Bjork (1994) "Memory and metamemory considerations" —
+    #   "有益的困难"（desirable difficulty）：困难的学习任务（间隔练习、交错、测试）产生更强长期记忆，
+    #   尽管在学习时感觉更难。内容越复杂（词汇越丰富，句子越长）→ 需要更深加工 → 更持久记忆。
+    #   Hirshman & Bjork (1988): 生成效应（generation effect）= 认知努力代理（effort proxy）。
+    # OS 类比：zswap/zram 压缩页面 — 需要 CPU 解压的页面比普通页面需要更多计算（cognitive effort），
+    #   但压缩率高 = 能在有限内存中保留更多 pages（复杂编码 → 更高信息密度存储）。
+    "store_vfs.dde_enabled": (True, bool, None, None, None,
+        "iter467: 是否启用 Desirable Difficulty Effect — 内容词汇复杂度高时获得 stability 加成"),
+    "store_vfs.dde_min_avg_word_len": (5.5, float, 3.0, 10.0, None,
+        "iter467: 触发 DDE 的最小平均词长阈值（content 词汇平均字符数 >= 此值，默认 5.5）"),
+    "store_vfs.dde_boost_factor": (1.08, float, 1.0, 1.30, None,
+        "iter467: DDE stability 加成系数（默认 1.08 = 8% 加成）"),
+    "store_vfs.dde_max_boost": (0.16, float, 0.0, 0.35, None,
+        "iter467: DDE 最大加成上限（stability 最多增加 dde_max_boost 比例，默认 0.16）"),
+    "store_vfs.dde_min_words": (5, int, 1, 50, None,
+        "iter467: 触发 DDE 的最少词数（词数 < 此值时不计算平均词长，默认 5）"),
+    "store_vfs.dde_min_importance": (0.30, float, 0.0, 1.0, None,
+        "iter467: 触发 DDE 的最低 importance 阈值（默认 0.30）"),
+
+    # ── iter468: Contextual Cue Reinstatement Effect (CCRE) — 上下文匹配提升检索成功率（Godden & Baddeley 1975）──
+    # 认知科学依据：Godden & Baddeley (1975) "Context-dependent memory in two natural environments" —
+    #   编码时的环境上下文（encode_context）与检索时的上下文匹配度越高，检索成功率越高。
+    #   Tulving & Thomson (1973) Encoding Specificity Principle：检索线索需匹配编码时的上下文。
+    #   Smith (1979): 在相同上下文中测验时记忆成绩提升约 40%（vs 不同上下文）。
+    # OS 类比：Linux NUMA topology-aware allocation（mm/mempolicy.c）—
+    #   NUMA_PREFERRED/MPOL_BIND：在分配内存的同一 NUMA 节点访问 page → 低延迟；
+    #   跨节点访问 → 高延迟（context mismatch penalty）。
+    "store_vfs.ccre_enabled": (True, bool, None, None, None,
+        "iter468: 是否启用 Contextual Cue Reinstatement Effect — encode_context 匹配时 stability 加成"),
+    "store_vfs.ccre_boost_per_token": (0.02, float, 0.0, 0.10, None,
+        "iter468: 每个匹配 encode_context token 的 stability 加成（默认 0.02 = 2%/token）"),
+    "store_vfs.ccre_max_boost": (0.20, float, 0.0, 0.40, None,
+        "iter468: CCRE 最大加成上限（stability 最多增加 ccre_max_boost 比例，默认 0.20）"),
+    "store_vfs.ccre_min_importance": (0.30, float, 0.0, 1.0, None,
+        "iter468: 触发 CCRE 的最低 importance 阈值（默认 0.30）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。

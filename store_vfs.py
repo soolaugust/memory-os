@@ -2135,6 +2135,23 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
     except Exception:
         pass  # KDEE 写入失败不阻塞主流程
 
+    # ── iter466: ETE — Emotional Tagging Effect（情绪性内容获得杏仁核增强编码，Cahill et al. 1994）──
+    # OS 类比：Linux OOM killer scoring — 高保护优先级记忆（critical/crisis/breakthrough）
+    try:
+        _ete_content = d.get("content") or ""
+        _ete_summary = d.get("summary") or ""
+        apply_emotional_tagging_effect(conn, d["id"], _ete_content, _ete_summary)
+    except Exception:
+        pass  # ETE 写入失败不阻塞主流程
+
+    # ── iter467: DDE — Desirable Difficulty Effect（高词汇复杂度内容需更深认知加工，Bjork 1994）──
+    # OS 类比：Linux zswap/zram — 压缩页面需要更多 CPU 解压（认知努力）→ 更高留存率
+    try:
+        _dde_content = d.get("content") or ""
+        apply_desirable_difficulty_effect(conn, d["id"], _dde_content)
+    except Exception:
+        pass  # DDE 写入失败不阻塞主流程
+
 
 # ── iter403：Cue-Dependent Forgetting — Context-Sensitive Retrieval（Tulving 1974）──
 #
@@ -5339,6 +5356,23 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
             if _oie_proj_row:
                 _oie_proj = _oie_proj_row[0] if isinstance(_oie_proj_row, (list, tuple)) else _oie_proj_row["project"]
                 apply_output_interference_effect(conn, chunk_ids, _oie_proj, now_iso=now_iso)
+    except Exception:
+        pass
+
+    # ── iter465: LDSB — Lag-Dependent Spacing Boost（长间隔回忆获得更大加成，Landauer & Bjork 1978）──
+    # OS 类比：Linux page aging — cold page reactivation = high utility signal → higher priority
+    try:
+        apply_lag_dependent_spacing_boost(conn, chunk_ids, now_iso=now_iso)
+    except Exception:
+        pass
+
+    # ── iter468: CCRE — Contextual Cue Reinstatement Effect（上下文匹配时 stability 加成，Godden 1975）──
+    # OS 类比：NUMA-aware memory access — accessing on same NUMA node as allocation = low latency
+    try:
+        _ccre_ctx = kwargs.get("context_tokens")
+        if _ccre_ctx:
+            for _ccre_cid in chunk_ids:
+                apply_contextual_cue_reinstatement_effect(conn, _ccre_cid, _ccre_ctx, now_iso=now_iso)
     except Exception:
         pass
 
@@ -9239,6 +9273,272 @@ def apply_output_interference_effect(
                 penalized += 1
 
         result["oie_penalized"] = penalized
+        return result
+    except Exception:
+        return result
+
+
+def apply_lag_dependent_spacing_boost(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+    now_iso: str = None,
+) -> dict:
+    """iter465: Lag-Dependent Spacing Boost (LDSB) — 间隔检索效应：长间隔召回后给予更大 stability 加成。
+
+    认知科学依据：
+      Landauer & Bjork (1978) "Optimum rehearsal patterns and name learning" —
+        扩张间隔练习（expanding retrieval practice）比固定间隔更有效。
+        回忆越难（间隔/稳定性比率越大）→ 记忆加固效果越强（Desirable Difficulty）。
+      SM-2 算法（Wozniak 1987）：新稳定性 = 旧稳定性 × EF × f(lag/stability)，
+        其中 EF 依赖回忆难度（lag 越长 → EF 贡献越大）。
+
+    OS 类比：Linux page aging（mm/vmscan.c active list promotion）—
+      长时间停留在 inactive list 的 page 被再次访问时，
+      获得更高的 active list 优先级（cold page reactivation = high utility signal）。
+    """
+    result = {"ldsb_boosted": 0}
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.ldsb_enabled"):
+            return result
+        if not chunk_ids:
+            return result
+
+        min_lag_h = float(_cfg.get("store_vfs.ldsb_min_lag_hours"))
+        max_boost = float(_cfg.get("store_vfs.ldsb_max_boost"))
+        min_imp = float(_cfg.get("store_vfs.ldsb_min_importance"))
+
+        if now_iso is None:
+            from datetime import datetime, timezone
+            now_iso = datetime.now(timezone.utc).isoformat()
+        from datetime import datetime, timezone
+        now_dt = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+
+        boosted = 0
+        for cid in chunk_ids:
+            row = conn.execute(
+                "SELECT stability, importance, last_accessed FROM memory_chunks WHERE id=?",
+                (cid,)
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+            last_acc = row[2]
+            if imp < min_imp or not last_acc:
+                continue
+
+            try:
+                last_dt = datetime.fromisoformat(str(last_acc).replace("Z", "+00:00"))
+                lag_hours = (now_dt - last_dt).total_seconds() / 3600.0
+            except Exception:
+                continue
+
+            if lag_hours < min_lag_h:
+                continue
+
+            # Boost proportional to lag/stability ratio (SM-2 inspired)
+            # lag_ratio = lag_hours / (stability × 24) → how overdue was this recall
+            lag_ratio = lag_hours / max(stab * 24.0, 1.0)
+            # Clamp lag_ratio to [0, 1] for boost calculation
+            boost_frac = min(1.0, lag_ratio) * max_boost
+            new_stab = min(365.0, stab * (1.0 + boost_frac))
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?",
+                    (new_stab, cid)
+                )
+                boosted += 1
+
+        result["ldsb_boosted"] = boosted
+        return result
+    except Exception:
+        return result
+
+
+def apply_emotional_tagging_effect(
+    conn: "sqlite3.Connection",
+    chunk_id: str,
+    content: str,
+    summary: str = "",
+    now_iso: str = None,
+) -> dict:
+    """iter466: Emotional Tagging Effect (ETE) — 情绪性内容获得杏仁核增强编码（Cahill et al. 1994）。
+
+    认知科学依据：
+      Cahill, Prins, Weber & McGaugh (1994) "Beta-adrenergic activation and memory for
+        emotional events" (Nature) — 情绪唤醒（norepinephrine 释放）→ 杏仁核激活 →
+        海马-杏仁核双向增强（LTP）→ 情绪事件记忆更持久（延时测验 AUC +40%）。
+      LaBar & Cabeza (2006) "Cognitive neuroscience of emotional memory" —
+        情绪强度与记忆精确度正相关（r=0.53），负性情绪与正性情绪均有效（但负性略强）。
+
+    OS 类比：Linux OOM killer scoring（mm/oom_kill.c）—
+      高 oom_score_adj 的关键进程（init, kernel threads）受保护不被杀死；
+      情绪显著内容（critical/crisis/breakthrough）= 高保护优先级记忆。
+    """
+    result = {"ete_boosted": False}
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.ete_enabled"):
+            return result
+
+        row = conn.execute(
+            "SELECT stability, importance FROM memory_chunks WHERE id=?", (chunk_id,)
+        ).fetchone()
+        if not row:
+            return result
+
+        stab = float(row[0] or 1.0)
+        imp = float(row[1] or 0.0)
+        min_imp = float(_cfg.get("store_vfs.ete_min_importance"))
+        if imp < min_imp:
+            return result
+
+        keywords_raw = str(_cfg.get("store_vfs.ete_keywords"))
+        keywords = [k.strip().lower() for k in keywords_raw.split(",") if k.strip()]
+        text = (content + " " + summary).lower()
+        matched = sum(1 for kw in keywords if kw in text)
+        if matched == 0:
+            return result
+
+        factor = float(_cfg.get("store_vfs.ete_boost_factor"))
+        max_boost = float(_cfg.get("store_vfs.ete_max_boost"))
+        raw = stab * factor
+        capped = min(stab * (1.0 + max_boost), raw)
+        new_stab = min(365.0, capped)
+        if new_stab > stab + 1e-6:
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+            )
+            result["ete_boosted"] = True
+        return result
+    except Exception:
+        return result
+
+
+def apply_desirable_difficulty_effect(
+    conn: "sqlite3.Connection",
+    chunk_id: str,
+    content: str,
+    now_iso: str = None,
+) -> dict:
+    """iter467: Desirable Difficulty Effect (DDE) — 高词汇复杂度内容需要更深认知加工 → 更持久编码。
+
+    认知科学依据：
+      Bjork (1994) "Memory and metamemory considerations in the training of human beings" —
+        "有益的困难"使学习时主观感受更难，但产生更强的长期记忆痕迹（r=0.49）。
+      Hirshman & Bjork (1988): 生成效应（self-generation）= 认知努力代理。
+      Rayner & Pollatsek (1989): 低频词（longer, less common）需要更多注视时间 → 更深语义加工。
+
+    OS 类比：Linux zswap/zram — 被压缩的页面需要 CPU 解压（认知努力），
+      但压缩率高 = 在有限内存中保留更多内容（复杂编码 = 更高信息密度）。
+      zswap pages 在 LRU 中有更高留存率（desirable difficulty → long-term retention）。
+    """
+    result = {"dde_boosted": False}
+    try:
+        import config as _cfg
+        import re as _re
+        if not _cfg.get("store_vfs.dde_enabled"):
+            return result
+
+        row = conn.execute(
+            "SELECT stability, importance FROM memory_chunks WHERE id=?", (chunk_id,)
+        ).fetchone()
+        if not row:
+            return result
+
+        stab = float(row[0] or 1.0)
+        imp = float(row[1] or 0.0)
+        min_imp = float(_cfg.get("store_vfs.dde_min_importance"))
+        if imp < min_imp:
+            return result
+
+        words = _re.findall(r'\b[a-zA-Z\u4e00-\u9fff]+\b', (content or "").lower())
+        min_words = int(_cfg.get("store_vfs.dde_min_words"))
+        if len(words) < min_words:
+            return result
+
+        # Average word length as complexity proxy
+        avg_len = sum(len(w) for w in words) / len(words)
+        min_avg = float(_cfg.get("store_vfs.dde_min_avg_word_len"))
+        if avg_len < min_avg:
+            return result
+
+        factor = float(_cfg.get("store_vfs.dde_boost_factor"))
+        max_boost = float(_cfg.get("store_vfs.dde_max_boost"))
+        raw = stab * factor
+        capped = min(stab * (1.0 + max_boost), raw)
+        new_stab = min(365.0, capped)
+        if new_stab > stab + 1e-6:
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+            )
+            result["dde_boosted"] = True
+        return result
+    except Exception:
+        return result
+
+
+def apply_contextual_cue_reinstatement_effect(
+    conn: "sqlite3.Connection",
+    chunk_id: str,
+    current_context_tokens: list,
+    now_iso: str = None,
+) -> dict:
+    """iter468: Contextual Cue Reinstatement Effect (CCRE) — encode_context 匹配时提升稳定性。
+
+    认知科学依据：
+      Godden & Baddeley (1975) "Context-dependent memory in two natural environments" —
+        在与编码时相同的物理/认知上下文中检索，成功率提升约 40%（vs 不同上下文）。
+      Tulving & Thomson (1973) Encoding Specificity Principle：
+        "retrieval cue 需包含编码时存在的信息" → 上下文 token 重叠 = 最强检索线索。
+      Smith (1979): 内部上下文（mental state）匹配也有相同效果（environment-independent）。
+
+    OS 类比：Linux NUMA-aware memory access（mm/mempolicy.c）—
+      MPOL_PREFERRED：进程倾向访问与分配时相同 NUMA 节点的内存（低延迟）；
+      跨 NUMA 节点访问 = context mismatch → 更高延迟（penalty）；
+      encode_context token 重叠度 = NUMA locality score。
+    """
+    result = {"ccre_boosted": False, "ccre_matched_tokens": 0}
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.ccre_enabled"):
+            return result
+
+        if not current_context_tokens:
+            return result
+
+        row = conn.execute(
+            "SELECT stability, importance, encode_context FROM memory_chunks WHERE id=?",
+            (chunk_id,)
+        ).fetchone()
+        if not row:
+            return result
+
+        stab = float(row[0] or 1.0)
+        imp = float(row[1] or 0.0)
+        stored_ctx = str(row[2] or "")
+        min_imp = float(_cfg.get("store_vfs.ccre_min_importance"))
+        if imp < min_imp:
+            return result
+
+        # Tokenize stored encode_context
+        stored_tokens = {t.strip().lower() for t in stored_ctx.split(",") if t.strip()}
+        current_set = {t.strip().lower() for t in current_context_tokens if t.strip()}
+        matched = len(stored_tokens & current_set)
+        if matched == 0:
+            return result
+
+        boost_per = float(_cfg.get("store_vfs.ccre_boost_per_token"))
+        max_boost = float(_cfg.get("store_vfs.ccre_max_boost"))
+        total_boost = min(max_boost, matched * boost_per)
+        new_stab = min(365.0, stab * (1.0 + total_boost))
+        if new_stab > stab + 1e-6:
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+            )
+            result["ccre_boosted"] = True
+            result["ccre_matched_tokens"] = matched
         return result
     except Exception:
         return result

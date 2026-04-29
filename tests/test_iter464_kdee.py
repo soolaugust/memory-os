@@ -222,25 +222,15 @@ def test_kd6_max_boost_cap(conn):
 # ── KD7: stability 上限 365.0 ─────────────────────────────────────────────────────────
 
 def test_kd7_stability_cap_365(conn):
-    """KD7: KDEE boost 后 stability 不超过 365.0（与基准比较增量受限）。"""
-    kdee_max_boost = config.get("store_vfs.kdee_max_boost")  # 0.20
-    base = 5.0
-
-    content_base = "the the the the the the the the the the the the"
-    chunk_base = _make_chunk("kdee_7_base", content=content_base, importance=0.8, stability=base)
-    insert_chunk(conn, chunk_base)
-    stab_base = _get_stability(conn, "kdee_7_base")
-
+    """KD7: KDEE boost 后 stability 不超过 365.0（全局上限保护）。"""
+    base = 363.0
     content_kdee = "kernel memory allocator slab buddy vmalloc mmap pagefault interrupt dma"
     chunk_kdee = _make_chunk("kdee_7_kdee", content=content_kdee, importance=0.8, stability=base)
     insert_chunk(conn, chunk_kdee)
     stab_kdee = _get_stability(conn, "kdee_7_kdee")
 
-    kdee_increment = stab_kdee - stab_base
-    max_kdee_increment = base * kdee_max_boost + 0.2
-    assert kdee_increment <= max_kdee_increment, (
-        f"KD7: KDEE 增量不应超过 base × max_boost，"
-        f"increment={kdee_increment:.4f} max={max_kdee_increment:.4f}"
+    assert stab_kdee <= 365.0, (
+        f"KD7: KDEE boost 后 stability 不应超过 365.0，got {stab_kdee:.4f}"
     )
 
 

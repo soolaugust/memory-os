@@ -95,14 +95,14 @@ def test_ei1_causal_connectives_boost_stability(conn):
 
 def test_ei2_insufficient_connectives_no_boost(conn):
     """EI2: 只有 1 个因果连接词 (< eie_min_connectives=2) → 无 EIE 加成（相对比较）。"""
-    # 对照组：0 个连接词（纯中性内容）
-    content_zero = "The system encountered an issue. Nothing special here."
+    # 对照组：0 个连接词，低密度（避免 KDEE/DDE 干扰）
+    content_zero = "the the the the the the the the the the the the the the the"
     chunk_zero = _make_chunk("eie_2_zero", content=content_zero, importance=0.6, stability=5.0)
     insert_chunk(conn, chunk_zero)
     stab_zero = _get_stability(conn, "eie_2_zero")
 
-    # 实验组：1 个连接词（不足 min_connectives=2）
-    content_one = "The system failed because the config was wrong. Nothing else to add."
+    # 实验组：1 个连接词（不足 min_connectives=2），低密度
+    content_one = "the the the the because the the the the the the the the the the"
     chunk_one = _make_chunk("eie_2_one", content=content_one, importance=0.6, stability=5.0)
     insert_chunk(conn, chunk_one)
     stab_one = _get_stability(conn, "eie_2_one")
