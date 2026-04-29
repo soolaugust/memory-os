@@ -1539,6 +1539,77 @@ _REGISTRY: dict = {
     "store_vfs.afb_min_importance": (0.25, float, 0.0, 1.0, None,
         "iter472: 触发 AFB 的最低 importance 阈值（默认 0.25）"),
 
+    # ── iter473: MIE — Memory Interference Effect（前摄/倒摄干扰，McGeoch 1932 / Underwood 1957）──
+    # 认知科学依据：同类内容在短时窗口内密集写入，互相干扰编码，类似旧记忆压制新记忆（PI）
+    #   或新记忆压制旧记忆（RI）。McGeoch (1932): 相似度越高，干扰越强。
+    # OS 类比：Linux cache thrashing（mm/vmscan.c）— working set > available memory 时 page
+    #   不断换入换出，effective throughput 下降。
+    "store_vfs.mie_enabled": (True, bool, None, None, None,
+        "iter473: 是否启用 Memory Interference Effect（前摄/倒摄干扰惩罚，默认 True）"),
+    "store_vfs.mie_window_hours": (24, int, 1, 168, None,
+        "iter473: 干扰检测时间窗口（小时，默认 24）"),
+    "store_vfs.mie_min_overlap": (0.30, float, 0.0, 1.0, None,
+        "iter473: 触发干扰的词汇 Jaccard 重叠阈值（默认 0.30）"),
+    "store_vfs.mie_penalty_factor": (0.93, float, 0.5, 1.0, None,
+        "iter473: 干扰惩罚系数（stability × factor，默认 0.93 即降 7%）"),
+    "store_vfs.mie_max_penalty": (0.12, float, 0.0, 0.40, None,
+        "iter473: 最大惩罚比例（默认 0.12 即最多降 12%）"),
+    "store_vfs.mie_min_importance": (0.30, float, 0.0, 1.0, None,
+        "iter473: 触发 MIE 的最低 importance 阈值（默认 0.30）"),
+
+    # ── iter474: SAE — Spreading Activation Effect（激活扩散，Collins & Loftus 1975）──
+    # 认知科学依据：语义网络中节点激活沿关联边传播，相关概念可达性提升。
+    #   Anderson (1983) ACT*: 基线激活水平互相加成，效果约 20-30% retrievability 提升。
+    # OS 类比：Linux readahead（mm/readahead.c）— 顺序/相关 page 预取到 page cache，降低缺页率。
+    "store_vfs.sae_enabled": (True, bool, None, None, None,
+        "iter474: 是否启用 Spreading Activation Effect（激活扩散，默认 True）"),
+    "store_vfs.sae_min_similarity": (0.20, float, 0.0, 1.0, None,
+        "iter474: 触发激活扩散的词汇 Jaccard 相似度阈值（默认 0.20）"),
+    "store_vfs.sae_spread_factor": (0.05, float, 0.0, 0.30, None,
+        "iter474: 每个相邻 chunk 获得的 retrievability 加成比例（默认 0.05）"),
+    "store_vfs.sae_max_spread": (0.15, float, 0.0, 0.40, None,
+        "iter474: 每次激活扩散的最大 retrievability 加成（默认 0.15）"),
+    "store_vfs.sae_max_neighbors": (10, int, 1, 50, None,
+        "iter474: 每次扩散最多影响的邻居数（默认 10）"),
+    "store_vfs.sae_min_importance": (0.25, float, 0.0, 1.0, None,
+        "iter474: 触发 SAE 的源 chunk 最低 importance 阈值（默认 0.25）"),
+
+    # ── iter475: SPE — Serial Position Effect（序列位置效应，Murdock 1962）──
+    # 认知科学依据：自由回忆中首位项目（primacy）和末位项目（recency）记忆最好。
+    #   Primacy: 首位项目复习次数更多 → stability 更高。
+    #   Recency: 末位项目仍在工作记忆 → 短期 retrievability 更高（r=0.61）。
+    # OS 类比：CPU L1/L2 cache LRU — head（最先加载）和 tail（最近访问）都有更好命中率。
+    "store_vfs.spe_enabled": (True, bool, None, None, None,
+        "iter475: 是否启用 Serial Position Effect（序列位置效应，默认 True）"),
+    "store_vfs.spe_primacy_window": (5, int, 1, 20, None,
+        "iter475: session 内前 N 个 chunk 获得 primacy 加成（默认 5）"),
+    "store_vfs.spe_primacy_boost": (0.05, float, 0.0, 0.20, None,
+        "iter475: primacy stability 加成比例（默认 0.05 即 +5%）"),
+    "store_vfs.spe_recency_window": (5, int, 1, 20, None,
+        "iter475: session 内最近 N 个 chunk 获得 recency 加成（默认 5）"),
+    "store_vfs.spe_recency_boost": (0.08, float, 0.0, 0.20, None,
+        "iter475: recency retrievability 加成（绝对值，默认 0.08）"),
+    "store_vfs.spe_min_session_size": (3, int, 1, 20, None,
+        "iter475: session 至少有 N 个 chunk 时才触发 SPE（默认 3）"),
+    "store_vfs.spe_min_importance": (0.25, float, 0.0, 1.0, None,
+        "iter475: 触发 SPE 的最低 importance 阈值（默认 0.25）"),
+
+    # ── iter476: CLP — Cognitive Load Penalty（认知负荷惩罚，Sweller 1988）──
+    # 认知科学依据：工作记忆容量有限（7±2 chunks，Miller 1956）。内容超出容量上限时，
+    #   有效编码下降（Paas & van Merriënboer 1994）。与 DDE 互补：短且复杂=有益困难，
+    #   长且复杂=认知超载。
+    # OS 类比：CPU context switch overhead — 超线程数过多时，调度开销超过收益。
+    "store_vfs.clp_enabled": (True, bool, None, None, None,
+        "iter476: 是否启用 Cognitive Load Penalty（认知负荷惩罚，默认 True）"),
+    "store_vfs.clp_max_tokens": (200, int, 50, 1000, None,
+        "iter476: 工作记忆容量代理阈值（词数上限，默认 200）"),
+    "store_vfs.clp_penalty_per_100": (0.04, float, 0.0, 0.15, None,
+        "iter476: 每超出 100 词施加的 stability 惩罚比例（默认 0.04）"),
+    "store_vfs.clp_max_penalty": (0.15, float, 0.0, 0.40, None,
+        "iter476: 最大惩罚比例（默认 0.15 即最多降 15%）"),
+    "store_vfs.clp_min_importance": (0.30, float, 0.0, 1.0, None,
+        "iter476: 触发 CLP 的最低 importance 阈值（默认 0.30）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。

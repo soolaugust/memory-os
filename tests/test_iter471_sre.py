@@ -120,7 +120,7 @@ def test_sr2_no_self_ref_no_boost(conn):
 # ── SR3: sre_enabled=False → 无加成 ──────────────────────────────────────────────────────────
 
 def test_sr3_disabled_no_boost(conn):
-    """SR3: sre_enabled=False → 含第一人称词内容无 SRE 加成。"""
+    """SR3: sre_enabled=False → 含第一人称词内容无 SRE 加成（直接调用验证）。"""
     original_get = config.get
 
     def patched_get(key, project=None):
@@ -129,36 +129,55 @@ def test_sr3_disabled_no_boost(conn):
         return original_get(key, project=project)
 
     content = "the the we the the our the the the the the the the the"
+    now_iso = _utcnow().isoformat()
 
-    chunk_dis = _make_chunk("sre_3_dis", content=content, chunk_type="observation")
-    with mock.patch.object(config, 'get', side_effect=patched_get):
-        insert_chunk(conn, chunk_dis)
-    stab_disabled = _get_stability(conn, "sre_3_dis")
-
-    chunk_en = _make_chunk("sre_3_en", content=content, chunk_type="observation")
-    insert_chunk(conn, chunk_en)
-    stab_enabled = _get_stability(conn, "sre_3_en")
-
-    assert stab_disabled <= stab_enabled + 0.01, (
-        f"SR3: disabled 时 stability 不应高于 enabled，"
-        f"disabled={stab_disabled:.4f} enabled={stab_enabled:.4f}"
+    # 直接插入 DB，绕过 insert_chunk 链（避免 MIE 等效应的干扰）
+    conn.execute(
+        """INSERT OR REPLACE INTO memory_chunks
+           (id, project, chunk_type, content, summary, importance, stability,
+            created_at, updated_at, retrievability, last_accessed, access_count,
+            encode_context, session_type_history)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("sre_3", "test", "observation", content,
+         "summary", 0.6, 5.0, now_iso, now_iso, 0.5, now_iso, 0, "test_ctx", "")
     )
+    conn.commit()
+    stab_before = _get_stability(conn, "sre_3")
+
+    with mock.patch.object(config, 'get', side_effect=patched_get):
+        result_dis = apply_self_reference_effect(conn, "sre_3", content)
+    stab_disabled = _get_stability(conn, "sre_3")
+
+    assert stab_disabled <= stab_before + 0.001, (
+        f"SR3: disabled 时 SRE 不应有加成，before={stab_before:.4f} disabled={stab_disabled:.4f}"
+    )
+    assert result_dis["sre_boosted"] is False, f"SR3: sre_boosted 应为 False，got {result_dis}"
 
 
 # ── SR4: importance 不足 → 不参与 SRE ────────────────────────────────────────────────────────
 
 def test_sr4_low_importance_no_boost(conn):
-    """SR4: importance < sre_min_importance(0.30) → 不参与 SRE。"""
+    """SR4: importance < sre_min_importance(0.30) → 不参与 SRE（直接调用验证）。"""
     content = "the the we the the our the the the the the the the"
+    now_iso = _utcnow().isoformat()
 
-    chunk_low = _make_chunk("sre_4_low", content=content, importance=0.10,
-                             chunk_type="observation")
-    insert_chunk(conn, chunk_low)
+    # 直接插入两个 chunk，绕过 insert_chunk 链
+    for cid, imp in [("sre_4_low", 0.10), ("sre_4_high", 0.60)]:
+        conn.execute(
+            """INSERT OR REPLACE INTO memory_chunks
+               (id, project, chunk_type, content, summary, importance, stability,
+                created_at, updated_at, retrievability, last_accessed, access_count,
+                encode_context, session_type_history)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (cid, "test", "observation", content,
+             "summary", imp, 5.0, now_iso, now_iso, 0.5, now_iso, 0, "test_ctx", "")
+        )
+    conn.commit()
+
+    apply_self_reference_effect(conn, "sre_4_low", content)
+    apply_self_reference_effect(conn, "sre_4_high", content)
+
     stab_low = _get_stability(conn, "sre_4_low")
-
-    chunk_high = _make_chunk("sre_4_high", content=content, importance=0.60,
-                              chunk_type="observation")
-    insert_chunk(conn, chunk_high)
     stab_high = _get_stability(conn, "sre_4_high")
 
     assert stab_low <= stab_high + 0.01, (

@@ -2166,6 +2166,34 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
     # 不在 insert_chunk 中重复调用（避免双重加成）。
     # OS 类比：Linux MAP_PRIVATE — 进程私有页面 TLB 局部性更好，访问延迟更低
 
+    # ── iter475: SPE-Primacy — Serial Position Primacy（session 首位 chunk stability 加成，Murdock 1962）──
+    # OS 类比：CPU L1 cache LRU head slot — session 首位 chunk 被后续推理反复引用，留存率最高
+    try:
+        _spe_session = d.get("source_session") or ""
+        _spe_project = d.get("project") or ""
+        apply_serial_position_primacy(conn, d["id"], _spe_session, _spe_project)
+    except Exception:
+        pass
+
+    # ── iter476: CLP — Cognitive Load Penalty（内容超出工作记忆容量时 stability 降低，Sweller 1988）──
+    # OS 类比：CPU context switch overhead — 超线程数过多时调度开销超过并行收益
+    try:
+        _clp_content = d.get("content") or ""
+        apply_cognitive_load_penalty(conn, d["id"], _clp_content)
+    except Exception:
+        pass
+
+    # ── iter473: MIE — Memory Interference Effect（同类内容密集写入互相干扰，McGeoch 1932）──
+    # 注意：MIE 在最后执行，作为对其他正向效应的"自然拮抗"（认知真实性）
+    # OS 类比：Linux cache thrashing — working set > memory 时 page 频繁换入换出
+    try:
+        _mie_content = d.get("content") or ""
+        _mie_project = d.get("project") or ""
+        _mie_type = d.get("chunk_type") or ""
+        apply_memory_interference_effect(conn, d["id"], _mie_content, _mie_project, _mie_type)
+    except Exception:
+        pass
+
 
 # ── iter403：Cue-Dependent Forgetting — Context-Sensitive Retrieval（Tulving 1974）──
 #
@@ -5401,6 +5429,20 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
     # OS 类比：Linux active LRU hot page — 多次访问 → PG_referenced → active LRU → 更高驻留优先级
     try:
         apply_access_frequency_boost(conn, chunk_ids, now_iso=now_iso)
+    except Exception:
+        pass
+
+    # ── iter474: SAE — Spreading Activation Effect（检索激活语义相关 chunk，Collins & Loftus 1975）──
+    # OS 类比：Linux readahead — 相关 page 预取到 page cache，降低后续缺页率
+    try:
+        apply_spreading_activation_effect(conn, chunk_ids, now_iso=now_iso)
+    except Exception:
+        pass
+
+    # ── iter475: SPE-Recency — Serial Position Recency（session 末位 chunk retrievability 加成）──
+    # OS 类比：L1 cache MRU slot — 最近访问的 chunk 短期可达性最高
+    try:
+        apply_serial_position_recency(conn, chunk_ids, now_iso=now_iso)
     except Exception:
         pass
 
@@ -9997,6 +10039,387 @@ def compute_emotional_salience(text: str) -> float:
         if pat.search(text):
             delta += d
     return max(-0.20, min(0.25, delta))
+
+
+def apply_memory_interference_effect(
+    conn: "sqlite3.Connection",
+    chunk_id: str,
+    content: str,
+    project: str,
+    chunk_type: str,
+    now_iso: str = None,
+) -> dict:
+    """iter473: Memory Interference Effect (MIE) — 同类内容密集写入时互相干扰，stability 轻微降低。
+
+    认知科学依据：
+      McGeoch (1932) 倒摄干扰（RI）: 新学内容干扰旧记忆检索；相似度越高，干扰越强。
+      Underwood (1957) 前摄干扰（PI）: 旧习惯/旧知识干扰新内容编码。
+      量化：词汇重叠 > 30% 且时间窗口 < 24h → stability 降 ~7%（McGeoch 干扰函数近似）。
+
+    OS 类比：Linux cache thrashing（mm/vmscan.c thrash_count）—
+      working set > available memory 时 page 不断换入换出，effective throughput 下降。
+      相似 chunk 密集写入 = 同类地址密集访问 = TLB/cache 频繁 miss = 检索代价上升。
+    """
+    result = {"mie_penalized": False, "mie_overlap": 0.0}
+    try:
+        import config as _cfg
+        import re as _re
+        if not _cfg.get("store_vfs.mie_enabled"):
+            return result
+
+        row = conn.execute(
+            "SELECT stability, importance FROM memory_chunks WHERE id=?", (chunk_id,)
+        ).fetchone()
+        if not row:
+            return result
+
+        stab = float(row[0] or 1.0)
+        imp = float(row[1] or 0.0)
+        if imp < float(_cfg.get("store_vfs.mie_min_importance")):
+            return result
+
+        window_hours = int(_cfg.get("store_vfs.mie_window_hours"))
+        import datetime as _dt
+        cutoff = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=window_hours)).isoformat()
+
+        # 查找同项目同类型、时间窗口内的其他 chunk
+        rows = conn.execute(
+            """SELECT content FROM memory_chunks
+               WHERE project=? AND chunk_type=? AND id!=? AND created_at >= ?
+               LIMIT 20""",
+            (project, chunk_type, chunk_id, cutoff)
+        ).fetchall()
+
+        if not rows:
+            return result
+
+        # 计算词汇 Jaccard 相似度
+        words_a = set(_re.findall(r'\b\w+\b', (content or "").lower()))
+        if not words_a:
+            return result
+
+        min_overlap = float(_cfg.get("store_vfs.mie_min_overlap"))
+        max_overlap = 0.0
+        for r in rows:
+            words_b = set(_re.findall(r'\b\w+\b', (r[0] or "").lower()))
+            if not words_b:
+                continue
+            intersection = len(words_a & words_b)
+            union = len(words_a | words_b)
+            if union == 0:
+                continue
+            jaccard = intersection / union
+            if jaccard > max_overlap:
+                max_overlap = jaccard
+
+        result["mie_overlap"] = round(max_overlap, 4)
+        if max_overlap < min_overlap:
+            return result
+
+        # 施加惩罚：penalty ∝ overlap，上限 mie_max_penalty
+        penalty_factor = float(_cfg.get("store_vfs.mie_penalty_factor"))  # 0.93
+        max_penalty = float(_cfg.get("store_vfs.mie_max_penalty"))        # 0.12
+        # 按重叠比例线性缩放惩罚
+        overlap_ratio = min(1.0, (max_overlap - min_overlap) / (1.0 - min_overlap + 1e-9))
+        raw_penalty = (1.0 - penalty_factor) * overlap_ratio
+        capped_penalty = min(max_penalty, raw_penalty)
+        new_stab = max(0.1, stab * (1.0 - capped_penalty))
+        if new_stab < stab - 1e-6:
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+            )
+            result["mie_penalized"] = True
+        return result
+    except Exception:
+        return result
+
+
+def apply_spreading_activation_effect(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+    now_iso: str = None,
+) -> dict:
+    """iter474: Spreading Activation Effect (SAE) — 检索时语义相关 chunk 的 retrievability 一起被激活。
+
+    认知科学依据：
+      Collins & Loftus (1975) "A spreading-activation theory of semantic processing" —
+        语义网络中，激活沿关联边传播（decay with distance），相关概念可达性提升 20-30%。
+      Anderson (1983) ACT* 模型：基线激活水平（Bi）= log(fan) + Σ(source activations)。
+      效果：检索 A 后，与 A 语义相似的 B 的 retrievability 提升约 0.05~0.15。
+
+    OS 类比：Linux readahead（mm/readahead.c）—
+      顺序/相关 page 预取到 page cache，降低后续访问的 page fault 率。
+      SAE = 语义层面的 readahead：被检索的 chunk 把相关 chunk 预热到"热缓存"。
+    """
+    result = {"sae_boosted": 0, "sae_total_neighbors": 0}
+    try:
+        import config as _cfg
+        import re as _re
+        if not _cfg.get("store_vfs.sae_enabled"):
+            return result
+        if not chunk_ids:
+            return result
+
+        min_sim = float(_cfg.get("store_vfs.sae_min_similarity"))
+        spread_factor = float(_cfg.get("store_vfs.sae_spread_factor"))
+        max_spread = float(_cfg.get("store_vfs.sae_max_spread"))
+        max_neighbors = int(_cfg.get("store_vfs.sae_max_neighbors"))
+        min_imp = float(_cfg.get("store_vfs.sae_min_importance"))
+
+        for cid in chunk_ids:
+            src = conn.execute(
+                "SELECT content, project, importance FROM memory_chunks WHERE id=?", (cid,)
+            ).fetchone()
+            if not src:
+                continue
+            if float(src[2] or 0.0) < min_imp:
+                continue
+
+            words_src = set(_re.findall(r'\b\w+\b', (src[0] or "").lower()))
+            if not words_src:
+                continue
+
+            # 查找同项目的候选邻居
+            neighbors = conn.execute(
+                """SELECT id, content, retrievability FROM memory_chunks
+                   WHERE project=? AND id!=?
+                   ORDER BY last_accessed DESC LIMIT 100""",
+                (src[1], cid)
+            ).fetchall()
+
+            boosted = 0
+            for nb in neighbors:
+                if boosted >= max_neighbors:
+                    break
+                words_nb = set(_re.findall(r'\b\w+\b', (nb[1] or "").lower()))
+                if not words_nb:
+                    continue
+                union = len(words_src | words_nb)
+                if union == 0:
+                    continue
+                jaccard = len(words_src & words_nb) / union
+                if jaccard < min_sim:
+                    continue
+
+                retr = float(nb[2] or 0.0)
+                boost = min(max_spread, retr * spread_factor + spread_factor * 0.5)
+                new_retr = min(1.0, retr + boost)
+                if new_retr > retr + 1e-6:
+                    conn.execute(
+                        "UPDATE memory_chunks SET retrievability=? WHERE id=?",
+                        (new_retr, nb[0])
+                    )
+                    boosted += 1
+
+            result["sae_boosted"] += boosted
+            result["sae_total_neighbors"] += boosted
+
+        return result
+    except Exception:
+        return result
+
+
+def apply_serial_position_primacy(
+    conn: "sqlite3.Connection",
+    chunk_id: str,
+    source_session: str,
+    project: str,
+    now_iso: str = None,
+) -> dict:
+    """iter475: Serial Position Effect — Primacy 部分（session 首位 chunk stability 加成）。
+
+    认知科学依据：
+      Murdock (1962) "The serial position effect of free recall" —
+        序列首位项目因有更多复习机会（longer rehearsal time）→ 长期 stability 更高。
+        Primacy advantage: 首 5 项目 recall 率比中间项目高约 20-30%。
+      Atkinson & Shiffrin (1968) 双存储模型：primacy 项目更可能进入长时记忆。
+
+    OS 类比：CPU L1 cache 的 LRU most-recently-used slot —
+      最先加载的 hot page 因反复被引用而留在 cache 最久。
+      Session 首位 chunk = 被后续推理反复引用的基础上下文。
+    """
+    result = {"spe_primacy_boosted": False}
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.spe_enabled"):
+            return result
+        if not source_session:
+            return result
+
+        row = conn.execute(
+            "SELECT stability, importance FROM memory_chunks WHERE id=?", (chunk_id,)
+        ).fetchone()
+        if not row:
+            return result
+
+        imp = float(row[1] or 0.0)
+        if imp < float(_cfg.get("store_vfs.spe_min_importance")):
+            return result
+
+        primacy_window = int(_cfg.get("store_vfs.spe_primacy_window"))
+        min_session_size = int(_cfg.get("store_vfs.spe_min_session_size"))
+
+        # 查询 session 内当前 chunk 的位置（按 created_at 排序）
+        session_chunks = conn.execute(
+            """SELECT id FROM memory_chunks
+               WHERE source_session=? AND project=?
+               ORDER BY created_at ASC""",
+            (source_session, project)
+        ).fetchall()
+
+        total = len(session_chunks)
+        if total < min_session_size:
+            return result
+
+        ids_ordered = [r[0] for r in session_chunks]
+        if chunk_id not in ids_ordered:
+            return result
+
+        pos = ids_ordered.index(chunk_id)  # 0-based
+        if pos >= primacy_window:
+            return result
+
+        stab = float(row[0] or 1.0)
+        primacy_boost = float(_cfg.get("store_vfs.spe_primacy_boost"))
+        new_stab = min(365.0, stab * (1.0 + primacy_boost))
+        if new_stab > stab + 1e-6:
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+            )
+            result["spe_primacy_boosted"] = True
+        return result
+    except Exception:
+        return result
+
+
+def apply_serial_position_recency(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+    now_iso: str = None,
+) -> dict:
+    """iter475: Serial Position Effect — Recency 部分（session 末位 chunk retrievability 加成）。
+
+    认知科学依据：
+      Murdock (1962): 序列末位项目仍在工作记忆（short-term buffer）→ 短期 retrievability 最高。
+      Glanzer & Cunitz (1966): recency 效应在延迟测试后消失（与 primacy 不同）→ 仅提升 retrievability 而非 stability。
+
+    OS 类比：L1 cache 的 MRU（最近使用）slot — 最近访问的 page 在 cache 中优先保留。
+    """
+    result = {"spe_recency_boosted": 0}
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.spe_enabled"):
+            return result
+        if not chunk_ids:
+            return result
+
+        recency_window = int(_cfg.get("store_vfs.spe_recency_window"))
+        recency_boost = float(_cfg.get("store_vfs.spe_recency_boost"))
+        min_session_size = int(_cfg.get("store_vfs.spe_min_session_size"))
+        min_imp = float(_cfg.get("store_vfs.spe_min_importance"))
+
+        for cid in chunk_ids:
+            src = conn.execute(
+                "SELECT source_session, project, importance FROM memory_chunks WHERE id=?", (cid,)
+            ).fetchone()
+            if not src or not src[0]:
+                continue
+            if float(src[2] or 0.0) < min_imp:
+                continue
+
+            session_chunks = conn.execute(
+                """SELECT id FROM memory_chunks
+                   WHERE source_session=? AND project=?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (src[0], src[1], recency_window + 5)
+            ).fetchall()
+
+            if len(session_chunks) < min_session_size:
+                continue
+
+            recency_ids = {r[0] for r in session_chunks[:recency_window]}
+            if cid not in recency_ids:
+                continue
+
+            retr_row = conn.execute(
+                "SELECT retrievability FROM memory_chunks WHERE id=?", (cid,)
+            ).fetchone()
+            if not retr_row:
+                continue
+
+            retr = float(retr_row[0] or 0.0)
+            new_retr = min(1.0, retr + recency_boost)
+            if new_retr > retr + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET retrievability=? WHERE id=?", (new_retr, cid)
+                )
+                result["spe_recency_boosted"] += 1
+
+        return result
+    except Exception:
+        return result
+
+
+def apply_cognitive_load_penalty(
+    conn: "sqlite3.Connection",
+    chunk_id: str,
+    content: str,
+    now_iso: str = None,
+) -> dict:
+    """iter476: Cognitive Load Penalty (CLP) — 超出工作记忆容量的内容 stability 轻微降低。
+
+    认知科学依据：
+      Miller (1956) "The magical number seven, plus or minus two" —
+        工作记忆容量上限约 7±2 chunks；超出时编码质量下降。
+      Sweller (1988) Cognitive Load Theory: 内在负荷（intrinsic load）过高 → 有效编码下降。
+      Paas & van Merriënboer (1994): 高认知负荷材料的长期记忆保留率反而更低。
+      与 DDE 互补：短且复杂（高词汇难度）= 有益困难 → stability +；
+                   长且复杂（词数超载）= 认知超载 → stability −。
+
+    OS 类比：CPU context switch overhead（kernel/sched/core.c）—
+      超线程数过多时，调度开销超过并行收益；
+      TLB flush 频率 ∝ 活跃进程数 → 超过 CPU 核数后 effective IPC 下降。
+    """
+    result = {"clp_penalized": False, "clp_token_count": 0}
+    try:
+        import config as _cfg
+        import re as _re
+        if not _cfg.get("store_vfs.clp_enabled"):
+            return result
+
+        row = conn.execute(
+            "SELECT stability, importance FROM memory_chunks WHERE id=?", (chunk_id,)
+        ).fetchone()
+        if not row:
+            return result
+
+        stab = float(row[0] or 1.0)
+        imp = float(row[1] or 0.0)
+        if imp < float(_cfg.get("store_vfs.clp_min_importance")):
+            return result
+
+        words = _re.findall(r'\b\w+\b', (content or ""))
+        token_count = len(words)
+        result["clp_token_count"] = token_count
+
+        max_tokens = int(_cfg.get("store_vfs.clp_max_tokens"))
+        if token_count <= max_tokens:
+            return result
+
+        excess = token_count - max_tokens
+        penalty_per_100 = float(_cfg.get("store_vfs.clp_penalty_per_100"))
+        max_penalty = float(_cfg.get("store_vfs.clp_max_penalty"))
+        raw_penalty = (excess / 100.0) * penalty_per_100
+        capped_penalty = min(max_penalty, raw_penalty)
+        new_stab = max(0.1, stab * (1.0 - capped_penalty))
+        if new_stab < stab - 1e-6:
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+            )
+            result["clp_penalized"] = True
+        return result
+    except Exception:
+        return result
 
 
 def apply_emotional_salience(
