@@ -5132,6 +5132,21 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
     except Exception:
         pass
 
+    # ── iter454: IPE — Interleaved Practice Effect ───────────────────────────
+    # OS 类比：CPU cross-stride interleaved access → multi-stream prefetch trigger
+    # 混合检索（多 chunk_type 交替）→ 每个 chunk 的 diversity_factor 加成
+    try:
+        if len(chunk_ids) >= 2:
+            # 获取 project（取第一个 chunk 的 project）
+            _ipe_proj_row = conn.execute(
+                "SELECT project FROM memory_chunks WHERE id=?", (chunk_ids[0],)
+            ).fetchone()
+            if _ipe_proj_row:
+                _ipe_proj = _ipe_proj_row[0] if isinstance(_ipe_proj_row, (list, tuple)) else _ipe_proj_row["project"]
+                apply_interleaved_practice_effect(conn, chunk_ids, _ipe_proj)
+    except Exception:
+        pass
+
 def insert_trace(conn: sqlite3.Connection, trace_dict: dict) -> None:
     """写入 recall_traces 记录。迭代65：新增 ftrace_json 阶段级追踪。"""
     d = trace_dict
@@ -8268,6 +8283,96 @@ def apply_prediction_error_enhancement(
         return stability
     except Exception:
         return stability
+
+
+def apply_interleaved_practice_effect(
+    conn: sqlite3.Connection,
+    chunk_ids: list,
+    project: str,
+) -> dict:
+    """
+    iter454: Interleaved Practice Effect — 混合检索强化效应（Kornell & Bjork 2008）。
+
+    同一次 update_accessed() 调用中若 chunk_ids 涵盖多种不同 chunk_type（混合检索），
+    每个满足条件的 chunk 获得额外 stability 加成（diversity_factor 正比）：
+      diversity_factor = unique_type_count / len(chunk_ids)
+      interleave_bonus = diversity_factor × ipe_scale
+      new_stab = min(365.0, stab × (1 + interleave_bonus))
+
+    OS 类比：CPU cross-stride interleaved access → multi-stream prefetch trigger —
+      跨 chunk_type 的混合检索 = 多维语义访问模式 → prefetcher 提升 cache line 预取优先级。
+
+    Returns: {"ipe_boosted": int, "total_examined": int}
+    """
+    result = {"ipe_boosted": 0, "total_examined": 0}
+    if not chunk_ids or not project:
+        return result
+    try:
+        import config as _config
+        if not _config.get("store_vfs.ipe_enabled"):
+            return result
+
+        ipe_min_types = int(_config.get("store_vfs.ipe_min_types") or 2)
+        ipe_min_chunks = int(_config.get("store_vfs.ipe_min_chunks") or 2)
+        ipe_scale = float(_config.get("store_vfs.ipe_scale") or 0.08)
+        ipe_min_importance = float(_config.get("store_vfs.ipe_min_importance") or 0.40)
+
+        # 最少 chunk 数量要求
+        if len(chunk_ids) < ipe_min_chunks:
+            return result
+
+        # 获取本批次所有 chunk 的 chunk_type、importance、stability
+        placeholders = ",".join("?" * len(chunk_ids))
+        rows = conn.execute(
+            f"SELECT id, chunk_type, importance, stability FROM memory_chunks "
+            f"WHERE id IN ({placeholders}) AND project=?",
+            list(chunk_ids) + [project],
+        ).fetchall()
+
+        if not rows:
+            return result
+
+        # 统计本批次的 chunk_type 多样性
+        type_map = {}  # chunk_id -> chunk_type
+        for row in rows:
+            cid = row[0] if isinstance(row, (list, tuple)) else row["id"]
+            ctype = row[1] if isinstance(row, (list, tuple)) else row["chunk_type"]
+            type_map[cid] = ctype
+
+        unique_types = set(type_map.values())
+        if len(unique_types) < ipe_min_types:
+            return result  # 类型多样性不足，不触发 IPE
+
+        diversity_factor = len(unique_types) / max(1, len(chunk_ids))
+        interleave_bonus = diversity_factor * ipe_scale
+
+        if interleave_bonus < 0.001:
+            return result
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        boosted = 0
+
+        for row in rows:
+            cid = row[0] if isinstance(row, (list, tuple)) else row["id"]
+            importance = float(row[2] if isinstance(row, (list, tuple)) else row["importance"])
+            stability = float(row[3] if isinstance(row, (list, tuple)) else row["stability"])
+            result["total_examined"] += 1
+
+            if importance < ipe_min_importance:
+                continue
+
+            new_stab = min(365.0, stability * (1.0 + interleave_bonus))
+            if new_stab > stability + 0.001:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=? AND project=?",
+                    (new_stab, now_iso, cid, project),
+                )
+                boosted += 1
+
+        result["ipe_boosted"] = boosted
+        return result
+    except Exception:
+        return result
 
 
 def compute_emotional_valence(text: str) -> float:

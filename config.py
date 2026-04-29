@@ -988,6 +988,61 @@ _REGISTRY: dict = {
     "store_vfs.peme_min_importance": (0.45, float, 0.0, 1.0, None,
         "iter453: 触发 PEME 的最低 importance 阈值（低重要性 chunk 不参与，避免噪音固化，默认 0.45）"),
 
+    # ── iter454: Interleaved Practice Effect — 混合检索强化效应（Kornell & Bjork 2008）────────────────────────
+    # 认知科学依据：
+    #   Kornell & Bjork (2008) "Learning concepts and categories: Is spacing the 'enemy of
+    #     induction'?" (Psychological Science) —
+    #     混合练习（不同类别交替学习）比集中练习（同类别连续学习）在延迟测试中表现好 43-57%：
+    #     当场学习表现差（混合 vs 集中），但长期保留率更高（延迟测试反转效果）。
+    #     机制：混合练习迫使大脑在每次检索时重建"区分性特征"（discriminative hypothesis），
+    #     形成更丰富的多维检索线索集（elaborated retrieval schema），降低检索混淆率。
+    #   Rohrer & Taylor (2007) "The shuffling of mathematics problems improves learning" —
+    #     混合练习使数学问题的分类识别能力提升（+43%），因为混合创造了更多"相互比较"机会，
+    #     强化了每个概念的边界特征（boundary feature encoding）。
+    #   Pan & Rickard (2018) "Transfer of test-enhanced learning" (Psychological Bulletin) —
+    #     混合检索（多主题交替）产生的迁移学习效果（transfer）比集中检索强 2-3 倍：
+    #     跨主题检索激活更多关联路径，减少记忆孤岛（isolated memory silos）。
+    #   Rohrer et al. (2015) "Interleaved practice improves mathematics learning" (J. Educational Psych) —
+    #     混合练习效应的元分析：效应量 d=0.54，跨学科、年龄段均稳定。
+    #
+    # memory-os 等价：
+    #   update_accessed() 时，若 chunk_ids 中包含多种不同 chunk_type（混合检索）：
+    #     diversity_factor = unique_type_count / len(chunk_ids)（类型多样性比例）
+    #     interleave_bonus = diversity_factor × ipe_scale
+    #     new_stab = min(365.0, stab × (1 + interleave_bonus))
+    #   只对 importance >= ipe_min_importance 的 chunk 应用（低重要性 chunk 不值得额外保护）。
+    #   只在 unique_type_count >= ipe_min_types 时触发（至少 2 种类型才算"混合"）。
+    #   单次 update_accessed 调用中 len(chunk_ids) >= ipe_min_chunks 才触发（单个 chunk 不算 interleaved）。
+    #
+    # 与 iter412 Testing Effect（TE）的区别：
+    #   TE：单个 chunk 的检索难度奖励（低 retrievability → quality bonus）
+    #   IPE：本次检索集合的类型多样性奖励（多 chunk_type → diversity bonus）
+    #   触发层级：TE=单 chunk 级；IPE=检索批次级（batch-level diversity）
+    #
+    # 与 iter415 Encoding Variability（EV）的区别：
+    #   EV：单 chunk 历史编码情境的多样性（encode_context 增长 → 跨情境稳健性）
+    #   IPE：当前检索批次的类型多样性（同次检索不同类型 → 混合练习效应）
+    #   时间维度：EV=跨 session 历史积累；IPE=单次 update_accessed 即时效应
+    #
+    # OS 类比：CPU cache prefetcher stride pattern detection with cross-stride interleaving ——
+    #   访问不同 cache set 的交替模式（cross-stride interleaved access）比单一 stride 连续访问
+    #   更能暴露内存访问的多维语义（multi-stream prefetch trigger）；
+    #   现代 Intel/AMD prefetcher 对跨 stride 的交替访问给予更高预取优先级（D-stride + IP-stride 联合激活）；
+    #   类比：跨 chunk_type 的混合检索 = 多维语义访问模式 → prefetcher 提升对应 cache line 的预取优先级
+    #   = memory-os 给予混合检索的每个 chunk 额外 stability 加成。
+    "store_vfs.ipe_enabled": (True, bool, None, None, None,
+        "iter454: 是否启用 Interleaved Practice Effect — 混合检索（多 chunk_type）时每个 chunk 获得额外 stability 加成"),
+    "store_vfs.ipe_min_types": (2, int, 2, 10, None,
+        "iter454: 触发 IPE 的最少不同 chunk_type 数量（默认 2：至少 2 种类型才算'混合检索'）"),
+    "store_vfs.ipe_min_chunks": (2, int, 2, 20, None,
+        "iter454: 触发 IPE 的最少 chunk_ids 数量（默认 2：单个 chunk 不构成混合检索）"),
+    "store_vfs.ipe_scale": (0.08, float, 0.0, 0.30, None,
+        "iter454: IPE 加成系数：interleave_bonus = diversity_factor × scale，"
+        "diversity_factor=1.0（每个 chunk 类型不同）时最大 bonus=ipe_scale（默认 0.08 ≈ 8%，"
+        "对应 Kornell 2008 混合练习的 ~43-57% 保留率优势的折半折半估计）"),
+    "store_vfs.ipe_min_importance": (0.40, float, 0.0, 1.0, None,
+        "iter454: 触发 IPE 的最低 importance 阈值（低重要性 chunk 不参与混合强化，默认 0.40）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。
