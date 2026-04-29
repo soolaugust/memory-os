@@ -1043,6 +1043,107 @@ _REGISTRY: dict = {
     "store_vfs.ipe_min_importance": (0.40, float, 0.0, 1.0, None,
         "iter454: 触发 IPE 的最低 importance 阈值（低重要性 chunk 不参与混合强化，默认 0.40）"),
 
+    # ── iter455: Generation-Spacing Interaction Effect — 检索努力×间隔历史的乘法交互加成（Pyc & Rawson 2009）──
+    # 认知科学依据：
+    #   Pyc & Rawson (2009) "Testing the retrieval effort hypothesis: Does greater difficulty
+    #     correctly recalling information lead to higher levels of memory?" (JML 60:437-447) —
+    #     检索练习的巩固效益不均等，取决于两个因素的乘积：
+    #     ① 检索难度（retrieval effort）：当前检索有多难（R_at_recall 越低，effort 越高）
+    #     ② 间隔成功历史（spaced_access_count）：历史上有多少次跨 session 成功检索
+    #     交互效应：effort × streak_factor 才是真正的巩固预测因子，
+    #     高努力+无历史 = 初次学习；高历史+无努力 = 轻松重复；两者俱高 = 最强巩固。
+    #   Roediger & Karpicke (2006) Perspectives on Psychological Science "The Power of Testing Memory" —
+    #     检索练习优势的核心机制是"desirable difficulty"：难但成功的检索比容易的检索产生
+    #     更强、更持久的记忆痕迹（elaborative encoding 更深，Bjork 1994）。
+    #   Carrier & Pashler (1992) — 检索努力在神经水平上驱动更强的 LTP：
+    #     突触标记（synaptic tagging）需要同时满足：
+    #     ① 先前 LTP 历史（success streak = synaptic tag already set）
+    #     ② 当前去极化充分（effort = strong depolarization attempt）
+    #     两者缺一不可（Frey & Morris 1997 synaptic tagging hypothesis）。
+    #   与 iter412 Testing Effect（TE）的区别：
+    #     TE = 单维度：难度 → SM-2 quality bonus（单次检索的直接奖励）
+    #     GSIE = 双维度乘法：effort × streak_factor（累积历史 × 当次难度 = 交互奖励）
+    #     TE 在 quality 满分（5）后无法继续加成；GSIE 在 SM-2 之外提供独立乘法 pass
+    #   与 iter420 Spacing Effect（SE）的区别：
+    #     SE = spaced_access_count 贡献 SM-2 quality 加成（单维度频率奖励）
+    #     GSIE = spaced_access_count × effort 的乘法交互（当 SE 使 quality 饱和到 5 时，GSIE 仍可激活）
+    #
+    # memory-os 等价：
+    #   update_accessed() 时，对每个命中 chunk：
+    #     effort_score = max(0.0, 1.0 - R_at_recall)
+    #     streak_factor = min(1.0, spaced_access_count / gsie_ref_streak)
+    #     interaction_score = effort_score × streak_factor
+    #     if effort_score >= gsie_min_effort and spaced_access_count >= gsie_min_streak:
+    #         gsie_bonus = interaction_score × gsie_scale
+    #         new_stab = min(365.0, stability × (1.0 + gsie_bonus))
+    #   在 SM-2 更新之后执行（读取 SM-2 后的新 stability），作为独立第二次 pass。
+    #
+    # OS 类比：Linux ARC (Adaptive Replacement Cache) ghost list + frequency-weighted promotion —
+    #   ARC 维护 ghost list（已驱逐但有访问历史的 page）。
+    #   当 ghost list 中的 page 再次缺页（= 检索努力高，因为该 page 已过期）：
+    #     → ARC 将 T2（高频历史）权重增加（= streak_factor）
+    #     → 晋升力度 = T2权重 × 缺页难度（ghost list 中驻留时间，= effort_score）
+    #   最终晋升到 T2（稳定工作集）的力度 = frequency_weight × recency_gap = GSIE 的乘法交互。
+    "store_vfs.gsie_enabled": (True, bool, None, None, None,
+        "iter455: 是否启用 Generation-Spacing Interaction Effect — 检索努力 × 间隔成功历史的乘法交互加成"),
+    "store_vfs.gsie_min_streak": (2, int, 1, 20, None,
+        "iter455: 触发 GSIE 的最低 spaced_access_count 阈值（>= 此值代表有间隔成功历史，默认 2）"),
+    "store_vfs.gsie_ref_streak": (6, int, 2, 50, None,
+        "iter455: streak_factor 达到 1.0 所需的 spaced_access_count 参考值（默认 6，"
+        "对应 Pyc & Rawson 2009 完全检索努力效益约在 4-6 次成功检索后出现）"),
+    "store_vfs.gsie_min_effort": (0.10, float, 0.0, 1.0, None,
+        "iter455: 触发 GSIE 的最低 effort_score 阈值（effort_score = 1 - R_at_recall，"
+        "< 0.10 代表几乎完美回忆，不构成'检索努力'事件，默认 0.10）"),
+    "store_vfs.gsie_scale": (0.12, float, 0.0, 0.50, None,
+        "iter455: GSIE 交互加成系数：bonus = interaction_score × scale，"
+        "interaction_score=1.0（最大努力 + 最长历史）时最大 bonus=gsie_scale（默认 0.12 ≈ 12%，"
+        "略高于 TE 的 SM-2 quality 最大加成，对应 Pyc & Rawson 2009 两因子乘法的额外增益）"),
+    "store_vfs.gsie_min_importance": (0.40, float, 0.0, 1.0, None,
+        "iter455: 触发 GSIE 的最低 importance 阈值（低重要性 chunk 不参与交互加成，默认 0.40）"),
+
+    # ── iter456: Retrieval Practice vs. Restudy Consolidation Asymmetry (RPCA) — 主动检索比被动重读巩固效益更高（Roediger & Karpicke 2006）──
+    # 认知科学依据：
+    #   Roediger & Karpicke (2006) "Test-Enhanced Learning: Taking Memory Tests Improves Long-Term Retention"
+    #     (Psychological Science) — 学习相同材料，主动检索（retrieval practice）比被动重读（restudy）
+    #     在延迟测试（一周后）中保留率高约 50%：
+    #     retrieval practice: 61% retention; restudy: 40% retention (1 week test)。
+    #     机制：主动检索激活更多语义网络节点（elaborative retrieval），形成更多检索路径；
+    #     被动重读只是激活已有的浅层表示（shallow re-exposure），不触发额外巩固机制。
+    #   Karpicke & Roediger (2008) Science "The Critical Importance of Retrieval for Learning" —
+    #     即使研究材料时间相同，retrieval practice 的长时记忆优势是 restudy 的 1.5-2 倍。
+    #   Karpicke & Blunt (2011) Science "Retrieval Practice Produces More Learning than Elaborative Studying" —
+    #     主动测试优于包括概念图、精化笔记等多种"深度学习"策略，证明检索行为本身是关键。
+    #
+    # memory-os 等价：
+    #   update_accessed() 时，根据 access_source 字段区分访问路径：
+    #     'retrieval' = 用户 query 主动命中（FTS5/BM25 检索，真正的测试事件）→ rpca_retrieval_bonus
+    #     'restudy'   = 被动曝光（SessionStart loader inject, prefetch 等预载）→ rpca_restudy_bonus
+    #   bonus 作为独立 stability 乘子（额外 pass，在 SM-2 之后）：
+    #     new_stab = min(365.0, stab × (1 + bonus))
+    #   retrieval bonus > restudy bonus，体现主动检索的记忆优势。
+    #
+    # 与 iter412 Testing Effect（TE）的区别：
+    #   TE：低 retrievability → 检索难度 → SM-2 quality 加成（难度驱动，单维度）
+    #   RPCA：access_source='retrieval' vs 'restudy' → 路径差异 → 稳定性加成（路径驱动，二分类）
+    #   两者互补：TE 奖励难度，RPCA 奖励检索行为本身（即使 retrievability 很高的"容易"检索也获得加成）
+    #
+    # OS 类比：Linux page fault vs readahead prefetch 的 LRU promotion 差异 —
+    #   demand page fault（主动缺页 = retrieval）触发 page 立即提升到 active LRU list；
+    #   readahead prefetch（被动预读 = restudy）page 先进 inactive list，需要二次访问才晋升；
+    #   类比：retrieval path → 直接 active list promotion（更强 stability 加成）；
+    #         restudy path → inactive list（较弱加成，需要后续真正被用到才晋升）。
+    "store_vfs.rpca_enabled": (True, bool, None, None, None,
+        "iter456: 是否启用 Retrieval Practice vs Restudy Consolidation Asymmetry — 主动检索比被动重读获得更高 stability 加成"),
+    "store_vfs.rpca_retrieval_bonus": (0.10, float, 0.0, 0.30, None,
+        "iter456: 主动检索路径（access_source='retrieval'）的 stability 加成系数，"
+        "new_stab = stab × (1 + rpca_retrieval_bonus)（默认 0.10 ≈ 10%，"
+        "对应 Roediger & Karpicke 2006 retrieval practice 比 restudy 高约 50% 的折半估计）"),
+    "store_vfs.rpca_restudy_bonus": (0.02, float, 0.0, 0.10, None,
+        "iter456: 被动重读路径（access_source='restudy'）的 stability 加成系数，"
+        "new_stab = stab × (1 + rpca_restudy_bonus)（默认 0.02 ≈ 2%，被动曝光仍有轻微加成）"),
+    "store_vfs.rpca_min_importance": (0.40, float, 0.0, 1.0, None,
+        "iter456: 触发 RPCA 的最低 importance 阈值（低重要性 chunk 不参与，默认 0.40）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。

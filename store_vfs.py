@@ -385,6 +385,16 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     #   防止 khugepaged 频繁唤醒消耗 CPU（hypermnesia cooldown 防止反复触发）。
     _safe_add_column(conn, "memory_chunks", "hypermnesia_last_boost", "TEXT")
 
+    # ── iter456: access_source — 检索来源标记（RPCA：主动检索 vs 被动重读）──
+    # 认知科学依据：Roediger & Karpicke (2006) Retrieval Practice vs. Restudy —
+    #   主动检索（retrieval）产生的记忆巩固效益比被动重读（restudy）高约 50%。
+    # access_source ∈ {'retrieval', 'restudy'}：
+    #   'retrieval' = 用户 query 主动命中（默认，通过 FTS5/BM25 检索召回）
+    #   'restudy'   = 被动曝光（loader注入、preload 等非主动检索路径）
+    # OS 类比：Linux page fault type — demand paging（retrieval，主动缺页）vs
+    #   prefetch/readahead（restudy，内核预读，未被 CPU 实际访问确认）。
+    _safe_add_column(conn, "memory_chunks", "access_source", "TEXT DEFAULT 'retrieval'")
+
     # ── Task13：row_version — Optimistic Locking（CAS）──
     # OS 类比：Linux seqlock / atomic_cmpxchg — 读取 sequence number 后写入时验证未变化。
     # 多 agent 并发写：每次 update 递增 row_version，CAS 检查版本防止 ABA 问题。
@@ -4884,7 +4894,7 @@ def read_chunk_version() -> int:
     return 0
 
 def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
-                    now_iso: str = None, recall_quality: int = None) -> None:
+                    now_iso: str = None, recall_quality: int = None, **kwargs) -> None:
     """
     批量更新 last_accessed + access_count 自增。
     iter106: 同时执行 auto-verification — access_count 达到阈值后自动升 verified。
@@ -5164,6 +5174,25 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
                 apply_generation_spacing_interaction_effect(
                     conn, chunk_ids, _gsie_proj,
                     _pre_stability_map, _pre_spaced_access_map, _pre_access_map, now_iso,
+                )
+    except Exception:
+        pass
+
+    # ── iter456: RPCA — Retrieval Practice vs. Restudy Consolidation Asymmetry ──────────
+    # OS 类比：Linux page fault (demand fault) → active LRU promotion;
+    #   readahead prefetch (restudy) → inactive list first.
+    # 认知科学：Roediger & Karpicke (2006) active retrieval = +50% retention vs passive restudy.
+    # access_source 由调用方传入（默认 'retrieval'），update_accessed kwargs: access_source_map
+    try:
+        if chunk_ids:
+            _rpca_proj_row = conn.execute(
+                "SELECT project FROM memory_chunks WHERE id=?", (chunk_ids[0],)
+            ).fetchone()
+            if _rpca_proj_row:
+                _rpca_proj = _rpca_proj_row[0] if isinstance(_rpca_proj_row, (list, tuple)) else _rpca_proj_row["project"]
+                _rpca_source_map = kwargs.get("access_source_map", {}) if kwargs else {}
+                apply_retrieval_practice_consolidation_asymmetry(
+                    conn, chunk_ids, _rpca_proj, _rpca_source_map,
                 )
     except Exception:
         pass
@@ -8522,6 +8551,94 @@ def apply_generation_spacing_interaction_effect(
                 boosted += 1
 
         result["gsie_boosted"] = boosted
+        return result
+    except Exception:
+        return result
+
+
+# ── iter456: Retrieval Practice vs. Restudy Consolidation Asymmetry (RPCA) ──────────────────────
+# Roediger & Karpicke (2006): active retrieval yields ~50% more retention than passive restudy.
+# access_source='retrieval' → rpca_retrieval_bonus(0.10); 'restudy' → rpca_restudy_bonus(0.02).
+
+def apply_retrieval_practice_consolidation_asymmetry(
+    conn: sqlite3.Connection,
+    chunk_ids: list,
+    project: str,
+    access_source_map: dict,   # {chunk_id: 'retrieval' | 'restudy'}  — from update_accessed caller
+) -> dict:
+    """
+    iter456: Retrieval Practice vs. Restudy Consolidation Asymmetry.
+
+    Roediger & Karpicke (2006) Psychological Science "Test-Enhanced Learning" —
+      active retrieval (FTS5/BM25 query hit) outperforms passive restudy (loader inject,
+      prefetch) by ~50% in delayed retention. Applied as an independent stability bonus
+      *after* SM-2 update, per update_accessed() call.
+
+    OS 类比：Linux page fault (demand fault = retrieval) → immediate active LRU promotion;
+      readahead prefetch (restudy) → inactive list first, needs second access to promote.
+
+    Parameters
+    ----------
+    conn             : SQLite connection (write)
+    chunk_ids        : list of chunk IDs processed in this update_accessed call
+    project          : project identifier (used for namespace config lookup)
+    access_source_map: {chunk_id: 'retrieval' | 'restudy'}, defaults to 'retrieval' if missing
+
+    Returns
+    -------
+    {"rpca_boosted": int, "total_examined": int}
+    """
+    result = {"rpca_boosted": 0, "total_examined": 0}
+    if not chunk_ids:
+        return result
+
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.rpca_enabled", project=project):
+            return result
+
+        rpca_retrieval_bonus = float(_cfg.get("store_vfs.rpca_retrieval_bonus", project=project))
+        rpca_restudy_bonus   = float(_cfg.get("store_vfs.rpca_restudy_bonus",   project=project))
+        rpca_min_imp         = float(_cfg.get("store_vfs.rpca_min_importance",  project=project))
+
+        # Fetch current stability and importance for each chunk
+        placeholders = ",".join("?" * len(chunk_ids))
+        rows = conn.execute(
+            f"SELECT id, COALESCE(stability,1.0), COALESCE(importance,0.5) "
+            f"FROM memory_chunks WHERE id IN ({placeholders}) AND project=?",
+            list(chunk_ids) + [project],
+        ).fetchall()
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        boosted = 0
+        for row in rows:
+            cid = row[0]
+            stab = float(row[1])
+            imp  = float(row[2])
+            result["total_examined"] += 1
+
+            if imp < rpca_min_imp:
+                continue
+
+            source = access_source_map.get(cid, "retrieval")
+            if source == "retrieval":
+                bonus = rpca_retrieval_bonus
+            elif source == "restudy":
+                bonus = rpca_restudy_bonus
+            else:
+                bonus = rpca_retrieval_bonus  # unknown → treat as retrieval
+
+            if bonus <= 0.0:
+                continue
+
+            new_stab = min(365.0, stab * (1.0 + bonus))
+            conn.execute(
+                "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=? AND project=?",
+                (round(new_stab, 6), now_iso, cid, project),
+            )
+            boosted += 1
+
+        result["rpca_boosted"] = boosted
         return result
     except Exception:
         return result
