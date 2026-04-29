@@ -4905,9 +4905,10 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
     placeholders = ",".join("?" * len(chunk_ids))
     # iter389: Read last_accessed + stability BEFORE update (needed for reconsolidation gap calc + iter412 Testing Effect)
     # iter453: also read access_count, retrievability, importance for PEME
+    # iter455: also read spaced_access_count for GSIE
     _pre_access_rows = conn.execute(
         f"SELECT id, last_accessed, COALESCE(stability,1.0), COALESCE(access_count,0), "
-        f"COALESCE(retrievability,0.5), COALESCE(importance,0.5) "
+        f"COALESCE(retrievability,0.5), COALESCE(importance,0.5), COALESCE(spaced_access_count,0) "
         f"FROM memory_chunks WHERE id IN ({placeholders})",
         chunk_ids,
     ).fetchall()
@@ -4916,6 +4917,7 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
     _pre_access_count_map = {row[0]: int(row[3]) for row in _pre_access_rows}
     _pre_retrievability_map = {row[0]: float(row[4]) for row in _pre_access_rows}
     _pre_importance_map = {row[0]: float(row[5]) for row in _pre_access_rows}
+    _pre_spaced_access_map = {row[0]: int(row[6]) for row in _pre_access_rows}
     conn.execute(
         f"UPDATE memory_chunks SET last_accessed=?, access_count=COALESCE(access_count,0)+1 "
         f"WHERE id IN ({placeholders})",
@@ -5144,6 +5146,25 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
             if _ipe_proj_row:
                 _ipe_proj = _ipe_proj_row[0] if isinstance(_ipe_proj_row, (list, tuple)) else _ipe_proj_row["project"]
                 apply_interleaved_practice_effect(conn, chunk_ids, _ipe_proj)
+    except Exception:
+        pass
+
+    # ── iter455: GSIE — Generation-Spacing Interaction Effect ──────────────────
+    # OS 类比：Linux ARC ghost list + frequency-weighted promotion
+    # 检索努力（effort = 1 - R_at_recall）× 间隔成功历史（spaced_access_count）的乘法交互加成
+    # 认知科学：Pyc & Rawson (2009) "Testing the retrieval effort hypothesis" —
+    #   effort × streak_factor = 真正的巩固预测因子（SM-2 饱和后的独立第二次 pass）
+    try:
+        if chunk_ids:
+            _gsie_proj_row = conn.execute(
+                "SELECT project FROM memory_chunks WHERE id=?", (chunk_ids[0],)
+            ).fetchone()
+            if _gsie_proj_row:
+                _gsie_proj = _gsie_proj_row[0] if isinstance(_gsie_proj_row, (list, tuple)) else _gsie_proj_row["project"]
+                apply_generation_spacing_interaction_effect(
+                    conn, chunk_ids, _gsie_proj,
+                    _pre_stability_map, _pre_spaced_access_map, _pre_access_map, now_iso,
+                )
     except Exception:
         pass
 
@@ -8370,6 +8391,137 @@ def apply_interleaved_practice_effect(
                 boosted += 1
 
         result["ipe_boosted"] = boosted
+        return result
+    except Exception:
+        return result
+
+
+def apply_generation_spacing_interaction_effect(
+    conn: sqlite3.Connection,
+    chunk_ids: list,
+    project: str,
+    pre_stability_map: dict,
+    pre_spaced_access_map: dict,
+    pre_last_accessed_map: dict,
+    now_iso: str,
+) -> dict:
+    """iter455: Generation-Spacing Interaction Effect (GSIE).
+
+    Pyc & Rawson (2009) — 检索努力 × 间隔成功历史的乘法交互加成。
+    OS 类比：Linux ARC ghost list + frequency-weighted promotion —
+      ghost list page re-fault = 检索努力（item was fading）× T2 weight（历史频率）= 晋升力度。
+
+    公式：
+      effort_score = max(0.0, 1.0 - R_at_recall)
+        R_at_recall = exp(-gap_hours / (pre_stability × 24.0))
+        gap_hours   = (now - last_accessed).total_seconds() / 3600
+      streak_factor = min(1.0, spaced_access_count / gsie_ref_streak)
+      interaction_score = effort_score × streak_factor
+      if effort_score >= gsie_min_effort and spaced_access_count >= gsie_min_streak:
+          gsie_bonus = interaction_score × gsie_scale
+          new_stab = min(365.0, current_stability × (1.0 + gsie_bonus))
+
+    在 SM-2 更新之后执行（current_stability 已经是 SM-2 更新后的值），作为独立第二次 pass。
+
+    Args:
+        conn: SQLite connection
+        chunk_ids: 被检索的 chunk ID 列表
+        project: 项目 ID
+        pre_stability_map: {chunk_id: stability_before_sm2}
+        pre_spaced_access_map: {chunk_id: spaced_access_count_before_update}
+        pre_last_accessed_map: {chunk_id: last_accessed_iso_before_update}
+        now_iso: 当前时间的 ISO string
+
+    Returns:
+        dict with "gsie_boosted" and "total_examined"
+    """
+    result = {"gsie_boosted": 0, "total_examined": 0}
+    if not chunk_ids or not project:
+        return result
+    try:
+        import config as _config
+        if not _config.get("store_vfs.gsie_enabled"):
+            return result
+
+        gsie_min_streak = int(_config.get("store_vfs.gsie_min_streak") or 2)
+        gsie_ref_streak = int(_config.get("store_vfs.gsie_ref_streak") or 6)
+        gsie_min_effort = float(_config.get("store_vfs.gsie_min_effort") or 0.10)
+        gsie_scale = float(_config.get("store_vfs.gsie_scale") or 0.12)
+        gsie_min_importance = float(_config.get("store_vfs.gsie_min_importance") or 0.40)
+
+        # 读取 SM-2 更新后的当前 stability 和 importance
+        placeholders = ",".join("?" * len(chunk_ids))
+        rows = conn.execute(
+            f"SELECT id, importance, stability FROM memory_chunks "
+            f"WHERE id IN ({placeholders}) AND project=?",
+            list(chunk_ids) + [project],
+        ).fetchall()
+
+        if not rows:
+            return result
+
+        now_dt = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+        if now_dt.tzinfo is None:
+            from datetime import timezone as _tz
+            now_dt = now_dt.replace(tzinfo=_tz.utc)
+
+        boosted = 0
+        for row in rows:
+            cid = row[0] if isinstance(row, (list, tuple)) else row["id"]
+            importance = float(row[1] if isinstance(row, (list, tuple)) else row["importance"])
+            current_stab = float(row[2] if isinstance(row, (list, tuple)) else row["stability"])
+            result["total_examined"] += 1
+
+            if importance < gsie_min_importance:
+                continue
+
+            # 使用 pre-update 的 spaced_access_count
+            spaced_acc = int(pre_spaced_access_map.get(cid, 0))
+            if spaced_acc < gsie_min_streak:
+                continue
+
+            # 使用 pre-update 的 stability 来计算 R_at_recall（避免 SM-2 已更新后失真）
+            pre_stab = float(pre_stability_map.get(cid, current_stab))
+            last_acc_iso = pre_last_accessed_map.get(cid)
+
+            # 计算 gap_hours
+            gap_hours = 0.0
+            if last_acc_iso:
+                try:
+                    last_acc_dt = datetime.fromisoformat(str(last_acc_iso).replace("Z", "+00:00"))
+                    if last_acc_dt.tzinfo is None:
+                        from datetime import timezone as _tz2
+                        last_acc_dt = last_acc_dt.replace(tzinfo=_tz2.utc)
+                    gap_hours = max(0.0, (now_dt - last_acc_dt).total_seconds() / 3600.0)
+                except Exception:
+                    pass
+
+            # R_at_recall = exp(-gap_hours / (pre_stab × 24))
+            import math as _math
+            if pre_stab > 0.0:
+                r_at_recall = _math.exp(-gap_hours / (pre_stab * 24.0))
+            else:
+                r_at_recall = 0.0
+            effort_score = max(0.0, 1.0 - r_at_recall)
+
+            if effort_score < gsie_min_effort:
+                continue
+
+            streak_factor = min(1.0, spaced_acc / max(1, gsie_ref_streak))
+            interaction_score = effort_score * streak_factor
+            gsie_bonus = interaction_score * gsie_scale
+            if gsie_bonus < 0.001:
+                continue
+
+            new_stab = min(365.0, current_stab * (1.0 + gsie_bonus))
+            if new_stab > current_stab + 0.001:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=? AND project=?",
+                    (new_stab, now_iso, cid, project),
+                )
+                boosted += 1
+
+        result["gsie_boosted"] = boosted
         return result
     except Exception:
         return result
