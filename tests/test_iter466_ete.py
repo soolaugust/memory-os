@@ -172,15 +172,17 @@ def test_et5_max_boost_cap(conn):
     ete_max_boost = config.get("store_vfs.ete_max_boost")  # 0.18
     base = 5.0
 
-    # baseline（无情绪词）
+    # baseline（无情绪词；observation 避免 GE 干扰）
     content_base = "the the the the the the the the the the the"
-    chunk_base = _make_chunk("ete_5_base", content=content_base, importance=0.6, stability=base)
+    chunk_base = _make_chunk("ete_5_base", content=content_base, importance=0.6, stability=base,
+                              chunk_type="observation")
     insert_chunk(conn, chunk_base)
     stab_base = _get_stability(conn, "ete_5_base")
 
-    # ETE 分支（有情绪词）
+    # ETE 分支（有情绪词；observation 避免 GE 干扰，仅测量 ETE 净增量）
     content_ete = "the the the the critical the the the the the"
-    chunk_ete = _make_chunk("ete_5_ete", content=content_ete, importance=0.6, stability=base)
+    chunk_ete = _make_chunk("ete_5_ete", content=content_ete, importance=0.6, stability=base,
+                             chunk_type="observation")
     insert_chunk(conn, chunk_ete)
     stab_ete = _get_stability(conn, "ete_5_ete")
 

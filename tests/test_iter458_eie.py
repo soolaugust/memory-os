@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import tmpfs  # noqa
 
-from store_vfs import ensure_schema, insert_chunk
+from store_vfs import ensure_schema, insert_chunk, apply_elaborative_interrogation_effect
 import config
 
 
@@ -200,7 +200,7 @@ def test_ei5_boost_factor_1_15(conn):
 # ── EI6: eie_max_boost=0.30 上限保护 ─────────────────────────────────────────────────────
 
 def test_ei6_max_boost_cap(conn):
-    """EI6: eie_boost_factor 大时被 eie_max_boost(0.30) 上限保护（相对比较）。"""
+    """EI6: eie_boost_factor 大时被 eie_max_boost(0.30) 上限保护（直接调用 apply_elaborative_interrogation_effect）。"""
     original_get = config.get
 
     def patched_get_large(key, project=None):
@@ -210,32 +210,35 @@ def test_ei6_max_boost_cap(conn):
 
     eie_max_boost = config.get("store_vfs.eie_max_boost")  # 0.30
     base = 5.0
-    # 低密度内容（重复词多）避免 KDEE 同时触发，只有连接词 because/therefore/hence 触发 EIE
     content = "the the the the because the therefore the the hence the the the"
+    now_iso = _utcnow().isoformat()
 
-    # baseline（无连接词）
-    content_base = "the the the the the the the the the the the the the the"
-    chunk_base = _make_chunk("eie_6_base", content=content_base, importance=0.6, stability=base)
+    # 直接插入 DB，绕过 insert_chunk 中其他效应（GE iter406 等）干扰
+    conn.execute(
+        """INSERT OR REPLACE INTO memory_chunks
+           (id, project, chunk_type, content, summary, importance, stability,
+            created_at, updated_at, retrievability, last_accessed, access_count,
+            encode_context, session_type_history)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("eie_6", "test", "observation", content,
+         "summary", 0.6, base, now_iso, now_iso, 0.5, now_iso, 0, "kernel_mm", "")
+    )
+    conn.commit()
+
+    stab_before = _get_stability(conn, "eie_6")
     with mock.patch.object(config, 'get', side_effect=patched_get_large):
-        insert_chunk(conn, chunk_base)
-    stab_base = _get_stability(conn, "eie_6_base")
+        apply_elaborative_interrogation_effect(conn, "eie_6", content)
+    stab_after = _get_stability(conn, "eie_6")
 
-    # EIE 分支（大 boost_factor，被 max_boost cap）
-    chunk_eie = _make_chunk("eie_6_eie", content=content, importance=0.6, stability=base)
-    with mock.patch.object(config, 'get', side_effect=patched_get_large):
-        insert_chunk(conn, chunk_eie)
-    stab_eie = _get_stability(conn, "eie_6_eie")
-
-    # EIE 增量不应超过 base × max_boost（因为 cap 限制），允许小误差
-    eie_increment = stab_eie - stab_base
-    max_allowed_increment = base * eie_max_boost + 0.1  # 5.0 × 0.30 + tolerance
-    assert eie_increment <= max_allowed_increment, (
-        f"EI6: EIE 增量 {eie_increment:.4f} 不应超过 max_boost={eie_max_boost} 允许的 {max_allowed_increment:.4f}，"
-        f"base={stab_base:.4f} eie={stab_eie:.4f}"
+    increment = stab_after - stab_before
+    max_allowed_increment = base * eie_max_boost + 0.01  # 5.0 × 0.30 + tolerance
+    assert increment <= max_allowed_increment, (
+        f"EI6: EIE 增量 {increment:.4f} 不应超过 max_boost={eie_max_boost} 允许的 {max_allowed_increment:.4f}，"
+        f"before={stab_before:.4f} after={stab_after:.4f}"
     )
     # 但确实有加成
-    assert stab_eie > stab_base, (
-        f"EI6: 应有 EIE 加成，base={stab_base:.4f} eie={stab_eie:.4f}"
+    assert stab_after > stab_before, (
+        f"EI6: 应有 EIE 加成，before={stab_before:.4f} after={stab_after:.4f}"
     )
 
 

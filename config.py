@@ -1470,6 +1470,75 @@ _REGISTRY: dict = {
     "store_vfs.ccre_min_importance": (0.30, float, 0.0, 1.0, None,
         "iter468: 触发 CCRE 的最低 importance 阈值（默认 0.30）"),
 
+    # ── iter469: Generation Effect (GE) — 主动生成的信息比被动接收的保留更好（Slamecka & Graf 1978）──
+    # 认知科学依据：Slamecka & Graf (1978) "The generation effect: Delineation of a phenomenon" —
+    #   自我生成的信息（自写/决策/约束）比被动阅读的信息记忆保留率高 20-30%（延时测验）。
+    #   机制：生成过程激活更深的语义处理网络（semantic encoding）+ 自我参照加工（self-referential processing）。
+    # OS 类比：Linux CoW (Copy-on-Write) — 被进程主动写入（dirty）的页面优先保留在 active LRU；
+    #   只读共享页面（read-only）优先被 kswapd 淘汰（mm/vmscan.c: page_check_references）。
+    "store_vfs.ge_enabled": (True, bool, None, None, None,
+        "iter469: 是否启用 Generation Effect — 主动生成类型的 chunk 获得 stability 加成"),
+    "store_vfs.ge_generative_types": ("decision,design_constraint,feedback", str, None, None, None,
+        "iter469: 触发 GE 的 chunk_type 列表（逗号分隔，这些类型代表主动生成的知识，默认 decision/design_constraint/feedback）"),
+    "store_vfs.ge_boost_factor": (1.10, float, 1.0, 1.50, None,
+        "iter469: GE stability 加成系数（generative chunk stability × ge_boost_factor，默认 1.10）"),
+    "store_vfs.ge_max_boost": (0.18, float, 0.0, 0.40, None,
+        "iter469: GE 最大加成上限（stability 最多增加 ge_max_boost 比例，默认 0.18）"),
+    "store_vfs.ge_min_importance": (0.25, float, 0.0, 1.0, None,
+        "iter469: 触发 GE 的最低 importance 阈值（默认 0.25）"),
+
+    # ── iter470: Interleaving Effect (ILE) — 混合上下文学习比分块学习产生更强记忆（Kornell & Bjork 2008）──
+    # 认知科学依据：Kornell & Bjork (2008) "Learning concepts and categories" —
+    #   交错练习（interleaved practice）vs. 分块练习（blocked practice）：测验成绩 64% vs. 36%（r=0.58）。
+    #   机制：交错迫使大脑持续辨别相似概念 → 更深的比较性处理 → 更精细的记忆表征。
+    # OS 类比：Linux NUMA interleaving (mm/mempolicy.c MPOL_INTERLEAVE) — 内存分配跨多个 NUMA 节点
+    #   → 无单点 bandwidth 瓶颈 → 整体吞吐量和容错性更高（访问多样性 = 更强鲁棒性）。
+    "store_vfs.ile_enabled": (True, bool, None, None, None,
+        "iter470: 是否启用 Interleaving Effect — session_type_history 多样性越高获得更大 stability 加成"),
+    "store_vfs.ile_min_diversity": (2, int, 1, 20, None,
+        "iter470: 触发 ILE 的最少不同 session_type 数量（默认 2，即至少在 2 种上下文中被访问过）"),
+    "store_vfs.ile_boost_per_type": (0.03, float, 0.0, 0.10, None,
+        "iter470: 每增加一种 session_type 的额外 stability 加成比例（默认 0.03 = 3%/type）"),
+    "store_vfs.ile_max_boost": (0.18, float, 0.0, 0.40, None,
+        "iter470: ILE 最大加成上限（stability 最多增加 ile_max_boost 比例，默认 0.18）"),
+    "store_vfs.ile_min_importance": (0.30, float, 0.0, 1.0, None,
+        "iter470: 触发 ILE 的最低 importance 阈值（默认 0.30）"),
+
+    # ── iter471: Self-Reference Effect (SRE) — 与自身相关的信息编码更深（Rogers, Kuiper & Kirker 1977）──
+    # 认知科学依据：Rogers, Kuiper & Kirker (1977) "Self-reference and the encoding of personal information" —
+    #   "Does it describe you?" 条件下记忆保留比语义判断（"Does it mean...?"）高 50-60%（r=0.61）。
+    #   机制：自我参照激活 medial prefrontal cortex（mPFC）→ 更强的 episodic memory consolidation。
+    # OS 类比：Linux process-private mappings (MAP_PRIVATE) — 进程私有页面（自己的 mm_struct 地址空间）
+    #   访问速度比共享匿名映射快（TLB 局部性更好），页故障处理优先（mm/fault.c: handle_mm_fault）。
+    "store_vfs.sre_enabled": (True, bool, None, None, None,
+        "iter471: 是否启用 Self-Reference Effect — 含第一人称代词的 chunk 获得 stability 加成"),
+    "store_vfs.sre_keywords": ("我,我们,我的,我们的,myself,ourselves,I ,we ,our ,my ", str, None, None, None,
+        "iter471: 触发 SRE 的第一人称关键词列表（逗号分隔，英中文混合，默认包含 I/we/our/my/我/我们）"),
+    "store_vfs.sre_boost_factor": (1.09, float, 1.0, 1.30, None,
+        "iter471: SRE stability 加成系数（含自我参照内容 stability × sre_boost_factor，默认 1.09）"),
+    "store_vfs.sre_max_boost": (0.15, float, 0.0, 0.35, None,
+        "iter471: SRE 最大加成上限（stability 最多增加 sre_max_boost 比例，默认 0.15）"),
+    "store_vfs.sre_min_importance": (0.30, float, 0.0, 1.0, None,
+        "iter471: 触发 SRE 的最低 importance 阈值（默认 0.30）"),
+
+    # ── iter472: Access Frequency Boost (AFB) — 高检索频率强化记忆痕迹（Power Law of Practice）──
+    # 认知科学依据：Newell & Rosenbloom (1981) "Mechanisms of skill acquisition and the law of practice" —
+    #   熟练度提升遵循幂律：performance ∝ trials^(-0.4)。对记忆：检索次数越多 → 记忆痕迹越强。
+    #   Anderson (1983) ACT* 理论：strength = ΣΑ_j × t_j^(-d)，检索次数 ↑ → strength ↑。
+    # OS 类比：Linux active LRU promotion (mm/swap.c: mark_page_accessed) —
+    #   多次访问（PG_referenced 置位 → 移入 active LRU）的页面获得更高驻留优先级；
+    #   访问计数越高（hot page）→ 越难被 kswapd 淘汰（page_referenced() > 0 → skip）。
+    "store_vfs.afb_enabled": (True, bool, None, None, None,
+        "iter472: 是否启用 Access Frequency Boost — 高访问频率的 chunk 获得 stability 加成"),
+    "store_vfs.afb_min_count": (3, int, 1, 100, None,
+        "iter472: 触发 AFB 的最少访问次数（access_count >= afb_min_count 时触发，默认 3）"),
+    "store_vfs.afb_scale": (0.015, float, 0.0, 0.10, None,
+        "iter472: 每次超出 min_count 的访问带来的额外 stability 加成比例（默认 0.015 = 1.5%/次）"),
+    "store_vfs.afb_max_boost": (0.20, float, 0.0, 0.40, None,
+        "iter472: AFB 最大加成上限（stability 最多增加 afb_max_boost 比例，默认 0.20）"),
+    "store_vfs.afb_min_importance": (0.25, float, 0.0, 1.0, None,
+        "iter472: 触发 AFB 的最低 importance 阈值（默认 0.25）"),
+
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
     #   检索某条记忆（practiced item）会主动抑制同类别中相关但未被检索的记忆（unpracticed items）。

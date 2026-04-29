@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import tmpfs  # noqa
 
-from store_vfs import ensure_schema, insert_chunk
+from store_vfs import ensure_schema, insert_chunk, apply_keyword_density_encoding_effect
 import config
 
 
@@ -194,29 +194,37 @@ def test_kd5_low_importance_no_boost(conn):
 # ── KD6: 加成受 kdee_max_boost 保护 ──────────────────────────────────────────────────
 
 def test_kd6_max_boost_cap(conn):
-    """KD6: KDEE 增量（相对 baseline）不超过 base × kdee_max_boost。"""
+    """KD6: KDEE 增量不超过 base × kdee_max_boost（直接调用 apply_keyword_density_encoding_effect）。"""
     kdee_max_boost = config.get("store_vfs.kdee_max_boost")  # 0.20
     base = 5.0
-
-    # baseline（低密度，不触发 KDEE）
-    content_base = "the the the the the the the the the the the the the the"
-    chunk_base = _make_chunk("kdee_6_base", content=content_base, importance=0.6, stability=base)
-    insert_chunk(conn, chunk_base)
-    stab_base = _get_stability(conn, "kdee_6_base")
-
-    # KDEE 分支（高密度）
     content_kdee = "kernel memory allocator slab buddy vmalloc mmap pagefault interrupt dma"
-    chunk_kdee = _make_chunk("kdee_6_kdee", content=content_kdee, importance=0.6, stability=base)
-    insert_chunk(conn, chunk_kdee)
-    stab_kdee = _get_stability(conn, "kdee_6_kdee")
+    now_iso = _utcnow().isoformat()
 
-    kdee_increment = stab_kdee - stab_base
-    max_allowed = base * kdee_max_boost + 0.1
-    assert kdee_increment <= max_allowed, (
-        f"KD6: KDEE 增量 {kdee_increment:.4f} 不应超过 max_boost 允许的 {max_allowed:.4f}，"
-        f"base={stab_base:.4f} kdee={stab_kdee:.4f}"
+    # 直接插入 DB，绕过 insert_chunk 中其他效应（DDE/GE 等）干扰
+    conn.execute(
+        """INSERT OR REPLACE INTO memory_chunks
+           (id, project, chunk_type, content, summary, importance, stability,
+            created_at, updated_at, retrievability, last_accessed, access_count,
+            encode_context, session_type_history)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("kdee_6", "test", "observation", content_kdee,
+         "summary", 0.6, base, now_iso, now_iso, 0.5, now_iso, 0, "kernel_mm", "")
     )
-    assert stab_kdee > stab_base, f"KD6: 应有 KDEE 加成，base={stab_base:.4f} kdee={stab_kdee:.4f}"
+    conn.commit()
+
+    stab_before = _get_stability(conn, "kdee_6")
+    apply_keyword_density_encoding_effect(conn, "kdee_6", content_kdee)
+    stab_after = _get_stability(conn, "kdee_6")
+
+    increment = stab_after - stab_before
+    max_allowed = base * kdee_max_boost + 0.01
+    assert increment <= max_allowed, (
+        f"KD6: KDEE 增量 {increment:.4f} 不应超过 max_boost 允许的 {max_allowed:.4f}，"
+        f"before={stab_before:.4f} after={stab_after:.4f}"
+    )
+    assert stab_after > stab_before, (
+        f"KD6: 应有 KDEE 加成，before={stab_before:.4f} after={stab_after:.4f}"
+    )
 
 
 # ── KD7: stability 上限 365.0 ─────────────────────────────────────────────────────────

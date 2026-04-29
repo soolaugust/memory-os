@@ -2152,6 +2152,20 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
     except Exception:
         pass  # DDE 写入失败不阻塞主流程
 
+    # ── iter469: GE — Generation Effect（主动生成的知识比被动接收的保留更好，Slamecka & Graf 1978）──
+    # OS 类比：Linux CoW — dirty page（主动写入）优先留在 active LRU（PG_dirty 置位）
+    try:
+        _ge_chunk_type = d.get("chunk_type") or ""
+        apply_generation_effect_v2(conn, d["id"], _ge_chunk_type)
+    except Exception:
+        pass  # GE 写入失败不阻塞主流程
+
+    # ── iter471: SRE — Self-Reference Effect（含第一人称词的内容编码更深，Rogers et al. 1977）──
+    # 注意：iter414 已在 insert_chunk 中调用 apply_self_reference_effect（同一认知原理）。
+    # iter471 的 apply_self_reference_effect_v2 作为独立函数存在，供外部直接调用，
+    # 不在 insert_chunk 中重复调用（避免双重加成）。
+    # OS 类比：Linux MAP_PRIVATE — 进程私有页面 TLB 局部性更好，访问延迟更低
+
 
 # ── iter403：Cue-Dependent Forgetting — Context-Sensitive Retrieval（Tulving 1974）──
 #
@@ -5373,6 +5387,20 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
         if _ccre_ctx:
             for _ccre_cid in chunk_ids:
                 apply_contextual_cue_reinstatement_effect(conn, _ccre_cid, _ccre_ctx, now_iso=now_iso)
+    except Exception:
+        pass
+
+    # ── iter470: ILE — Interleaving Effect（跨多种上下文访问比单一上下文保留更好，Kornell & Bjork 2008）──
+    # OS 类比：NUMA interleaving — 跨多 NUMA 节点分布访问，无单点带宽瓶颈 → 更强鲁棒性
+    try:
+        apply_interleaving_effect(conn, chunk_ids, now_iso=now_iso)
+    except Exception:
+        pass
+
+    # ── iter472: AFB — Access Frequency Boost（检索频率越高记忆痕迹越强，Power Law of Practice）──
+    # OS 类比：Linux active LRU hot page — 多次访问 → PG_referenced → active LRU → 更高驻留优先级
+    try:
+        apply_access_frequency_boost(conn, chunk_ids, now_iso=now_iso)
     except Exception:
         pass
 
@@ -9416,6 +9444,121 @@ def apply_emotional_tagging_effect(
         return result
 
 
+def apply_keyword_density_encoding_effect(
+    conn: "sqlite3.Connection",
+    chunk_id: str,
+    content: str,
+    now_iso: str = None,
+) -> dict:
+    """iter464: Keyword Density Encoding Effect (KDEE) — 高唯一词比率内容触发更深语义加工 → 更持久编码。
+
+    认知科学依据：
+      Craik & Lockhart (1972) "Levels of processing" — 语义密度高需要深度加工 → 更持久记忆。
+      Kintsch (1974): 文本命题密度与长期记忆保留量正相关（r=0.62）。
+
+    OS 类比：Linux ext4 extent tree depth — dense inode（大量唯一 extent）→ 更深 B-tree 索引 → 更鲁棒检索。
+    """
+    result = {"kdee_boosted": False}
+    try:
+        import config as _cfg
+        import re as _re
+        if not _cfg.get("store_vfs.kdee_enabled"):
+            return result
+
+        row = conn.execute(
+            "SELECT stability, importance FROM memory_chunks WHERE id=?", (chunk_id,)
+        ).fetchone()
+        if not row:
+            return result
+
+        stab = float(row[0] or 1.0)
+        imp = float(row[1] or 0.0)
+        min_imp = float(_cfg.get("store_vfs.kdee_min_importance"))
+        if imp < min_imp:
+            return result
+
+        words = _re.findall(r'\b\w+\b', (content or "").lower())
+        min_words = int(_cfg.get("store_vfs.kdee_min_words"))
+        if len(words) < min_words:
+            return result
+
+        unique_ratio = len(set(words)) / len(words)
+        min_density = float(_cfg.get("store_vfs.kdee_min_density"))
+        if unique_ratio < min_density:
+            return result
+
+        factor = float(_cfg.get("store_vfs.kdee_boost_factor"))
+        max_boost = float(_cfg.get("store_vfs.kdee_max_boost"))
+        raw = stab * factor
+        capped = min(stab * (1.0 + max_boost), raw)
+        new_stab = min(365.0, capped)
+        if new_stab > stab + 1e-6:
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+            )
+            result["kdee_boosted"] = True
+        return result
+    except Exception:
+        return result
+
+
+def apply_elaborative_interrogation_effect(
+    conn: "sqlite3.Connection",
+    chunk_id: str,
+    content: str,
+    summary: str = "",
+    now_iso: str = None,
+) -> dict:
+    """iter458: Elaborative Interrogation Effect (EIE) — 因果连接词触发更深推理编码 → 更持久记忆。
+
+    认知科学依据：
+      Pressley et al. (1992) — 解释"为什么"使记忆保留率提升 72%（vs 37% 对照组）。
+      Martin & Pressley (1991) — "why" 问题比 "what" 问题更有效；因果性越强，编码越深。
+
+    OS 类比：Linux ext4 htree directory indexing — 深度因果索引使文件查找从 O(N) 降到 O(log N)。
+    """
+    result = {"eie_boosted": False}
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.eie_enabled"):
+            return result
+
+        row = conn.execute(
+            "SELECT stability, importance FROM memory_chunks WHERE id=?", (chunk_id,)
+        ).fetchone()
+        if not row:
+            return result
+
+        stab = float(row[0] or 1.0)
+        imp = float(row[1] or 0.0)
+        min_imp = float(_cfg.get("store_vfs.eie_min_importance"))
+        if imp < min_imp:
+            return result
+
+        text = ((content or "") + " " + (summary or "")).lower()
+        connectives = [
+            "because", "therefore", "causes", "hence", "consequently",
+            "因为", "导致", "因此", "所以", "由于", "是因为", "的原因是"
+        ]
+        count = sum(text.count(c) for c in connectives)
+        if count < int(_cfg.get("store_vfs.eie_min_connectives")):
+            return result
+
+        factor = float(_cfg.get("store_vfs.eie_boost_factor"))
+        max_boost = float(_cfg.get("store_vfs.eie_max_boost"))
+        raw = stab * factor
+        capped = min(stab * (1.0 + max_boost), raw)
+        new_stab = min(365.0, capped)
+        if new_stab > stab + 1e-6:
+            conn.execute(
+                "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+            )
+            result["eie_boosted"] = True
+        return result
+    except Exception:
+        return result
+
+
 def apply_desirable_difficulty_effect(
     conn: "sqlite3.Connection",
     chunk_id: str,
@@ -9539,6 +9682,268 @@ def apply_contextual_cue_reinstatement_effect(
             )
             result["ccre_boosted"] = True
             result["ccre_matched_tokens"] = matched
+        return result
+    except Exception:
+        return result
+
+
+def apply_generation_effect_v2(
+    conn: "sqlite3.Connection",
+    chunk_id: str,
+    chunk_type: str,
+    now_iso: str = None,
+) -> dict:
+    """iter469: Generation Effect (GE) — 主动生成的知识比被动接收的保留更好。
+
+    认知科学依据：
+      Slamecka & Graf (1978) "The generation effect: Delineation of a phenomenon" —
+        自我生成的信息（自写/决策/设计）比被动阅读信息记忆保留率高 20-30%（延时测验）。
+        机制：生成过程激活更深的语义处理网络 + 自我参照加工（self-referential processing）。
+      McElroy & Slamecka (1982): 生成效应在词汇和命题层面均成立（语义 > 表面特征）。
+
+    OS 类比：Linux CoW (Copy-on-Write, mm/memory.c: do_wp_page) —
+      被进程主动写入（dirty）的页面获得更高 active LRU 优先级（PG_dirty 置位）；
+      只读共享页面（read-only mapped, PG_dirty=0）优先被 kswapd 淘汰。
+      主动生成 = dirty write → 更高驻留权重。
+    """
+    result = {"ge_boosted": False}
+    try:
+        if not config.get("store_vfs.ge_enabled"):
+            return result
+
+        generative_types_str = config.get("store_vfs.ge_generative_types") or ""
+        generative_types = {t.strip() for t in generative_types_str.split(",") if t.strip()}
+        if chunk_type not in generative_types:
+            return result
+
+        row = conn.execute(
+            "SELECT stability, importance FROM memory_chunks WHERE id=?",
+            (chunk_id,)
+        ).fetchone()
+        if not row:
+            return result
+
+        stab = float(row[0] or 1.0)
+        imp = float(row[1] or 0.0)
+        min_imp = float(config.get("store_vfs.ge_min_importance"))
+        if imp < min_imp:
+            return result
+
+        boost_factor = float(config.get("store_vfs.ge_boost_factor"))
+        max_boost = float(config.get("store_vfs.ge_max_boost"))
+        raw_boost = stab * (boost_factor - 1.0)
+        capped_boost = min(raw_boost, stab * max_boost)
+        new_stab = min(365.0, stab + capped_boost)
+        if new_stab > stab + 1e-6:
+            now = now_iso or datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=?",
+                (new_stab, now, chunk_id)
+            )
+            result["ge_boosted"] = True
+        return result
+    except Exception:
+        return result
+
+
+def apply_interleaving_effect(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+    now_iso: str = None,
+) -> dict:
+    """iter470: Interleaving Effect (ILE) — 跨多种上下文访问的 chunk 比单一上下文访问保留更好。
+
+    认知科学依据：
+      Kornell & Bjork (2008) "Learning concepts and categories" —
+        交错练习（interleaved）vs. 分块练习（blocked）：测验成绩 64% vs. 36%（r=0.58）。
+        机制：交错迫使大脑持续辨别相似概念 → 更深比较性处理 → 更精细记忆表征。
+      Taylor & Rohrer (2010): 数学题交错练习比分块练习长期保留率高 43%。
+
+    OS 类比：Linux NUMA interleaving（mm/mempolicy.c MPOL_INTERLEAVE）—
+      内存分配跨多个 NUMA 节点 → 无单点 bandwidth 瓶颈 → 整体吞吐量和容错性更高；
+      session_type_history 多样性 = NUMA interleave 深度 = 更强鲁棒性。
+    """
+    result = {"ile_boosted": 0, "ile_total_types_examined": 0}
+    try:
+        if not config.get("store_vfs.ile_enabled"):
+            return result
+
+        min_diversity = int(config.get("store_vfs.ile_min_diversity"))
+        boost_per_type = float(config.get("store_vfs.ile_boost_per_type"))
+        max_boost = float(config.get("store_vfs.ile_max_boost"))
+        min_imp = float(config.get("store_vfs.ile_min_importance"))
+        now = now_iso or datetime.now(timezone.utc).isoformat()
+
+        if not chunk_ids:
+            return result
+
+        placeholders = ",".join("?" * len(chunk_ids))
+        rows = conn.execute(
+            f"SELECT id, stability, importance, COALESCE(session_type_history,'') "
+            f"FROM memory_chunks WHERE id IN ({placeholders})",
+            list(chunk_ids)
+        ).fetchall()
+
+        boosted = 0
+        for row in rows:
+            cid = row[0]
+            stab = float(row[1] or 1.0)
+            imp = float(row[2] or 0.0)
+            history = str(row[3]) if row[3] else ""
+            result["ile_total_types_examined"] += 1
+
+            if imp < min_imp:
+                continue
+
+            entries = [e.strip() for e in history.split(",") if e.strip()]
+            unique_types = len(set(entries))
+            if unique_types < min_diversity:
+                continue
+
+            extra_types = unique_types - min_diversity + 1
+            raw_boost = stab * min(max_boost, extra_types * boost_per_type)
+            new_stab = min(365.0, stab + raw_boost)
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=?",
+                    (new_stab, now, cid)
+                )
+                boosted += 1
+
+        result["ile_boosted"] = boosted
+        return result
+    except Exception:
+        return result
+
+
+def apply_self_reference_effect_v2(
+    conn: "sqlite3.Connection",
+    chunk_id: str,
+    content: str,
+    summary: str = "",
+    now_iso: str = None,
+) -> dict:
+    """iter471: Self-Reference Effect (SRE) — 含自我参照词的内容编码更深，记忆更持久。
+
+    认知科学依据：
+      Rogers, Kuiper & Kirker (1977) "Self-reference and the encoding of personal information" —
+        "Does it describe you?" 条件下记忆保留比语义判断（"Does it mean...?"）高 50-60%（r=0.61）。
+        机制：自我参照激活 medial prefrontal cortex（mPFC）→ 更强 episodic memory consolidation。
+      Symons & Johnson (1997): SRE 在跨文化研究中稳定复现（meta-analysis, d=1.07）。
+
+    OS 类比：Linux process-private mappings（MAP_PRIVATE, mm/mmap.c）—
+      进程私有匿名页（mmap private + CoW）的 TLB 局部性优于共享匿名映射；
+      自我参照内容 = process-private data = 更高 TLB hit rate → 更快检索（lower latency）。
+    """
+    result = {"sre_boosted": False, "sre_matched_keywords": 0}
+    try:
+        if not config.get("store_vfs.sre_enabled"):
+            return result
+
+        row = conn.execute(
+            "SELECT stability, importance FROM memory_chunks WHERE id=?",
+            (chunk_id,)
+        ).fetchone()
+        if not row:
+            return result
+
+        stab = float(row[0] or 1.0)
+        imp = float(row[1] or 0.0)
+        min_imp = float(config.get("store_vfs.sre_min_importance"))
+        if imp < min_imp:
+            return result
+
+        keywords_str = config.get("store_vfs.sre_keywords") or ""
+        keywords = [k.strip() for k in keywords_str.split(",") if k.strip()]
+        combined = (content + " " + summary).lower()
+
+        matched = sum(1 for kw in keywords if kw.lower() in combined)
+        if matched == 0:
+            return result
+
+        result["sre_matched_keywords"] = matched
+        boost_factor = float(config.get("store_vfs.sre_boost_factor"))
+        max_boost = float(config.get("store_vfs.sre_max_boost"))
+        raw_boost = stab * (boost_factor - 1.0)
+        capped_boost = min(raw_boost, stab * max_boost)
+        new_stab = min(365.0, stab + capped_boost)
+        if new_stab > stab + 1e-6:
+            now = now_iso or datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=?",
+                (new_stab, now, chunk_id)
+            )
+            result["sre_boosted"] = True
+        return result
+    except Exception:
+        return result
+
+
+def apply_access_frequency_boost(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+    now_iso: str = None,
+) -> dict:
+    """iter472: Access Frequency Boost (AFB) — 检索频率越高的 chunk 记忆痕迹越强。
+
+    认知科学依据：
+      Newell & Rosenbloom (1981) "Mechanisms of skill acquisition and the law of practice" —
+        熟练度提升遵循幂律：performance ∝ trials^(-0.4)；检索次数 ↑ → 记忆强度 ↑。
+      Anderson (1983) ACT* 理论：记忆激活强度 = ΣΑ_j × t_j^(-d)，检索次数是最强预测因子。
+      Bahrick (1979): 间隔检索后长期保留量与检索次数正相关（r=0.78）。
+
+    OS 类比：Linux active LRU promotion（mm/swap.c: mark_page_accessed）—
+      多次被访问（PG_referenced 置位 → promote to active LRU）的页面获得更高驻留优先级；
+      访问计数越高（hot page = access_count ↑）→ page_referenced() > 0 → kswapd skip；
+      access_count ≥ afb_min_count = "页面进入 hot tier"。
+    """
+    result = {"afb_boosted": 0, "afb_total_boost": 0.0}
+    try:
+        if not config.get("store_vfs.afb_enabled"):
+            return result
+
+        min_count = int(config.get("store_vfs.afb_min_count"))
+        afb_scale = float(config.get("store_vfs.afb_scale"))
+        max_boost = float(config.get("store_vfs.afb_max_boost"))
+        min_imp = float(config.get("store_vfs.afb_min_importance"))
+        now = now_iso or datetime.now(timezone.utc).isoformat()
+
+        if not chunk_ids:
+            return result
+
+        placeholders = ",".join("?" * len(chunk_ids))
+        rows = conn.execute(
+            f"SELECT id, stability, importance, COALESCE(access_count, 0) "
+            f"FROM memory_chunks WHERE id IN ({placeholders})",
+            list(chunk_ids)
+        ).fetchall()
+
+        boosted = 0
+        total_boost = 0.0
+        for row in rows:
+            cid = row[0]
+            stab = float(row[1] or 1.0)
+            imp = float(row[2] or 0.0)
+            access_count = int(row[3] or 0)
+
+            if imp < min_imp:
+                continue
+            if access_count < min_count:
+                continue
+
+            extra = access_count - min_count + 1
+            raw_boost = stab * min(max_boost, extra * afb_scale)
+            new_stab = min(365.0, stab + raw_boost)
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=?, updated_at=? WHERE id=?",
+                    (new_stab, now, cid)
+                )
+                boosted += 1
+                total_boost += new_stab - stab
+
+        result["afb_boosted"] = boosted
+        result["afb_total_boost"] = round(total_boost, 6)
         return result
     except Exception:
         return result

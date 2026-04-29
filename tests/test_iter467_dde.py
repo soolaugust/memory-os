@@ -196,27 +196,35 @@ def test_dd5_too_few_words_no_boost(conn):
 # ── DD6: 加成受 dde_max_boost 保护 ────────────────────────────────────────────────────────
 
 def test_dd6_max_boost_cap(conn):
-    """DD6: DDE 增量（相对 baseline）不超过 base × dde_max_boost(0.16)。"""
+    """DD6: DDE 增量不超过 base × dde_max_boost(0.16)（直接调用 apply_desirable_difficulty_effect）。"""
     dde_max_boost = config.get("store_vfs.dde_max_boost")  # 0.16
     base = 5.0
-
-    content_base = "the the the the the the the the the the the"
-    chunk_base = _make_chunk("dde_6_base", content=content_base, importance=0.6, stability=base)
-    insert_chunk(conn, chunk_base)
-    stab_base = _get_stability(conn, "dde_6_base")
-
     content_dde = "synchronization parallelization implementation optimization architecture"
-    chunk_dde = _make_chunk("dde_6_dde", content=content_dde, importance=0.6, stability=base)
-    insert_chunk(conn, chunk_dde)
-    stab_dde = _get_stability(conn, "dde_6_dde")
+    now_iso = _utcnow().isoformat()
 
-    dde_increment = stab_dde - stab_base
-    max_allowed = base * dde_max_boost + 0.1
-    assert dde_increment <= max_allowed, (
-        f"DD6: DDE 增量 {dde_increment:.4f} 不应超过 max_boost 允许的 {max_allowed:.4f}，"
-        f"base={stab_base:.4f} dde={stab_dde:.4f}"
+    # 直接插入 DB，绕过 insert_chunk 中其他效应（KDEE/GE 等）干扰
+    conn.execute(
+        """INSERT OR REPLACE INTO memory_chunks
+           (id, project, chunk_type, content, summary, importance, stability,
+            created_at, updated_at, retrievability, last_accessed, access_count,
+            encode_context, session_type_history)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("dde_6", "test", "observation", content_dde,
+         "summary", 0.6, base, now_iso, now_iso, 0.5, now_iso, 0, "kernel_mm", "")
     )
-    assert stab_dde > stab_base, f"DD6: 应有 DDE 加成，base={stab_base:.4f} dde={stab_dde:.4f}"
+    conn.commit()
+
+    stab_before = _get_stability(conn, "dde_6")
+    apply_desirable_difficulty_effect(conn, "dde_6", content_dde)
+    stab_after = _get_stability(conn, "dde_6")
+
+    increment = stab_after - stab_before
+    max_allowed = base * dde_max_boost + 0.01
+    assert increment <= max_allowed, (
+        f"DD6: DDE 增量 {increment:.4f} 不应超过 max_boost 允许的 {max_allowed:.4f}，"
+        f"before={stab_before:.4f} after={stab_after:.4f}"
+    )
+    assert stab_after > stab_before, f"DD6: 应有 DDE 加成，before={stab_before:.4f} after={stab_after:.4f}"
 
 
 # ── DD7: stability 上限 365.0 ─────────────────────────────────────────────────────────────
