@@ -56,6 +56,8 @@ def _insert_chunk(conn, cid, project="test", stability=5.0, importance=0.6,
                   chunk_type="decision", retrievability=0.5, access_count=2):
     """Insert a chunk with controlled state for RPCA testing."""
     now_iso = _utcnow().isoformat()
+    import datetime as _dt
+    la_iso = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=10)).isoformat()
     conn.execute(
         """INSERT OR REPLACE INTO memory_chunks
            (id, project, chunk_type, content, summary, importance, stability,
@@ -64,7 +66,7 @@ def _insert_chunk(conn, cid, project="test", stability=5.0, importance=0.6,
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (cid, project, chunk_type, f"content {cid}", f"summary {cid}",
          importance, stability, now_iso, now_iso, retrievability,
-         now_iso, access_count, "kernel_mm")
+         la_iso, access_count, "kernel_mm")
     )
     conn.commit()
 

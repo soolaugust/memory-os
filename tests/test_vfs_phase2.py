@@ -159,23 +159,57 @@ class TestSQLiteBackend:
     """测试 SQLite 后端"""
 
     def test_search_returns_results(self):
-        """测试搜索返回结果"""
+        """测试搜索返回结果 — 使用 tmpfs 隔离 DB，不依赖生产数据"""
         import sqlite3 as _sq
-        db_path = Path.home() / ".claude" / "memory-os" / "store.db"
-        if not db_path.exists():
-            pytest.skip("Store DB not found")
-        # 校验 SQLite 文件头（magic: "SQLite format 3\000"）
-        try:
-            with open(db_path, "rb") as _f:
-                if _f.read(16)[:6] != b"SQLite":
-                    pytest.skip("Store DB is not a valid SQLite file")
-        except OSError:
-            pytest.skip("Store DB not readable")
+        import os as _os
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent.parent))
 
-        backend = SQLiteBackend(db_path=db_path, readonly=True)
+        # 创建独立的 tmpdir，不依赖任何环境变量（防止前置 test 污染）
+        tmpdir = Path(tempfile.mkdtemp(prefix="test_vfs_search_"))
+        db_path = tmpdir / "store.db"
+        _os.environ["MEMORY_OS_DIR"] = str(tmpdir)
+        _os.environ["MEMORY_OS_DB"] = str(db_path)
+
+        # 直接用 sqlite3 初始化 DB（绕过模块缓存，避免 open_db() 用旧路径）
+        import sqlite3 as _sq3
+        from datetime import datetime, timezone
+        conn = _sq3.connect(str(db_path))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("""CREATE TABLE IF NOT EXISTS memory_chunks (
+            id TEXT PRIMARY KEY, chunk_type TEXT, summary TEXT, content TEXT,
+            project TEXT, importance REAL, retrievability REAL, access_count INTEGER,
+            source_session TEXT, tags TEXT, lru_gen INTEGER DEFAULT 0,
+            oom_adj INTEGER DEFAULT 0, created_at TEXT, updated_at TEXT, last_accessed TEXT
+        )""")
+        conn.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS memory_chunks_fts
+            USING fts5(rowid_ref UNINDEXED, summary, content)""")
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute("""INSERT OR IGNORE INTO memory_chunks
+            (id, chunk_type, summary, content, project, importance, retrievability,
+             access_count, source_session, created_at, updated_at, last_accessed)
+            VALUES ('test-bm25-001','decision',
+              'BM25 retrieval engine selection',
+              'BM25 is an efficient full-text ranking algorithm for sparse retrieval',
+              'test', 0.85, 0.7, 3, 'sess-test', ?, ?, ?)""", (now, now, now))
+        conn.execute("""INSERT OR IGNORE INTO memory_chunks
+            (id, chunk_type, summary, content, project, importance, retrievability,
+             access_count, source_session, created_at, updated_at, last_accessed)
+            VALUES ('test-bm25-002','reasoning_chain',
+              'BM25 vs vector retrieval tradeoffs',
+              'BM25 matches keywords exactly; vector search captures semantic similarity',
+              'test', 0.75, 0.6, 2, 'sess-test', ?, ?, ?)""", (now, now, now))
+        # 插入 FTS 数据（rowid_ref 关联 memory_chunks.rowid）
+        conn.execute("""INSERT OR IGNORE INTO memory_chunks_fts (rowid_ref, summary, content)
+            SELECT rowid, summary, content FROM memory_chunks
+            WHERE id IN ('test-bm25-001', 'test-bm25-002')""")
+        conn.commit()
+        conn.close()
+
+        backend = SQLiteBackend(db_path=db_path, readonly=False)
         results = backend.search("BM25", top_k=5)
 
-        assert len(results) > 0
+        assert len(results) > 0, f"Expected results for 'BM25', got 0 (db={db_path})"
         assert all(isinstance(item, VFSItem) for item in results)
         # Results should be sorted by score (descending)
         for i in range(len(results) - 1):

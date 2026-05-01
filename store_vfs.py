@@ -1580,6 +1580,13 @@ def fts_search(conn: sqlite3.Connection, query: str, project: str,
         # 但未被物理删除 → 仍在 FTS5 索引中 → FTS5 命中 ghost 消耗 result slot + 计算开销。
         # AND mc.importance > 0.0 是低成本的 B-tree 过滤（importance 列已索引），
         # 无需单独的 ghost_filter_enabled sysctl 开关（始终启用，无负面影响）。
+        # B17: scope filter — session-scoped chunk_type 不出现在跨项目查询中
+        # 认知模型：工作记忆（task_state/prompt_context）具有情境特异性，
+        #   不应污染跨 session/project 的语义记忆检索结果。
+        # OS 类比：Linux process-private mmap 不可通过 /proc/pid/mem 跨进程读取；
+        #   session-scoped chunk = PROT_NONE mmap region，项目外不可见。
+        _SESSION_SCOPED_TYPES = ("task_state", "prompt_context", "session_summary")
+
         params = [match_expr]
         if project_filter is not None:
             if isinstance(project_filter, (list, tuple)):
@@ -1587,6 +1594,11 @@ def fts_search(conn: sqlite3.Connection, query: str, project: str,
                 placeholders = ",".join("?" * len(project_filter))
                 sql += f" AND mc.project IN ({placeholders})"
                 params.extend(project_filter)
+                # B17: 若查询跨越多个 project（含 global），排除 session-scoped types
+                if len(project_filter) > 1:
+                    scope_ph = ",".join("?" * len(_SESSION_SCOPED_TYPES))
+                    sql += f" AND mc.chunk_type NOT IN ({scope_ph})"
+                    params.extend(_SESSION_SCOPED_TYPES)
             else:
                 sql += " AND mc.project = ?"
                 params.append(project_filter)
@@ -1729,20 +1741,36 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
         enc_ctx_str = json.dumps(enc_ctx, ensure_ascii=False)
     else:
         enc_ctx_str = enc_ctx if isinstance(enc_ctx, str) else "{}"
+    # iter479: stability warm-start — importance >= 0.5 的新 chunk 赋予更高初始稳定性。
+    # 心理学：von Restorff effect (1933) — 在编码时被认为重要的信息，初始记忆强度更高；
+    #   高置信度（高 importance）的知识进入记忆时，初始稳定性应更高而非从零开始。
+    # OS 类比：Linux MGLRU — 新分配的大页（THP）直接进入 gen=1 而非 gen=0，
+    #   避免立即被 kswapd 扫描降代（给予初始"信用期"）。
+    # 规则：调用者未显式设置 stability（默认 1.0）且 importance >= 0.5 时，
+    #   提升到 2.0（不覆盖调用者显式传入的 stability 值）。
+    _stability_explicit = "stability" in d and d["stability"] != 1.0
+    _stability_val = d.get("stability", 1.0)
+    if not _stability_explicit and float(d.get("importance", 0.5)) >= 0.5:
+        _stability_val = 2.0
+
+    # iter481: 记录调用者是否显式传入 confidence_score，用于后续 warm-start 保护
+    _conf_explicit_val = d.get("confidence_score")  # None 表示未显式设置
+    _conf_insert = _conf_explicit_val if _conf_explicit_val is not None else 0.7
+
     conn.execute("""
         INSERT OR REPLACE INTO memory_chunks
         (id, created_at, updated_at, project, source_session,
          chunk_type, info_class, content, summary, tags, importance,
          retrievability, last_accessed, feishu_url, access_count, oom_adj, lru_gen,
-         stability, raw_snippet, encoding_context)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         stability, raw_snippet, encoding_context, confidence_score)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         d["id"], d["created_at"], d["updated_at"], d["project"], d["source_session"],
         d["chunk_type"], d.get("info_class", "world"),
         d["content"], d["summary"], tags,
         d["importance"], d["retrievability"], d["last_accessed"], d.get("feishu_url"),
         d.get("access_count", 0), d.get("oom_adj", 0), d.get("lru_gen", 0),
-        d.get("stability", 1.0), raw_snippet, enc_ctx_str,
+        _stability_val, raw_snippet, enc_ctx_str, _conf_insert,
     ))
     # 迭代97：写入 FTS5（CJK 预处理）
     # iter142：使用 new_rowid 重新清理 FTS（防止 INSERT OR REPLACE 保留 rowid 时残留旧条目）
@@ -1776,12 +1804,18 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
         project = d.get("project", "")
         summary_lower = (d.get("summary") or "").lower()
         if summary_lower and project:
+            # iter487: 短路优化 — 先检查 entity_edges 是否存在，空项目直接跳过。
+            # OS 类比：Linux readdir early exit — inode 目录为空时不做任何 dentry lookup；
+            #   避免每次 insert_chunk 都对空 entity_edges 做全表扫描（热路径 I/O 优化）。
+            _has_edges = conn.execute(
+                "SELECT 1 FROM entity_edges WHERE project=? LIMIT 1", (project,)
+            ).fetchone()
             # 取该 project 的所有已知 entity（from_entity 和 to_entity）
             entity_rows = conn.execute(
                 "SELECT DISTINCT from_entity FROM entity_edges WHERE project=? "
                 "UNION SELECT DISTINCT to_entity FROM entity_edges WHERE project=?",
                 (project, project)
-            ).fetchall()
+            ).fetchall() if _has_edges else []
             now_str = datetime.now(timezone.utc).isoformat()
             for (ent,) in entity_rows:
                 if not ent:
@@ -1815,7 +1849,8 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
     try:
         _dop_chunk_id = d["id"]
         _dop_content = (d.get("content") or "") + " " + (d.get("summary") or "")
-        _dop_base_stability = d.get("stability", 1.0)
+        # iter479: warm-start が stability を上書きした場合、_stability_val を使う
+        _dop_base_stability = _stability_val
         _dop_new_stability = apply_depth_of_processing(
             conn, _dop_chunk_id, _dop_content, _dop_base_stability
         )
@@ -1876,7 +1911,12 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
         _ge_content = d.get("content") or ""
         _ge_summary = d.get("summary") or ""
         _ge_source_type = d.get("source_type")
-        _ge_base_stability = d.get("stability", 1.0)
+        # iter479: 从 DB 读取当前 stability 作为 base（包含 DOP/schema 的更新）
+        # 避免用 d.get("stability", 1.0) 覆盖 warm-start + DOP 的加成结果
+        _ge_row = conn.execute(
+            "SELECT stability FROM memory_chunks WHERE id=?", (d["id"],)
+        ).fetchone()
+        _ge_base_stability = float(_ge_row[0]) if _ge_row and _ge_row[0] else _dop_new_stability
         apply_generation_effect(
             conn, d["id"], _ge_content, _ge_summary,
             source_type=_ge_source_type,
@@ -2209,6 +2249,74 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
     except Exception:
         pass
 
+    # iter479: stability warm-start 最终应用 — 在所有后处理效应（iter401-MIE）完成后执行。
+    # 策略：读取 DB 当前 stability（包含 DOP/schema/gen-effect/von-restorff 等所有加成），
+    # 若触发 warm-start 条件，则将 stability × (warm_base / default_base) = × 2.0。
+    # 这保证 warm-start 是一个乘法因子，叠加在所有其他效应之上，而不是被后处理覆盖。
+    # OS 类比：Linux MGLRU 新大页进入 gen=1 — 在 page table walk 完成后（即所有编码效应完成后）
+    # 再提升 generation，避免在提升前被 kswapd 误降代。
+    # 条件：和上面相同——调用者未显式设置 stability（_stability_explicit=False）
+    #       且 importance >= 0.5（_stability_val 被设为 2.0）
+    if not _stability_explicit and float(d.get("importance", 0.5)) >= 0.5:
+        try:
+            _ws_row = conn.execute(
+                "SELECT stability FROM memory_chunks WHERE id=?", (d["id"],)
+            ).fetchone()
+            if _ws_row and _ws_row[0] is not None:
+                _ws_current = float(_ws_row[0])
+                # 乘以 warm-start 比率（2.0 / 1.0 = 2.0）
+                _ws_new = _ws_current * 2.0
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?",
+                    (round(_ws_new, 4), d["id"])
+                )
+        except Exception:
+            pass  # warm-start 写入失败不阻塞主流程
+
+    # iter481: confidence warm-start — source_reliability 驱动初始 confidence_score。
+    # 心理学：Source Monitoring Framework (Johnson 1993) — 来源可靠性影响记忆的初始编码质量；
+    #   高可信来源写入的知识在编码时自动获得更高信任度（source credibility effect）。
+    # OS 类比：Linux ECC memory 的初始 ECC status — 高质量 RAM（低错误率）初始 ECC=clean；
+    #   低质量 RAM（高错误率历史）初始 ECC=unknown。
+    # 规则（仅对新 chunk，即 existing_rowid=None 时）：
+    #   source_reliability >= 0.80 → initial confidence = 0.85（高可信来源）
+    #   source_reliability < 0.40  → initial confidence = 0.50（低可信来源，标注 ⚠️）
+    #   其余 → 保持默认 0.70（中性）
+    # 注意：仅在 chunk 未显式设置 confidence_score 时应用（尊重调用者的显式设置）
+    if _conf_explicit_val is None:
+        try:
+            _sr_row = conn.execute(
+                "SELECT source_reliability FROM memory_chunks WHERE id=?", (d["id"],)
+            ).fetchone()
+            if _sr_row and _sr_row[0] is not None:
+                _sr_val = float(_sr_row[0])
+                if _sr_val >= 0.80:
+                    _ws_conf = 0.85
+                elif _sr_val < 0.40:
+                    _ws_conf = 0.50
+                else:
+                    _ws_conf = 0.70  # 中性默认值，仍写入以保证确定性
+
+                # iter489: info_class-aware confidence warm-start 微调
+                # 心理学：Tulving (1972) episodic vs semantic memory distinction —
+                #   情节记忆（episodic）有明确的时空上下文，可信度通常高于语义记忆；
+                #   ephemeral（临时记录）信息可信度较低，不确定性大。
+                # OS 类比：Linux page frame reliability —
+                #   direct-mapped cache（episodic）比 write-back（semantic）有更确定的来源；
+                #   tmpfs 页（ephemeral）被视为非关键数据，可信度评分低。
+                _ic = d.get("info_class", "world")
+                if _ic == "episodic" and _ws_conf == 0.70:
+                    _ws_conf = min(1.0, _ws_conf + 0.05)  # 情节记忆中等来源 → +0.05
+                elif _ic == "ephemeral":
+                    _ws_conf = max(0.10, _ws_conf - 0.10)  # 临时记录 → -0.10
+
+                conn.execute(
+                    "UPDATE memory_chunks SET confidence_score=? WHERE id=?",
+                    (round(_ws_conf, 3), d["id"])
+                )
+        except Exception:
+            pass  # confidence warm-start 写入失败不阻塞主流程
+
 
 # ── iter403：Cue-Dependent Forgetting — Context-Sensitive Retrieval（Tulving 1974）──
 #
@@ -2427,6 +2535,15 @@ _PRIME_MAX_BOOST: float = 0.30           # 最大启动加成
 _PRIME_MIN_STRENGTH: float = 0.05        # 低于此强度视为已失效
 
 
+# B12: priming_state ring-buffer — 防止 session 内无限增长
+# OS 类比：Linux printk ring buffer __log_buf — 写入时自动截断最旧记录，
+#   避免长时间运行 session 的 priming_state 无限膨胀。
+# 实现：全局写入计数器，每 _PRIME_RING_CHECK_INTERVAL 次写入触发一次截断
+_PRIME_RING_MAX = 600          # priming_state per-project 最大条目数
+_PRIME_RING_CHECK_INTERVAL = 30  # 每 30 次写入检查一次（避免每次 COUNT 查询）
+_prime_write_counter: dict = {}  # {project: write_count}
+
+
 def prime_entities(
     conn: sqlite3.Connection,
     entity_names: list,
@@ -2485,6 +2602,28 @@ def prime_entities(
             count += 1
     except Exception:
         pass
+
+    # B12: ring-buffer 截断（每 _PRIME_RING_CHECK_INTERVAL 次写入检查一次）
+    if count > 0 and project:
+        try:
+            _prime_write_counter[project] = _prime_write_counter.get(project, 0) + count
+            if _prime_write_counter[project] >= _PRIME_RING_CHECK_INTERVAL:
+                _prime_write_counter[project] = 0
+                _cnt = conn.execute(
+                    "SELECT COUNT(*) FROM priming_state WHERE project=?", (project,)
+                ).fetchone()[0]
+                if _cnt > _PRIME_RING_MAX:
+                    _overflow = _cnt - _PRIME_RING_MAX
+                    conn.execute(
+                        """DELETE FROM priming_state WHERE (entity_name, project) IN (
+                            SELECT entity_name, project FROM priming_state
+                            WHERE project=? ORDER BY primed_at ASC LIMIT ?
+                        )""",
+                        (project, _overflow)
+                    )
+        except Exception:
+            pass
+
     return count
 
 
@@ -5068,12 +5207,16 @@ def read_chunk_version() -> int:
     return 0
 
 def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
-                    now_iso: str = None, recall_quality: int = None, **kwargs) -> None:
+                    now_iso: str = None, recall_quality: int = None,
+                    _sm2_only: bool = False, **kwargs) -> None:
     """
     批量更新 last_accessed + access_count 自增。
     iter106: 同时执行 auto-verification — access_count 达到阈值后自动升 verified。
     iter323: SM-2 Ebbinghaus 精确化 — stability × (1 + 0.1 × (quality-3))。
     OS 类比：MMU Accessed bit 置位 + kswapd 扫描计数 + ECC 自动修正。
+
+    _sm2_only=True: 跳过所有 secondary cognitive effects，只执行 SM-2 core 公式。
+      用于单元测试精确验证 SM-2 factor，不受 IOR/RIF/PEME 等效应干扰。
 
     Ebbinghaus spacing effect 背景（iter301）：
       心理学研究表明，知识被重复检索的间隔越长，每次重复后的记忆稳定性增益越大。
@@ -5241,6 +5384,10 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
         f"  AND COALESCE(access_count,0) >= ?",
         chunk_ids + [AUTO_VERIFY_THRESHOLD],
     )
+
+    # Secondary cognitive effects — skipped when _sm2_only=True (unit test mode)
+    if _sm2_only:
+        return
 
     # iter404: Semantic Priming — 访问 chunk 时，prime 其 encode_context 中的实体
     # OS 类比：readahead_trigger() — 访问 page N，将相邻 pages 标记进 readahead window
@@ -5524,21 +5671,22 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
     # ── iter488: IOR — Inhibition of Return（短时重复访问 stability 增益递减，Posner 1984）──
     # OS 类比：MADV_RANDOM prefetch inhibition — 刚读过的 page 降低预取优先级
     try:
-        apply_inhibition_of_return(conn, chunk_ids, now_iso=now_iso)
+        apply_inhibition_of_return(conn, chunk_ids, now_iso=now_iso,
+                                   pre_last_accessed_map=_pre_access_map)
     except Exception:
         pass
 
     # ── iter489: EVE — Encoding Variability Effect（多样化访问上下文增强记忆，Martin 1972）──
     # OS 类比：DM-multipath — 同一 device 多条 I/O 路径，任一失效不影响整体可用性
     try:
-        apply_encoding_variability(conn, chunk_ids)
+        apply_encoding_variability_eve(conn, chunk_ids)
     except Exception:
         pass
 
     # ── iter490: ZEF — Zeigarnik Effect（未完成任务 chunk 稳定性更高，Zeigarnik 1927）──
     # OS 类比：dirty page tracking — 含未刷新数据的 page 受 writeback 保护
     try:
-        apply_zeigarnik_effect(conn, chunk_ids)
+        apply_zeigarnik_effect_zef(conn, chunk_ids)
     except Exception:
         pass
 
@@ -5554,6 +5702,24 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
     # OS 类比：write-back cache — 输出类操作需额外处理但生命周期更长
     try:
         apply_production_effect(conn, chunk_ids)
+    except Exception:
+        pass
+
+    # ── iter450: CEF — Completion Effect（已完成任务失去认知张力，importance 降低，Ovsiankina 1928）──
+    # OS 类比：Linux page writeback completion — PG_dirty 清除后 kswapd 可自由回收（解除保护）
+    # 与 ZEF 对称：未完成=stability 提升；已完成=importance 适度降低
+    try:
+        from store_vfs_effects_new import apply_completion_effect as _apply_cef
+        _apply_cef(conn, chunk_ids)
+    except Exception:
+        pass
+
+    # ── iter451: RDG — Retrieval Difficulty Gradient（趋势困难检索获更大加成，Bjork & Bjork 1992）──
+    # OS 类比：Linux adaptive readahead — 连续 miss 趋势 → 自适应扩大预取窗口（趋势驱动）
+    # 补充 DDE2 (iter485)：单点快照 → 历史趋势（R 低 + spaced_access_count 高 = 持续边缘成功）
+    try:
+        from store_vfs_effects_new import apply_retrieval_difficulty_gradient as _apply_rdg
+        _apply_rdg(conn, chunk_ids, now_iso=now_iso)
     except Exception:
         pass
 
@@ -6316,6 +6482,103 @@ def enforce_pin_cap(conn: sqlite3.Connection, project: str,
         )
         evicted += 1
     return evicted
+
+
+# ── 迭代493：Verified Status TTL — 验证状态过期机制 ──────────────────────────
+# OS 类比：TLS 证书有效期（X.509 NotAfter）+ Let's Encrypt 自动续期
+#   TLS 证书过期不代表网站变不安全，而是需要重新证明身份（re-verification）。
+#   同样，verified chunk 过期不代表知识变错误，而是需要重新确认仍然有效。
+#
+# 问题：verification_status='verified' 完全豁免 Ebbinghaus 衰减，
+#   但 verified 本身是一个时间点的判断：
+#     - 2 年前验证的 "BM25 是最佳全文检索方案" 在 2025 年可能已不成立
+#     - verified chunk 的 importance 被冻结在验证时的水平，永不衰减
+#     - 随时间积累，verified chunk 比例上升 → 系统对新证据越来越不敏感
+#
+# 解决：verified 状态设 TTL（分 stability 两档）：
+#   stability < 5.0 → TTL = verified_ttl_days（默认 30 天）
+#   stability >= 5.0 → TTL = verified_ttl_high_stability_days（默认 90 天）
+#   超过 TTL 且在此期间未被访问（last_accessed 未更新）→ 重置为 'pending'
+#   访问 verified chunk 会更新 last_accessed → 续期（类比 TLS renewal）
+
+def expire_stale_verified(conn: sqlite3.Connection, project: str,
+                          max_expire: int = 20) -> dict:
+    """
+    迭代493：重置过期的 verified chunk 状态为 pending。
+
+    OS 类比：TLS 证书过期检查 — certbot renew --cert-name <domain>
+      证书的有效性通过 NotAfter 字段判断；同样，verified 状态通过
+      last_accessed 和 stability 判断是否在有效期内。
+
+    参数：
+      conn       — 数据库连接
+      project    — 项目 ID
+      max_expire — 单次最多过期的 chunk 数（防止大批量操作阻塞）
+
+    返回：
+      {expired: N, skipped_stable: N, total_verified: N}
+    """
+    try:
+        from config import get as _cfg
+        ttl_days = _cfg("damon.verified_ttl_days")
+        ttl_high_days = _cfg("damon.verified_ttl_high_stability_days")
+        stability_threshold = 5.0
+    except Exception:
+        ttl_days = 30
+        ttl_high_days = 90
+        stability_threshold = 5.0
+
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+
+    # 查询所有 verified chunk
+    rows = conn.execute(
+        """SELECT id, stability, last_accessed
+           FROM memory_chunks
+           WHERE project = ?
+             AND COALESCE(verification_status, 'pending') = 'verified'
+           ORDER BY last_accessed ASC
+           LIMIT ?""",
+        (project, max_expire * 5),
+    ).fetchall()
+
+    total_verified = len(rows)
+    expired = 0
+    skipped_stable = 0
+
+    for cid, stab, la in rows:
+        if expired >= max_expire:
+            break
+
+        effective_stab = float(stab or 1.0)
+        ttl = ttl_high_days if effective_stab >= stability_threshold else ttl_days
+
+        # 判断是否过期：last_accessed + TTL < now
+        if not la:
+            # 无访问记录 → 立即过期
+            cutoff_dt = now
+        else:
+            try:
+                la_dt = datetime.fromisoformat(la.replace("Z", "+00:00"))
+                cutoff_dt = la_dt + timedelta(days=ttl)
+            except Exception:
+                continue
+
+        if now >= cutoff_dt:
+            # 过期：重置为 pending（需要重新验证）
+            conn.execute(
+                "UPDATE memory_chunks SET verification_status='pending', updated_at=? WHERE id=?",
+                (now.isoformat(), cid),
+            )
+            expired += 1
+        else:
+            skipped_stable += 1
+
+    return {
+        "expired": expired,
+        "skipped_stable": skipped_stable,
+        "total_verified": total_verified,
+    }
 
 
 # ── 迭代304：知识图谱关系边 API ────────────────────────────────────────────
@@ -7115,7 +7378,7 @@ def reconsolidate(
     query: str,
     project: str = None,
     boost: float = 0.03,
-    max_importance: float = 0.98,
+    max_importance: float = 0.90,
 ) -> int:
     """
     迭代311-A（iter395 扩展）：再巩固（Reconsolidation，Nader et al. 2000）
@@ -7228,9 +7491,16 @@ def reconsolidate(
         elif access_count > 10:
             actual_boost *= 0.7
 
-        new_importance = min(importance + actual_boost, max_importance)
+        # B16: importance inflation correction
+        # 旧上限 0.98 导致 285/291 chunks 通胀到 >= 0.6
+        # OS 类比：Linux mm/vmscan.c overcommit_ratio 校正 — 防止虚拟内存无限通胀
+        if importance > 0.85 and access_count < 5:
+            # mean-reversion：高 importance 但低访问 → 缓慢回归均值（防止死锁高位）
+            new_importance = max(importance - 0.01, 0.85)
+        else:
+            new_importance = min(importance + actual_boost, max_importance)
 
-        if new_importance > importance + 0.001:  # 避免浮点噪音触发无意义写入
+        if abs(new_importance - importance) > 0.001:  # 避免浮点噪音触发无意义写入
             try:
                 conn.execute(
                     "UPDATE memory_chunks SET importance=?, updated_at=? WHERE id=?",
@@ -11445,6 +11715,7 @@ def apply_inhibition_of_return(
     conn: "sqlite3.Connection",
     chunk_ids: list,
     now_iso: str = None,
+    pre_last_accessed_map: dict = None,
 ) -> dict:
     """iter488: Inhibition of Return (IOR) — 短时间内重复访问同一 chunk 时 stability 增益递减。
 
@@ -11497,7 +11768,12 @@ def apply_inhibition_of_return(
             if imp < min_importance:
                 continue
 
-            last_acc = row[2] or ""
+            # Use pre-update last_accessed if available (avoids seeing gap=0 due to
+            # last_accessed already being updated to now_iso before IOR runs)
+            if pre_last_accessed_map and chunk_id in pre_last_accessed_map:
+                last_acc = pre_last_accessed_map[chunk_id] or ""
+            else:
+                last_acc = row[2] or ""
             if not last_acc:
                 continue
 
@@ -11536,7 +11812,7 @@ def apply_inhibition_of_return(
         return result
 
 
-def apply_encoding_variability(
+def apply_encoding_variability_eve(
     conn: "sqlite3.Connection",
     chunk_ids: list,
 ) -> dict:
@@ -11612,7 +11888,7 @@ def apply_encoding_variability(
         return result
 
 
-def apply_zeigarnik_effect(
+def apply_zeigarnik_effect_zef(
     conn: "sqlite3.Connection",
     chunk_ids: list,
 ) -> dict:
@@ -15067,14 +15343,29 @@ def reap_ghosts(conn: sqlite3.Connection,
                 "dry_run": True,
             }
 
-        # 物理删除 — FTS5 content 表通过 DELETE trigger 自动清理索引
-        # 参考：schema.py 中 FTS5 设置了 content='memory_chunks' + DELETE trigger
+        # B15 FTS sync: FTS5 独立模式，无触发器，必须手动清理孤立行
         placeholders = ",".join("?" * len(ghost_ids))
+        rowid_rows = conn.execute(
+            f"SELECT rowid FROM memory_chunks WHERE id IN ({placeholders})",
+            ghost_ids,
+        ).fetchall()
+        mc_rowids = [str(r[0]) for r in rowid_rows]
+
         conn.execute(
             f"DELETE FROM memory_chunks WHERE id IN ({placeholders})",
             ghost_ids,
         )
         reaped = conn.execute("SELECT changes()").fetchone()[0]
+
+        if mc_rowids:
+            try:
+                fts_ph = ",".join("?" * len(mc_rowids))
+                conn.execute(
+                    f"DELETE FROM memory_chunks_fts WHERE rowid_ref IN ({fts_ph})",
+                    mc_rowids,
+                )
+            except Exception:
+                pass
 
         return {
             "reaped_count": reaped,

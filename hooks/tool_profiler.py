@@ -49,8 +49,12 @@ MAX_DB_ROWS = 10_000
 def _open_profile_db() -> sqlite3.Connection:
     MEMORY_OS_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(PROFILE_DB))
+    # ── 性能优化：profiler 数据丢失可接受（观测数据非关键），最大化写入速度 ──
+    # OS 类比：Linux O_SYNC vs buffered write — profiler 不需要 fsync 保证，
+    #   每次 commit 的 fsync 是 ~50ms 的固定税，synchronous=OFF 去掉它。
+    # journal_mode=WAL 保留（读写并发），synchronous=OFF（不 fsync WAL header）
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA synchronous=OFF")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS tool_calls (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,7 +69,7 @@ def _open_profile_db() -> sqlite3.Connection:
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ts ON tool_calls(ts)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_key ON tool_calls(tool_name, tool_key)")
-    conn.commit()
+    # 不在此处 commit：schema DDL 在 WAL 模式下非事务，下次写入时一并提交
     return conn
 
 

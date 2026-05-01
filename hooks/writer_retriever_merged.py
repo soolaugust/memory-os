@@ -148,16 +148,8 @@ def main():
         # ═══════════════════════════════════════════════════════════
 
         conn.commit()
-        elapsed_ms = (time.time() - start_time) * 1000
-
-        # 输出简单状态
-        output = {
-            "hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit",
-                "additionalContext": f"[合并 hook: {elapsed_ms:.1f}ms]"
-            }
-        }
-        print(json.dumps(output))
+        # 静默成功：不注入 additionalContext，避免每次 UserPromptSubmit 产生噪声 tokens
+        sys.exit(0)
 
     except Exception as e:
         if conn:

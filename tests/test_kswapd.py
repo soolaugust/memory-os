@@ -107,41 +107,43 @@ def test_zone_ok():
 def test_zone_low():
     """水位在 pages_high ~ pages_min 之间，预淘汰至 pages_high。
     注意：pages_low(80%) < pages_high(90%) < pages_min(95%)
-    水位在 80-90% 时虽在 LOW zone 但已低于 HIGH 目标，无需淘汰。
     水位在 90-95% 时触发实际淘汰。
-    修复：kswapd 使用全局 count，需在填充前测量全局基线，
-    动态计算填充量使全局 count 落入 ZONE_LOW 区间。
+    修复：kswapd 使用 per-project count + balloon_quota，需要用实际 balloon 配额计算填充量。
     """
+    from store_mm import balloon_quota as _balloon_quota
     conn = open_db()
     ensure_schema(conn)
     project = f"{TEST_PROJECT}_low"
     _cleanup(conn, project)
 
-    quota = _sysctl("extractor.chunk_quota")
     pages_high_pct = _sysctl("kswapd.pages_high_pct")
     pages_min_pct = _sysctl("kswapd.pages_min_pct")
 
-    # 测量当前全局 chunk 数（其他测试可能留下残留数据）
-    global_base = conn.execute("SELECT COUNT(*) FROM memory_chunks").fetchone()[0]
+    # 先预填少量 chunk 使 balloon_quota 感知到该 project（否则新 project 可能拿到最小配额）
+    _fill_project(conn, project, 5, importance=0.4, days_ago=1)
 
-    # 目标：全局 count + incoming(1) 落在 ZONE_LOW 区间 (pages_high, pages_min)
+    # 获取 balloon 给此 project 分配的实际配额
+    balloon = _balloon_quota(conn, project)
+    quota = balloon["quota"]
+
+    # 目标：per-project count + incoming(1) 落在 ZONE_LOW 区间 (pages_high, pages_min)
     target_pct = (pages_high_pct + pages_min_pct) / 2  # 92.5%
-    target_global = int(quota * target_pct / 100)
+    target_count = int(quota * target_pct / 100)
+    proj_base = get_project_chunk_count(conn, project)
 
-    fill_count = target_global - global_base
+    fill_count = target_count - proj_base
     if fill_count <= 0:
-        # 全局已超出目标，跳过（其他测试留下太多数据）
+        _cleanup(conn, project)
         conn.close()
-        print("  T2 ZONE_LOW ⚠ skipped (global baseline too high, isolation issue)")
-        return
+        pytest.skip(f"ZONE_LOW: proj_base={proj_base} already above target={target_count}")
 
-    # 确保 fill_count 不会超过 pages_min（避免落入 ZONE_MIN）
-    max_fill = int(quota * pages_min_pct / 100) - global_base - 1
+    # 确保填充后不超过 pages_min（避免落入 ZONE_MIN）
+    max_fill = int(quota * pages_min_pct / 100) - proj_base - 1
     fill_count = min(fill_count, max_fill)
     if fill_count <= 0:
+        _cleanup(conn, project)
         conn.close()
-        print("  T2 ZONE_LOW ⚠ skipped (global baseline too high, isolation issue)")
-        return
+        pytest.skip(f"ZONE_LOW: max_fill={max_fill} too small (quota={quota}, proj_base={proj_base})")
 
     _fill_project(conn, project, fill_count, importance=0.4, days_ago=1)  # 绕过10分钟 grace period
 
@@ -149,7 +151,7 @@ def test_zone_low():
     result = kswapd_scan(conn, project, incoming_count=1)
     count_after = get_project_chunk_count(conn, project)
 
-    assert result["zone"] == "LOW", f"Expected LOW, got {result['zone']} at {result['watermark_pct']}%"
+    assert result["zone"] == "LOW", f"Expected LOW, got {result['zone']} at {result['watermark_pct']}% (quota={quota}, count={count_before})"
     assert result["evicted_count"] > 0, "ZONE_LOW above pages_high should evict"
     assert count_after < count_before, "ZONE_LOW should reduce count"
 
@@ -161,25 +163,33 @@ def test_zone_low():
 # ── T3: ZONE_MIN ──
 def test_zone_min():
     """水位超过 pages_min，同步硬淘汰。"""
+    from store_mm import balloon_quota as _balloon_quota
     conn = open_db()
     ensure_schema(conn)
     project = f"{TEST_PROJECT}_min"
     _cleanup(conn, project)
 
-    quota = _sysctl("extractor.chunk_quota")
     pages_min_pct = _sysctl("kswapd.pages_min_pct")
     pages_high_pct = _sysctl("kswapd.pages_high_pct")
 
-    # 动态计算填充量：确保全局 count 超过 pages_min（考虑其他测试残留）
-    global_base = conn.execute("SELECT COUNT(*) FROM memory_chunks").fetchone()[0]
-    target_global = int(quota * pages_min_pct / 100) + 5
-    fill_count = max(5, target_global - global_base)
+    # 先预填少量 chunk 使 balloon_quota 感知到该 project
+    _fill_project(conn, project, 5, importance=0.4, days_ago=1)
+
+    # 获取 balloon 给此 project 分配的实际配额
+    balloon = _balloon_quota(conn, project)
+    quota = balloon["quota"]
+
+    # 目标：per-project count 超过 pages_min（触发 ZONE_MIN）
+    target_count = int(quota * pages_min_pct / 100) + 5
+    proj_base = get_project_chunk_count(conn, project)
+    fill_count = max(5, target_count - proj_base)
+
     _fill_project(conn, project, fill_count, importance=0.4, days_ago=1)  # 绕过10分钟 grace period
 
     result = kswapd_scan(conn, project, incoming_count=1)
     count_after = get_project_chunk_count(conn, project)
 
-    assert result["zone"] == "MIN", f"Expected MIN, got {result['zone']} at {result['watermark_pct']}%"
+    assert result["zone"] == "MIN", f"Expected MIN, got {result['zone']} at {result['watermark_pct']}% (quota={quota})"
     assert result["evicted_count"] > 0, "ZONE_MIN should evict aggressively"
     # ZONE_MIN 应该淘汰至 pages_high 以下
     target = int(quota * pages_high_pct / 100)
@@ -258,28 +268,35 @@ def test_batch_size_limit():
     project = f"{TEST_PROJECT}_batch"
     _cleanup(conn, project)
 
-    quota = _sysctl("extractor.chunk_quota")
+    from store_mm import balloon_quota as _balloon_quota
     pages_low_pct = _sysctl("kswapd.pages_low_pct")
     pages_high_pct = _sysctl("kswapd.pages_high_pct")
     pages_min_pct = _sysctl("kswapd.pages_min_pct")
     batch_size = _sysctl("kswapd.batch_size")
 
-    # 动态计算填充量：全局 count 落在 ZONE_LOW 区间（不触发 ZONE_MIN）
-    global_base = conn.execute("SELECT COUNT(*) FROM memory_chunks").fetchone()[0]
+    # 预填少量 chunk 使 balloon_quota 感知到该 project
+    _fill_project(conn, project, 5, importance=0.4, days_ago=1)
+    balloon = _balloon_quota(conn, project)
+    quota = balloon["quota"]
+
+    # 动态计算填充量：per-project count 落在 ZONE_LOW 区间（不触发 ZONE_MIN）
+    proj_base = get_project_chunk_count(conn, project)
     target_pct = (pages_high_pct + pages_min_pct) / 2  # 92.5%
-    target_global = int(quota * target_pct / 100)
-    fill_count = target_global - global_base
+    target_count = int(quota * target_pct / 100)
+    fill_count = target_count - proj_base
     if fill_count <= 0:
+        _cleanup(conn, project)
         conn.close()
-        print("  T6 Batch size ⚠ skipped (global baseline too high)")
+        print("  T6 Batch size ⚠ skipped (proj baseline too high)")
         return
-    max_fill = int(quota * pages_min_pct / 100) - global_base - 1
+    max_fill = int(quota * pages_min_pct / 100) - proj_base - 1
     fill_count = min(fill_count, max_fill)
     if fill_count <= 0:
+        _cleanup(conn, project)
         conn.close()
-        print("  T6 Batch size ⚠ skipped (global baseline too high)")
+        print("  T6 Batch size ⚠ skipped (proj baseline too high)")
         return
-    _fill_project(conn, project, fill_count, importance=0.4)
+    _fill_project(conn, project, fill_count, importance=0.4, days_ago=1)
 
     result = kswapd_scan(conn, project, incoming_count=1)
 

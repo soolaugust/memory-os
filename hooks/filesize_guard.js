@@ -19,17 +19,49 @@
  *   - 截图 png/jpg   任意大小 → 直接 BLOCK（无意义 Read 二进制）
  *   - 典型 Python 模块 < 20KB → 不受影响
  *
+ * 迭代 B7：会话级 context 累计增量追踪 (session_context_guard)
+ *   OS 类比：cgroup memory.limit_in_bytes — 进程组级内存上限，
+ *   超过阈值时触发 SIGKILL 或 throttle，而非只限制单个分配。
+ *
+ *   新增功能：
+ *   - 追踪本 session 通过 Read 已注入的估计字节数
+ *   - 当累计注入 > SESSION_WARN_MB 时：warn + 建议 Grep/LSP
+ *   - 当累计注入 > SESSION_BLOCK_MB 时：block 所有 >20KB 的 Read（除非有 limit）
+ *   - 状态文件：~/.claude/memory-os/thrashing_state.json（与 thrashing_detector 共享）
+ *
  * 匹配工具：Read
- * 决策：block (图片/二进制 | >100KB 且无 limit) | warn (>20KB) | allow
+ * 决策：block (图片/二进制 | >100KB 且无 limit | session超限) | warn (>20KB) | allow
  */
 
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
 const MAX_FILE_BYTES = 100 * 1024; // 100KB — 超过此值必须分段读
 const WARN_FILE_BYTES = 20 * 1024; // 20KB  — 超过此值提示使用 limit
+
+// 会话级 context 增量阈值（与 thrashing_detector.py 的阈值对齐）
+const SESSION_WARN_MB = 5;   // > 5MB → warn，但不 block
+const SESSION_BLOCK_MB = 15; // > 15MB → block 中等文件（>20KB），防止 thrashing 恶化
+
+// 状态文件路径（与 thrashing_detector.py 共享）
+const STATE_FILE = path.join(os.homedir(), '.claude', 'memory-os', 'thrashing_state.json');
+
+function loadState() {
+  try {
+    if (fs.existsSync(STATE_FILE)) {
+      return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    }
+  } catch (_) {}
+  return { session_bytes: 0, last_warn_ts: 0, window_bytes_history: [] };
+}
+
+function getSessionMB() {
+  const state = loadState();
+  return (state.session_bytes || 0) / 1024 / 1024;
+}
 
 // 二进制/媒体文件扩展名 — Read 结果会 base64 膨胀，直接 block
 const BINARY_EXTS = new Set([
@@ -114,11 +146,38 @@ async function main() {
     process.exit(2);
   }
 
-  // Warn: file >20KB without limit
+  // === 会话级 context 增量检查（session_context_guard）===
+  // OS 类比：cgroup memory.limit_in_bytes — 进程组级累计上限
+  const sessionMB = getSessionMB();
+
+  if (sessionMB >= SESSION_BLOCK_MB && fileSize > WARN_FILE_BYTES && !hasLimit) {
+    // session 已累计 >15MB，中等文件也需要分段
+    const result = {
+      decision: 'block',
+      reason: `[filesize_guard:session_guard] ⚠ 本 session 已累计注入约 ${sessionMB.toFixed(1)}MB context` +
+              `（阈值 ${SESSION_BLOCK_MB}MB）。Autocompact thrashing 风险极高。` +
+              `${path.basename(filePath)} ${fileSizeKB}KB 被拦截。` +
+              `请改用：Grep 搜索关键字、LSP goToDefinition、或 mcp__memory-os__memory_lookup。` +
+              `如必须读取，请用 Read(limit=50) 只读所需行段。`
+    };
+    process.stdout.write(JSON.stringify(result));
+    process.exit(2);
+  }
+
+  // Warn: file >20KB without limit，或 session 接近阈值
   if (fileSize > WARN_FILE_BYTES && !hasLimit) {
+    const sessionNote = sessionMB >= SESSION_WARN_MB
+      ? ` [session_guard: 已累计 ${sessionMB.toFixed(1)}MB，接近 thrashing 阈值]`
+      : '';
     process.stderr.write(
       `[filesize_guard] ⚠ ${path.basename(filePath)} ${fileSizeKB}KB > 20KB，` +
-      `建议用 limit 参数分段读取以节省上下文预算。\n`
+      `建议用 limit 参数分段读取以节省上下文预算。${sessionNote}\n`
+    );
+  } else if (sessionMB >= SESSION_WARN_MB && fileSize > 5 * 1024) {
+    // session 已超 warn 阈值，即使文件本身 >5KB 也附加提醒
+    process.stderr.write(
+      `[filesize_guard:session_guard] ⚠ session 已累计 ${sessionMB.toFixed(1)}MB context，` +
+      `建议优先用 Grep/memory_lookup 替代 Read。\n`
     );
   }
 

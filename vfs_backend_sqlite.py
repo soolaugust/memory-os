@@ -45,7 +45,7 @@ class SQLiteBackend(VFSBackend):
         if not self.db_path.exists():
             raise FileNotFoundError(f"Database not found: {self.db_path}")
 
-        uri = f"file:{self.db_path}?mode={'ro' if self.readonly else 'rw'}"
+        uri = f"file:{self.db_path}?mode={'ro' if self.readonly else 'rwc'}"
         self._conn_cache = sqlite3.connect(uri, uri=True)
         self._conn_cache.row_factory = sqlite3.Row
         self._last_conn_time = now
@@ -114,7 +114,7 @@ class SQLiteBackend(VFSBackend):
                        mc.source_session, mc.tags, mc.project,
                        fts.rank
                 FROM memory_chunks_fts fts
-                JOIN memory_chunks mc ON fts.rowid = mc.rowid
+                JOIN memory_chunks mc ON CAST(fts.rowid_ref AS INTEGER) = mc.rowid
                 WHERE memory_chunks_fts MATCH ?
                 ORDER BY fts.rank DESC
                 LIMIT ?
@@ -218,6 +218,22 @@ class SQLiteBackend(VFSBackend):
 
             chunk_id = parts[1]
             conn = self._get_conn()
+
+            # B15 FTS sync: fetch rowid before delete, then remove FTS row
+            # OS 类比：ext4 unlink — 删除 dentry 前先更新 inode 引用计数，
+            # 避免 dcache/FTS 中残留孤立条目（orphan inode/FTS row）
+            row = conn.execute(
+                "SELECT rowid FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if row:
+                mc_rowid = row[0]
+                try:
+                    conn.execute(
+                        "DELETE FROM memory_chunks_fts WHERE rowid_ref=?",
+                        (str(mc_rowid),)
+                    )
+                except Exception:
+                    pass  # FTS 表不存在或已清理，忽略
 
             conn.execute("DELETE FROM memory_chunks WHERE id=?", (chunk_id,))
             conn.commit()

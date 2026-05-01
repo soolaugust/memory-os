@@ -527,10 +527,11 @@ def _is_quality_reasoning(summary: str) -> bool:
 
 def _is_fragment(text: str) -> bool:
     """
-    迭代73+78+80：碎片检测。排除截断的代码片段、表格行、markdown 标题等非完整句。
+    迭代73+78+80+B17：碎片检测。排除截断的代码片段、表格行、markdown 标题等非完整句。
     OS 类比：TCP checksum — 数据完整性校验，丢弃损坏的 segment。
     迭代78：新增冒号碎片检测（leading/trailing ：/:）
     迭代80：新增架构层级标签碎片检测（/L4/L5...、/层级名...）
+    迭代B17：新增中文句中开头字符检测（性/等/时/中/里 等 = 截断中文从句）
     """
     if not text or len(text) < 8:
         return True
@@ -557,6 +558,39 @@ def _is_fragment(text: str) -> bool:
     # 保留真正的文件路径（/home/...、/etc/...、/var/... 等小写开头）
     if text[0] == '/' and len(text) > 1 and re.match(r'^/[A-Z\u4e00-\u9fff]', text):
         return True
+    # 迭代B17+B18：中文从句尾部字符开头 = 截断中文句（"性重构等）时，..."、"等）时"）
+    # 这些字符在中文语法中不能作为独立句子的开头，出现在 position-0 说明是句子中间截断的。
+    # 典型情形：正则捕获组匹配到从句尾部 "性" / "等" 等助词或形容词词尾。
+    # OS 类比：TCP sequence number validation — 起始 seq 不在合法窗口内，丢弃 segment。
+    _CN_MID_SENTENCE_STARTERS = frozenset('性等时中里上下内外到从着过了地得把被让向以于的是')
+    if text[0] in _CN_MID_SENTENCE_STARTERS:
+        # 仅当第一个字是纯中文助词/尾词时判定为碎片
+        # 保护：首字是"中文名词+助词"组合的合法句（如"中文分词策略"的"中"）
+        # 策略：若第2个字是中文且构成常见词语开头（如"中文"/"时间"/"的确"），则保留
+        if len(text) < 2 or not re.match(r'^[\u4e00-\u9fff]', text[1:2]):
+            return True
+        # 第2字也是中文时：检查是否是合法词语开头（词频最高的双字中文技术词）
+        # 放行条件：双字前缀在常见技术词白名单中
+        # B18: 新增 '空转'（"是空转" → A06 migration 线程场景）
+        _SAFE_CN_PAIRS = frozenset({
+            '中文', '时间', '时序', '时钟', '等待', '等效', '等价',
+            '下游', '下载', '下层', '上游', '上层', '内核', '内存',
+            '外部', '外层', '到达', '从而', '性能', '性质',
+            '空转', '是否', '是因', '是空',  # B18: 新增 — 技术分析场景中合法的"是"开头词对
+        })
+        pair = text[:2]
+        if pair not in _SAFE_CN_PAIRS:
+            return True
+    # B18: 以右括号结尾 = 提取自括号表达式内部，是截断的补充说明
+    # 典型：'Running 但慢 = 频率受限 → 资源管控）' — 尾部 '）' 说明这是括号内容被截断
+    # 注意：完整句也可能以括号结尾（如"（推荐方案 A）"），所以只过滤中文全角括号结尾
+    stripped = text.rstrip()
+    if stripped.endswith('）') or stripped.endswith(')'):
+        # 只过滤：以右括号结尾且括号没有对应左括号（孤立右括号 = 截断）
+        left_count = text.count('（') + text.count('(')
+        right_count = text.count('）') + text.count(')')
+        if right_count > left_count:
+            return True
     return False
 
 
@@ -1034,6 +1068,12 @@ def _extract_uncertainty_signals(text: str) -> list:
             topic = re.sub(r'\*{1,3}|`{1,3}', '', topic).strip()
             # 截断到第一个标点或换行
             topic = re.split(r'[。！？\n]', topic)[0].strip()[:80]
+            # iter B16：碎片过滤 — 以逗号/引号/标点开头的 = 截断残缺句
+            if topic and topic[0] in (',', '，', '、', '"', "'", '\u201c', '\u201d', '\u2018', '\u2019'):
+                continue
+            # iter B16：过短的不确定信号无实际检索价值
+            if len(topic) < 8:
+                continue
             key = re.sub(r'\s+', '', topic.lower())
             if len(topic) >= 5 and key not in seen:
                 seen.add(key)
@@ -1114,6 +1154,18 @@ def _is_quality_chunk(summary: str) -> bool:
     if re.match(r'^[-=*`#>]{2,}$', s):
         return False
     if re.match(r'^[了的地得把被让向从以在对和与或]', s):
+        return False
+    # ── iter B12：JSON 键值对碎片过滤 ──────────────────────────────────
+    # 以双引号开头 = JSON 字符串值（"recommended_action": "..."、"if_wrong": "..."）
+    # 这些是从包含 JSON 格式输出的 assistant 回复中误提取的片段，无法被自然语言检索命中
+    # OS 类比：TCP payload 的 framing check — 裸 JSON fragment 不是有效的 knowledge chunk
+    if s.startswith('"') and re.match(r'^"[\w_]+":', s):  # JSON key: "key": ...
+        return False
+    # "xxx" → "yyy" 格式（JSON value 片段拼接）
+    if re.match(r'^"[^"]{2,30}"\s*→\s*"', s):
+        return False
+    # 含 JSON 键值对特征：多个 "key": "value" 组合
+    if len(re.findall(r'"[\w_]+"\s*:', s)) >= 2:
         return False
     # 表格行：含 3+ 个 | 分隔符
     if s.count('|') >= 3:
@@ -1263,6 +1315,13 @@ def _is_quality_decision(summary: str) -> bool:
         return False
     # X3. 纯 markdown 强调行（"**xxx**: yyy" 独立存储时丢失上下文）
     if re.match(r'^\*\*[^*]{2,30}\*\*[：:]\s', s) and len(s) < 80:
+        return False
+    # X4. iter B14：memory-os/iterXX 进度日志（"✅ xxx 完成"、"[memory-os/iter42] ✅ ..."）
+    # 这类进度日志是过程性记录，不是可复用决策，不应晋升到 global
+    # OS 类比：/proc/kmsg 里的 printk(KERN_INFO "done") — 进度打印不是决策文档
+    if re.match(r'^\[memory-os/iter\d+\]', s):
+        return False
+    if re.match(r'^✅\s', s) and re.search(r'(?:完成|修复|通过|升级|迭代|验证|实现)', s[:50]):
         return False
 
     # ── 通过条件（满足任一即写入）─────────────────────────────
@@ -2749,6 +2808,14 @@ def main():
         for _cc_summary in causal_chains:
             if not _is_quality_chunk(_cc_summary):
                 continue
+            # iterB17：拦截以结论词开头的截断句（"所以X"/"因此X" 缺少前提部分，不是完整因果链）
+            # OS 类比：TCP 的 ACK-only segment 校验 — 无 data payload 的段不算有效信息
+            # 人类记忆：encoding specificity — 没有"因为"的"所以"无法被因果查询检索命中
+            if re.match(r'^(?:所以|因此|故此|于是|故而)[，,\s]', _cc_summary):
+                continue
+            # 同理：以询问词开头的不是因果链（"你的判断是？"）
+            if re.match(r'^你[的是]?', _cc_summary) and '？' in _cc_summary[:30]:
+                continue
             has_arrow = '→' in _cc_summary
             has_causal_kw = bool(re.search(
                 r'(?:因为|由于|导致了?|造成了?|引发了?|触发了?|引起了?|'
@@ -3576,6 +3643,20 @@ def main():
     except Exception:
         pass  # reconsolidate 失败不影响主流程
 
+    # ── Citation Detection — 使用反馈信号（CPU branch predictor feedback 类比）──
+    # 检测 Claude 回复中实际引用了哪些被注入的 chunk，
+    # 引用 → importance 微增；未引用 → importance 微减；级联更新 __semantic__ 层。
+    # OS 类比：PMU branch misprediction counter — 每次推理结束后更新预测器权重。
+    try:
+        from tools.citation_detector import run_citation_detection
+        run_citation_detection(
+            reply_text=hook_input.get("last_assistant_message", ""),
+            project=project,
+            session_id=session_id,
+        )
+    except Exception:
+        pass  # citation detection 失败不影响主流程
+
     sys.exit(0)
 
 
@@ -3672,6 +3753,14 @@ def _promote_to_global(conn, project: str, session_id: str) -> int:
         return 0  # 防止循环
 
     try:
+        # iter B10：global capacity guard — 超配时暂停晋升
+        global_count = conn.execute(
+            "SELECT count(*) FROM memory_chunks WHERE project='global'"
+        ).fetchone()[0]
+        global_quota = 200
+        if global_count >= global_quota:
+            return 0  # 超配，不再晋升，让自然 eviction 回落
+
         candidates = conn.execute(
             """SELECT id, chunk_type, summary, content, importance, tags
                FROM memory_chunks
@@ -3686,6 +3775,13 @@ def _promote_to_global(conn, project: str, session_id: str) -> int:
         promoted = 0
         for row in candidates:
             src_id, ctype, summary, content, imp, tags = row
+            # iter B14：过滤进度日志和低质量summary
+            if re.match(r'^\[memory-os/iter\d+\]', summary):
+                continue
+            if re.match(r'^✅\s', summary):
+                continue
+            if re.match(r'^\[sched_ext\].*>\s', summary):  # sched_ext 子章节碎片
+                continue
             # 检查全局层是否已有
             exists = conn.execute(
                 "SELECT id FROM memory_chunks WHERE project='global' AND summary=?",

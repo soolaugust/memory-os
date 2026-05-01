@@ -31,6 +31,26 @@ def report(limit: int = 50):
                LIMIT ?""",
             (limit,)
         ).fetchall()
+        # B10: global injection ratio — from dmesg extra field
+        import json as _json
+        dmesg_rows = conn.execute(
+            """SELECT extra FROM dmesg
+               WHERE subsystem='retriever' AND extra IS NOT NULL
+               ORDER BY id DESC LIMIT ?""",
+            (limit,)
+        ).fetchall()
+        _src_global_total = 0
+        _src_local_total = 0
+        _src_sample_count = 0
+        for (_extra,) in dmesg_rows:
+            try:
+                _ed = _json.loads(_extra)
+                if "src_global" in _ed:
+                    _src_global_total += _ed["src_global"]
+                    _src_local_total += _ed["src_local"]
+                    _src_sample_count += 1
+            except Exception:
+                pass
     except Exception as e:
         print(f"查询失败: {e}")
         conn.close()
@@ -58,6 +78,12 @@ def report(limit: int = 50):
     print(f"全部:    {stats(durations)}")
     print(f"注入:    {stats(injected_ms)}")
     print(f"跳过:    {stats(skipped_ms)}")
+    # B10: per-source injection stats
+    if _src_sample_count > 0:
+        _total_inj = _src_global_total + _src_local_total
+        _global_pct = 100.0 * _src_global_total / _total_inj if _total_inj > 0 else 0
+        print(f"来源:    local={_src_local_total} global={_src_global_total} "
+              f"({_global_pct:.1f}% global) 样本={_src_sample_count} 次检索")
     print(f"\n目标: <50ms (内部执行时间) / ~130ms (含Python启动)")
     print(f"\n最近 10 条详情:")
     print(f"{'时间':20} {'injected':>9} {'reason':18} {'duration_ms':>12} {'candidates':>10}")

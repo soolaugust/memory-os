@@ -254,7 +254,10 @@ def test_ev11_original_ec_count_initialized_on_insert(conn):
 
 def test_ev12_update_accessed_applies_encoding_variability(conn):
     """update_accessed 触发 encoding_variability 计算 → ec 增长时 stability 增加。"""
+    from datetime import datetime as _dt, timezone as _tz, timedelta
+    # Use last_accessed 10min ago to avoid IOR penalty (IOR window=300s)
     chunk = _make_chunk("ev12", stability=2.0)
+    chunk["last_accessed"] = (_dt.now(_tz.utc) - timedelta(minutes=10)).isoformat()
     insert_chunk(conn, chunk)
     # Simulate encode_context has grown (3 new contexts added beyond original)
     _set_encode_context_and_count(conn, "ev12", "debug,refactor,performance,auth", 1)

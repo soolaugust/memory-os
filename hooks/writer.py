@@ -518,6 +518,49 @@ def main():
         _process_negative_feedback(prompt, project, session_id)
         # 迭代100: ECC 验证反馈闭环 — 更新 confidence_score
         _capture_verification_feedback(prompt, project, session_id)
+        # Per-turn Citation Detection — 每轮反馈信号（比 Stop hook 快 1-3 轮）
+        # OS 类比：PMU per-instruction branch feedback vs post-epoch batch update
+        # 从 transcript 读取上一条 assistant reply，检测哪些注入 chunk 被实际引用
+        try:
+            _transcript_path = hook_input.get("transcript_path", "")
+            if _transcript_path:
+                from pathlib import Path as _Path
+                import json as _json
+                _tp = _Path(_transcript_path)
+                if _tp.exists():
+                    # 读末尾 32KB，找最近的 assistant message
+                    _size = _tp.stat().st_size
+                    _offset = max(0, _size - 32768)
+                    with open(str(_tp), 'r', encoding='utf-8', errors='replace') as _f:
+                        if _offset > 0:
+                            _f.seek(_offset)
+                        _tail = _f.read()
+                    # transcript 是 JSONL，每行一个消息，找最后一条 assistant 行
+                    _last_assistant = ""
+                    for _line in reversed(_tail.splitlines()):
+                        _line = _line.strip()
+                        if not _line:
+                            continue
+                        try:
+                            _msg = _json.loads(_line)
+                            # 处理两种格式：{role, content} 或 {type: message, message: {role, content}}
+                            _role = _msg.get("role", "") or (_msg.get("message") or {}).get("role", "")
+                            if _role == "assistant":
+                                _content = _msg.get("content", "") or (_msg.get("message") or {}).get("content", "")
+                                if isinstance(_content, list):
+                                    _texts = [c.get("text", "") for c in _content if isinstance(c, dict) and c.get("type") == "text"]
+                                    _last_assistant = " ".join(_texts)
+                                elif isinstance(_content, str):
+                                    _last_assistant = _content
+                                if _last_assistant:
+                                    break
+                        except (_json.JSONDecodeError, AttributeError, TypeError):
+                            continue
+                    if _last_assistant and len(_last_assistant) >= 20:
+                        from tools.citation_detector import run_citation_detection
+                        run_citation_detection(_last_assistant, project, session_id)
+        except Exception:
+            pass  # per-turn citation 失败不影响主流程
         # 迭代91: 检测长期目标表达并持久化
         _detect_and_persist_goal(prompt, project, session_id)
         topic = _extract_prompt_topic(prompt)

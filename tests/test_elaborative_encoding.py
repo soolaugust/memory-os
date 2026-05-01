@@ -290,7 +290,7 @@ def test_ee10b_shallow_chunk_low_depth(conn):
     if row is not None and row["depth_of_processing"] is not None:
         dop = row["depth_of_processing"]
         assert dop < 0.1, f"EE10b: 浅处理 depth_of_processing={dop:.4f} 应 < 0.1"
-        # stability ≈ base（浅处理无 bonus）
-        assert row["stability"] <= 1.3, (
-            f"EE10b: 浅处理 stability={row['stability']:.4f} 应接近 base 1.0"
+        # stability ≈ base × 2.0（iter479 warm-start：importance=0.7 ≥ 0.5，浅处理无额外 DOP bonus）
+        assert row["stability"] <= 3.0, (
+            f"EE10b: 浅处理 stability={row['stability']:.4f} 应接近 warm-start base 2.0（无 DOP bonus）"
         )

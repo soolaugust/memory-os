@@ -72,6 +72,14 @@ SYSCTL_FILE: str = os.path.join(MEMORY_OS_DIR, "sysctl.json")
 
 _REGISTRY: dict = {
     # ── retriever ──
+    "retriever.adaptive_k_enabled": (True, bool, None, None, None,
+        "是否启用 Citation Rate 反馈驱动的 Adaptive K（低命中率→缩小top_k，高命中率→扩大）"),
+    "retriever.second_chance_enabled": (True, bool, None, None, None,
+        "是否启用 Second-Chance 多样性采样（以10%概率随机注入高stability低importance的chunk，防止死锁衰减）"),
+    "retriever.inject_sort_enabled": (True, bool, None, None, None,
+        "是否启用 inject_score 加权排序（trigram_score × sqrt(importance)），高importance chunk优先注入，提升SNR"),
+    "retriever.inject_score_min_ratio": (0.10, float, 0.0, 1.0, None,
+        "inject_score 相对门槛比例：inject_score < max_score × ratio 的 chunk 被过滤（默认10%，0禁用过滤）"),
     "retriever.top_k": (5, int, 1, 20, None,
         "默认召回 Top-K 条数（迭代72：3→5 提升知识覆盖率）"),
     "retriever.top_k_fault": (7, int, 1, 30, None,
@@ -1880,6 +1888,40 @@ _REGISTRY: dict = {
         "iter492: PEF 最大 stability 加成（默认 0.15 = 15%）"),
     "store_vfs.pef_min_importance": (0.15, float, 0.0, 1.0, None,
         "iter492: 触发 PEF 的最低 importance 阈值（默认 0.15）"),
+    # ── iter450: Completion Effect (CEF) — 已完成任务 importance 降低（Ovsiankina 1928）──
+    # 认知科学依据：Ovsiankina (1928) — 已完成任务失去"认知张力"，不再主动维持记忆优先级
+    # OS 类比：dirty page writeback 完成后清除 PG_dirty，kswapd 可自由回收。
+    "store_vfs.cef_enabled": (True, bool, None, None, None,
+        "iter450: 是否启用 Completion Effect（默认 True）"),
+    "store_vfs.cef_completion_keywords": (
+        ["DONE", "RESOLVED", "FIXED", "CLOSED", "COMPLETED", "MERGED", "SHIPPED",
+         "已完成", "已解决", "已修复", "已关闭", "完成", "解决"],
+        list, None, None, None,
+        "iter450: 触发 Completion Effect 的完成信号关键词列表"),
+    "store_vfs.cef_importance_reduction": (0.05, float, 0.0, 0.20, None,
+        "iter450: 每次触发时降低的 importance 值（默认 0.05）"),
+    "store_vfs.cef_min_importance": (0.20, float, 0.0, 1.0, None,
+        "iter450: importance 降低的下限（默认 0.20）"),
+    "store_vfs.cef_trigger_min_importance": (0.35, float, 0.0, 1.0, None,
+        "iter450: 触发 CEF 的 importance 最低阈值（默认 0.35）"),
+
+    # ── iter451: Retrieval Difficulty Gradient (RDG) — 趋势困难检索获得更大加成（Bjork & Bjork 1992）──
+    # 认知科学依据：单点 retrievability 低可能是噪声；持续低 R + 高 spaced_access_count = 真正的边缘成功
+    # OS 类比：Linux adaptive readahead — 连续 miss 趋势 → 扩大预取窗口（趋势驱动，非快照驱动）
+    "store_vfs.rdg_enabled": (True, bool, None, None, None,
+        "iter451: 是否启用 Retrieval Difficulty Gradient（默认 True）"),
+    "store_vfs.rdg_max_retrievability": (0.40, float, 0.0, 1.0, None,
+        "iter451: 触发 RDG 的可达性上限（低于此值才算困难，默认 0.40）"),
+    "store_vfs.rdg_min_spaced": (3, int, 1, 20, None,
+        "iter451: 触发 RDG 的最低间隔成功检索次数（spaced_access_count >= 此值，默认 3）"),
+    "store_vfs.rdg_spaced_ref": (10, int, 1, 50, None,
+        "iter451: 间隔检索次数的归一化参考值（次数=此值时 gradient=1.0，默认 10）"),
+    "store_vfs.rdg_scale": (0.12, float, 0.0, 0.50, None,
+        "iter451: RDG 加成缩放系数（bonus = gradient × (1-R) × scale，默认 0.12）"),
+    "store_vfs.rdg_max_stability": (30.0, float, 1.0, 365.0, None,
+        "iter451: stability 高于此值不触发 RDG（已很稳固，默认 30.0 天）"),
+    "store_vfs.rdg_min_importance": (0.30, float, 0.0, 1.0, None,
+        "iter451: 触发 RDG 的最低 importance 阈值（默认 0.30）"),
 
     # ── iter434: Retrieval-Induced Forgetting (RIF) — 检索导致相关记忆被压制（Anderson et al. 1994）──
     # 认知科学依据：Anderson, Bjork & Bjork (1994) "Remembering can cause forgetting" —
@@ -2297,6 +2339,10 @@ _REGISTRY: dict = {
         "COLD chunk 的 oom_adj 增量（加速未来 kswapd 淘汰）"),
     "damon.max_actions_per_scan": (10, int, 1, 50, None,
         "每次 DAMON scan 最多执行的动作数（swap + mark + protect）"),
+    "damon.verified_ttl_days": (30, int, 7, 365, None,
+        "verified chunk 的 TTL（天）：超过此时间未被重新访问，verification_status 重置为 pending"),
+    "damon.verified_ttl_high_stability_days": (90, int, 14, 730, None,
+        "高稳定性 chunk（stability>=5.0）的 verified TTL（天），默认 90 天"),
 
     # ── sched_ext（迭代47）──
     "scheduler.ext_enabled": (True, bool, None, None, None,
@@ -2397,6 +2443,20 @@ _REGISTRY: dict = {
     # 修复（迭代138）：capacity < 70% 时，pages_low 每次向默认值(80)回弹 step_pct%
     #   恢复路径（step_pct=10%）：58→63→69→76→80（4个 autotune 周期，24小时）
     # 无需额外 sysctl：复用已有 autotune.step_pct 控制回弹步长
+
+    # ── Autotune Rollback Circuit Breaker（迭代494）──
+    # OS 类比：Linux TCP anti-windup + perf_event overflow circuit breaker
+    #   当控制回路本身产生负反馈（调参后指标持续恶化）时，断路并回滚到已知好状态。
+    #   anti-windup：积分项饱和时停止累积，防止过冲；
+    #   circuit breaker：连续 N 次恶化 → open（停止调参）+ rollback → half-open 试探 → close
+    "autotune.cb_enabled": (True, bool, None, None, None,
+        "是否启用 autotune 熔断回滚（迭代494：连续恶化时 open circuit + rollback 参数）"),
+    "autotune.cb_consecutive_bad": (3, int, 2, 10, None,
+        "连续多少次 autotune 后指标恶化才触发熔断（默认 3 次）"),
+    "autotune.cb_degrade_pct": (10, int, 5, 50, None,
+        "hit_rate 相对下降超过此百分比才判定为恶化（默认 10%，即 hit_rate 从 50% 跌到 45%）"),
+    "autotune.cb_open_hours": (24, int, 6, 168, None,
+        "熔断 open 状态持续时间（默认 24h，之后进入 half-open 试探）"),
 
     # ── DRR Fair Queuing（迭代50）──
     "retriever.drr_enabled": (True, bool, None, None, None,

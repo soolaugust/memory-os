@@ -135,7 +135,7 @@ class VFSItem:
             source_session=chunk_dict.get("source_session", "unknown"),
             scope=VFSScope.GLOBAL.value if project == "global" else VFSScope.PROJECT.value,
             tags=chunk_dict.get("tags", []) if isinstance(chunk_dict.get("tags"), list)
-                  else json.loads(chunk_dict.get("tags", "[]")),
+                  else (json.loads(chunk_dict["tags"]) if chunk_dict.get("tags") else []),
             project=project,
             content_hash=content_hash,
         )

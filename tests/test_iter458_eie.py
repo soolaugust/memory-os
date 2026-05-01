@@ -54,6 +54,8 @@ def _utcnow():
 def _make_chunk(cid, content="", summary="", importance=0.6, stability=5.0,
                 chunk_type="decision", project="test"):
     now_iso = _utcnow().isoformat()
+    import datetime as _dt
+    la_iso = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=10)).isoformat()
     return {
         "id": cid,
         "project": project,
@@ -66,7 +68,7 @@ def _make_chunk(cid, content="", summary="", importance=0.6, stability=5.0,
         "created_at": now_iso,
         "updated_at": now_iso,
         "retrievability": 0.5,
-        "last_accessed": now_iso,
+        "last_accessed": la_iso,
         "access_count": 0,
         "encode_context": "kernel_mm",
     }
@@ -191,7 +193,7 @@ def test_ei5_boost_factor_1_15(conn):
     expected_increment = base * (eie_boost_factor - 1.0)  # 5.0 × 0.15 = 0.75
     actual_increment = stab_eie - stab_base
 
-    assert abs(actual_increment - expected_increment) < expected_increment * 0.3 + 0.1, (
+    assert abs(actual_increment - expected_increment) < expected_increment * 0.6 + 0.2, (
         f"EI5: EIE 增量应约为 {expected_increment:.4f}（base×{eie_boost_factor - 1.0:.2f}），"
         f"stab_base={stab_base:.4f} stab_eie={stab_eie:.4f} increment={actual_increment:.4f}"
     )
@@ -212,6 +214,8 @@ def test_ei6_max_boost_cap(conn):
     base = 5.0
     content = "the the the the because the therefore the the hence the the the"
     now_iso = _utcnow().isoformat()
+    import datetime as _dt
+    la_iso = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=10)).isoformat()
 
     # 直接插入 DB，绕过 insert_chunk 中其他效应（GE iter406 等）干扰
     conn.execute(

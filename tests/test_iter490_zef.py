@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import tmpfs  # noqa
-from store_vfs import ensure_schema, apply_zeigarnik_effect
+from store_vfs import ensure_schema, apply_zeigarnik_effect_zef as apply_zeigarnik_effect
 import config
 
 

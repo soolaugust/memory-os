@@ -50,6 +50,8 @@ def _utcnow():
 def _insert_raw(conn, cid, project="test", importance=0.6, stability=5.0,
                 source_session="sess1"):
     now_iso = _utcnow().isoformat()
+    import datetime as _dt
+    la_iso = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=10)).isoformat()
     conn.execute(
         """INSERT OR REPLACE INTO memory_chunks
            (id, project, chunk_type, content, summary, importance, stability,
@@ -57,7 +59,7 @@ def _insert_raw(conn, cid, project="test", importance=0.6, stability=5.0,
             encode_context, session_type_history, source_session)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (cid, project, "observation", "content " + cid, "summary", importance, stability,
-         now_iso, now_iso, 0.5, now_iso, 0, "test_ctx", "coding", source_session)
+         now_iso, now_iso, 0.5, la_iso, 0, "test_ctx", "coding", source_session)
     )
     conn.commit()
 
@@ -203,6 +205,8 @@ def test_ud7_direct_function_boost(conn):
 def test_ud8_update_accessed_integration(conn):
     """UD8: update_accessed 批量访问 >= 2 个 chunk → UDP 触发，stability 提升。"""
     now_iso = _utcnow().isoformat()
+    import datetime as _dt
+    la_iso = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=10)).isoformat()
     for cid in ["ud8_a", "ud8_b", "ud8_c"]:
         conn.execute(
             """INSERT OR REPLACE INTO memory_chunks
@@ -211,7 +215,7 @@ def test_ud8_update_accessed_integration(conn):
                 encode_context, session_type_history, source_session)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (cid, "test", "observation", "content " + cid, "summary", 0.6, 5.0,
-             now_iso, now_iso, 0.5, now_iso, 0, "test_ctx", "coding", "sess_ud8")
+             now_iso, now_iso, 0.5, la_iso, 0, "test_ctx", "coding", "sess_ud8")
         )
     conn.commit()
 

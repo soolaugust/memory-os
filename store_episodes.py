@@ -235,26 +235,60 @@ def format_episodes_for_injection(episodes: list, max_chars: int = 300) -> str:
     """
     将情节列表格式化为可注入 context 的文本。
     OS 类比：ftrace 输出格式 — 紧凑但可读。
+
+    Freshness gate（迭代12）：
+      < 24h: 全文注入（高鲜度，完整上下文）
+      24h–7d: 只注入日期+简短摘要（中等鲜度，减少 token）
+      > 7d: 跳过（过期信息，信噪比太低）
+    OS 类比：Linux page age tiering — hot/warm/cold 分层，cold page 不预取。
     """
     if not episodes:
         return ""
+
+    import os as _os
+    from datetime import datetime, timezone, timedelta
+    _now = datetime.now(timezone.utc)
+    _24H = timedelta(hours=24)
+    _7D = timedelta(days=7)
 
     lines = ["【历史 Session 轨迹】"]
     total = len("【历史 Session 轨迹】")
 
     for ep in episodes:
-        ended = ep.get("ended_at", "")[:10]  # 只取日期
-        summary = ep.get("summary", "")[:100]
+        ended_str = ep.get("ended_at", "")
+        # 解析 episode 时间，计算 age
+        try:
+            _dt = datetime.fromisoformat(ended_str.replace("Z", "+00:00"))
+            if _dt.tzinfo is None:
+                _dt = _dt.replace(tzinfo=timezone.utc)
+            _age = _now - _dt
+        except Exception:
+            _age = timedelta(days=30)  # 解析失败视为很旧
+
+        # freshness gate: > 7天跳过
+        if _age > _7D:
+            continue
+
+        ended = ended_str[:10]  # 日期
+        summary = ep.get("summary", "")
         chunks = ep.get("chunks_created", 0)
         files = ep.get("files_modified", [])
 
-        line_parts = [f"[{ended}] {summary}"]
-        if chunks:
-            line_parts.append(f"+{chunks}知识")
-        if files:
-            import os
-            fnames = [os.path.basename(f) for f in files[:2]]
-            line_parts.append(" ".join(fnames))
+        if _age <= _24H:
+            # 热区：完整注入
+            summary_trunc = summary[:100]
+            line_parts = [f"[{ended}] {summary_trunc}"]
+            if chunks:
+                line_parts.append(f"+{chunks}知识")
+            if files:
+                fnames = [_os.path.basename(f) for f in files[:2]]
+                line_parts.append(" ".join(fnames))
+        else:
+            # 温区（24h–7d）：简短摘要（只取前40字）
+            summary_trunc = summary[:40]
+            line_parts = [f"[{ended}] {summary_trunc}"]
+            if chunks:
+                line_parts.append(f"+{chunks}知识")
 
         line = " · ".join(line_parts)
         if total + len(line) + 1 > max_chars:

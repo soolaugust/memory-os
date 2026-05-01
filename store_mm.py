@@ -1490,6 +1490,30 @@ def damon_scan(conn: sqlite3.Connection, project: str) -> dict:
         "dead": len(dead_ids),
     }
 
+    # ── Phase 1.4: Verified Status TTL（迭代493）──
+    # OS 类比：TLS 证书过期检查 — 定期验证 verified 状态是否仍在有效期内。
+    # verified chunk 豁免 Ebbinghaus 衰减，但 verified 本身不应永久有效：
+    #   TTL 到期后重置为 pending，再次使用会触发重新验证。
+    # 在 Ebbinghaus Phase 1.5 之前运行：过期 → pending → 下一步可被 Ebbinghaus 衰减。
+    try:
+        from store_vfs import expire_stale_verified as _expire_verified
+        _expire_verified(conn, project, max_expire=20)
+    except Exception:
+        pass  # TTL 过期失败不阻塞 DAMON
+
+    # ── Phase 1.5: Ebbinghaus Time-Decay（先于 COLD，避免双重惩罚）──
+    # 优先级协调：Ebbinghaus 基于时间的连续衰减（精确模型）>
+    #              DAMON COLD 基于 access_count=0 的粗粒度衰减（简化模型）
+    # 若 chunk 本轮已被 Ebbinghaus 衰减，当天跳过 DAMON COLD importance 惩罚。
+    # OS 类比：Linux DAMON DAMOS 动作有优先级（migrate > madvise > reclaim），
+    #   高优先级动作完成后低优先级动作跳过，避免 thundering herd 式惩罚叠加。
+    ebbinghaus_result = {"decayed": 0, "total_scanned": 0, "decayed_ids": set()}
+    try:
+        ebbinghaus_result = apply_ebbinghaus_decay(conn, project, max_chunks=50)
+    except Exception:
+        pass
+    _ebbinghaus_decayed_ids = ebbinghaus_result.get("decayed_ids", set())
+
     # ── Phase 2: DAMOS 动作 ──
     swapped_dead = 0
     marked_cold = 0
@@ -1506,6 +1530,8 @@ def damon_scan(conn: sqlite3.Connection, project: str) -> dict:
     # COLD → 标记 oom_adj + importance 衰减（加速未来 kswapd 淘汰）
     # iter105: 增加 importance decay — 零访问页面随时间降级，最终进入 stale reclaim 范围
     # OS 类比：DAMON DAMOS madvise(MADV_COLD) 后 page 不被 accessed bit 清零但降低 LRU 优先级
+    # iter470: 若已被 Ebbinghaus 衰减（更精确的时间模型），跳过 importance 惩罚部分
+    #   但仍更新 oom_adj（oom_adj 是 kswapd 淘汰优先级标记，独立于 importance）
     if cold_ids and action_count < max_actions:
         batch = cold_ids[:max(1, max_actions - action_count)]
         for cid in batch:
@@ -1516,12 +1542,19 @@ def damon_scan(conn: sqlite3.Connection, project: str) -> dict:
             if row:
                 current_adj, current_imp = row
                 if current_adj < cold_oom_delta:
-                    # importance 每次 COLD 扫描衰减 5%（最低到 0.5，保留基本可检索性）
-                    new_imp = max(0.5, round(current_imp * 0.95, 3))
-                    conn.execute(
-                        "UPDATE memory_chunks SET oom_adj = MAX(COALESCE(oom_adj, 0), ?), importance = ? WHERE id = ?",
-                        (cold_oom_delta, new_imp, cid),
-                    )
+                    if cid in _ebbinghaus_decayed_ids:
+                        # 本轮已被 Ebbinghaus 精确衰减 → 只更新 oom_adj，跳过 importance 惩罚
+                        conn.execute(
+                            "UPDATE memory_chunks SET oom_adj = MAX(COALESCE(oom_adj, 0), ?) WHERE id = ?",
+                            (cold_oom_delta, cid),
+                        )
+                    else:
+                        # importance 每次 COLD 扫描衰减 5%（最低到 0.5，保留基本可检索性）
+                        new_imp = max(0.5, round(current_imp * 0.95, 3))
+                        conn.execute(
+                            "UPDATE memory_chunks SET oom_adj = MAX(COALESCE(oom_adj, 0), ?), importance = ? WHERE id = ?",
+                            (cold_oom_delta, new_imp, cid),
+                        )
                     marked_cold += 1
                     action_count += 1
                     if action_count >= max_actions:
@@ -1553,11 +1586,30 @@ def damon_scan(conn: sqlite3.Connection, project: str) -> dict:
     except Exception:
         pass
 
+    # Phase 5: recall_traces TTL 清理 — 删除超过 30 天的旧 trace
+    # OS 类比：Linux journal commit → old journal blocks GC（不需要的历史日志主动回收）
+    # 防止 recall_traces 无限增长拖慢 Adaptive Citation Rate 的滑动窗口查询
+    _cleaned_traces = 0
+    try:
+        _TRACE_TTL_DAYS = 30
+        _trace_cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=_TRACE_TTL_DAYS)
+        ).isoformat()
+        _clean_result = conn.execute(
+            "DELETE FROM recall_traces WHERE project=? AND timestamp < ?",
+            (project, _trace_cutoff)
+        )
+        _cleaned_traces = _clean_result.rowcount
+    except Exception:
+        pass
+
     actions = {
         "swapped_dead": swapped_dead,
         "marked_cold": marked_cold,
         "protected_hot": protected_hot,
         "reminiscence_bumped": bump_result.get("bumped", 0),
+        "ebbinghaus_decayed": ebbinghaus_result.get("decayed", 0),
+        "traces_cleaned": _cleaned_traces,
     }
 
     duration_ms = (_time.time() - _t_start) * 1000
@@ -1582,6 +1634,247 @@ def damon_scan(conn: sqlite3.Connection, project: str) -> dict:
         "hot_threshold": hot_threshold,
         "duration_ms": round(duration_ms, 2),
     }
+
+# ── Ebbinghaus Time-Decay（迭代470）────────────────────────────
+
+def apply_ebbinghaus_decay(conn: sqlite3.Connection, project: str,
+                            max_chunks: int = 100) -> dict:
+    """
+    迭代470：Ebbinghaus Time-Decay — 基于遗忘曲线将 importance 持久化衰减。
+
+    OS 类比：Linux page aging clock — kswapd 定期将长时间未访问页降代；
+      DAMON dead_region → madvise(MADV_COLD) — 持久化降温，不等下次回收触发。
+
+    心理学：Ebbinghaus (1885) 遗忘曲线 R = e^(-t/S)
+      - t = 自上次访问以来经过的时间（天）
+      - S = stability（间隔重复稳定性，越高衰减越慢）
+      - stability 高的 chunk（高频引用、SM-2加强的）衰减极慢
+      - stability 低的 chunk（新写入、未被引用的）衰减快
+
+    设计决策：
+      - 虚拟衰减（scorer.py importance_with_decay）vs 持久化衰减（本函数）
+        虚拟衰减：查询时实时计算有效 importance，不写 DB——对检索友好但不影响淘汰
+        持久化衰减：写回 importance——影响 kswapd 淘汰评分、semantic 聚合、citation 统计
+        两者互补：本函数负责持久化，避免长期 zombie chunks（高 importance 但从不被引用）
+      - iter491 动态 cutoff：stability 越高保护期越长（高稳定 chunk 需要更长空闲才参与 decay）
+        stability < 2.0 → cutoff=0.5天（新 chunk 快速响应）
+        stability in [2.0, 5.0) → cutoff=1.0天（默认）
+        stability in [5.0, 10.0) → cutoff=3.0天（已稳定，保护期）
+        stability >= 10.0 → cutoff=7.0天（高度稳定，仅长期闲置才 decay）
+      - 上界保护：oom_adj < 0（pinned chunk）跳过衰减
+      - SKIP_CITATION_TYPES 跳过（系统记录不参与遗忘机制）
+      - iter492 max_chunks 自动缩放：总 chunk 数影响每次扫描配额
+
+    参数：
+      max_chunks — 单次最多衰减的 chunk 数（避免单次扫描阻塞）；
+                   iter492: 传入值为上限，实际值按项目规模自动缩放
+
+    返回：
+      {"decayed": N, "total_scanned": M}
+    """
+    import math
+
+    # 非知识类 chunk 不参与时间衰减
+    _SKIP_TYPES = frozenset({
+        "task_state", "prompt_context", "conversation_summary",
+        "session_summary", "goal",
+    })
+
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+
+    # ── iter491: 动态 cutoff — stability-aware 扫描保护期 ─────────────────────
+    # OS 类比：Linux MGLRU generation-aware reclaim horizon —
+    #   每代（generation）有不同的 "min_age" 保护期，最年轻代（gen=0，刚被访问）
+    #   至少需要经过 1 个 aging cycle 才会被扫描，高代（gen=N-1）立即可被回收。
+    # 心理学：SuperMemo SM-2 — 高 stability（多次成功复习加强的知识）的复习间隔
+    #   远大于低 stability（新知识或未被引用的知识）。同样，decay 扫描间隔也应随
+    #   stability 线性增长，避免对稳定知识频繁执行无意义的 decay 计算。
+    # 实现：通过多重 WHERE 子句分组，筛选出"已超过 stability 对应 cutoff"的 chunk。
+    # 注意：SQLite 不支持动态行级 cutoff，采用分段 UNION ALL 查询或 Python 过滤：
+    #   此处用 Python 过滤（先宽口查询，在循环中按 stability 动态跳过）以保持代码简洁。
+    # 宽口 cutoff = 0.5 天（覆盖所有 stability 级别的最小保护期）
+    _CUTOFF_WIDE = 0.5     # 宽口：新 chunk(stability<2.0) 的最小保护期
+    _CUTOFF_MID = 1.0      # 默认 stability ∈ [2.0, 5.0)
+    _CUTOFF_HIGH = 3.0     # stability ∈ [5.0, 10.0)
+    _CUTOFF_VHIGH = 7.0    # stability >= 10.0
+
+    cutoff_wide = (now - timedelta(days=_CUTOFF_WIDE)).isoformat()
+
+    # ── iter492: max_chunks 自动缩放 ──────────────────────────────────────────
+    # OS 类比：Linux kswapd scan_control.nr_to_scan — 根据内存压力等级动态调整
+    #   单次 LRU 扫描的页面数量。压力越大扫描越多；内存充裕时扫描更少（降低 overhead）。
+    # 心理学：工作记忆容量适应（Cowan 2001）— 大项目有更多知识需要维护，
+    #   但每次扫描也需要控制计算成本，否则 kswapd 响应时间增长。
+    # 公式：
+    #   total <= 50  → scan_max = total（全扫，小项目不遗漏）
+    #   total <= 200 → scan_max = max(50, total // 3)
+    #   total > 200  → scan_max = max(100, min(max_chunks, total // 5))
+    try:
+        total_chunks = conn.execute(
+            "SELECT COUNT(*) FROM memory_chunks WHERE project=? AND importance > 0.05",
+            (project,)
+        ).fetchone()[0] or 0
+    except Exception:
+        total_chunks = 0
+
+    if total_chunks <= 50:
+        effective_max = min(max_chunks, total_chunks) if total_chunks > 0 else max_chunks
+    elif total_chunks <= 200:
+        effective_max = max(50, min(max_chunks, total_chunks // 3))
+    else:
+        effective_max = max(100, min(max_chunks, total_chunks // 5))
+
+    # iter486: MGLRU-style 分代扫描 — 优先 decay 冷 chunk（lru_gen 大 = 更冷）。
+    # OS 类比：Linux MGLRU kswapd — 总是从最老代（gen=N-1）开始 reclaim，
+    #   热页（gen=0）最后处理。同样地，lru_gen 大的 chunk 最先被 Ebbinghaus 衰减。
+    # 心理学：记忆巩固层次（Squire 1992）— 长期未激活（冷）的记忆优先进入遗忘，
+    #   而工作记忆中频繁激活（热）的记忆即使超过1天也应最后处理。
+    # 双重排序：先按 lru_gen DESC（冷优先），再按 last_accessed ASC（同代内按时序）
+    # iter491: 用宽口 cutoff（0.5天），Python 层按 stability 动态过滤
+    rows = conn.execute(
+        """SELECT id, importance, stability, last_accessed, chunk_type, confidence_score,
+                  COALESCE(verification_status, 'pending'),
+                  COALESCE(oom_adj, 0)
+           FROM memory_chunks
+           WHERE project=?
+             AND last_accessed < ?
+             AND COALESCE(oom_adj, 0) >= 0
+             AND importance > 0.05
+           ORDER BY COALESCE(lru_gen, 0) DESC, last_accessed ASC
+           LIMIT ?""",
+        (project, cutoff_wide, effective_max * 3)  # 取 3× 供 iter491 Python 过滤后仍有足够候选
+    ).fetchall()
+
+    # 高稳定性 chunk 的下界保护（iter470）
+    # 心理学：知识结晶化（crystallized knowledge, Cattell 1971）——
+    #   高频使用、高稳定性的陈述性知识不会轻易遗忘，即使暂时不激活
+    # OS 类比：Linux huge page lock — mlock() 的高稳定性内存页不被 swap 降到物理限制以下
+    # 实现：stability >= STABILITY_FLOOR_THRESHOLD → 下界提高为 STABILITY_HIGH_FLOOR
+    _STABILITY_FLOOR_THRESHOLD = 5.0   # stability >= 5：历史证明重要
+    _STABILITY_HIGH_FLOOR = 0.10       # 高稳定 chunk 的 importance 下界（高于全局 0.05）
+    _GLOBAL_FLOOR = 0.05               # 普通 chunk 下界
+
+    # iter478: confidence 衰减常数 — 衰减速率为 importance 的一半
+    # 心理学：知识可信度（epistemological confidence）衰减比记忆强度（importance）慢；
+    #   未被验证的记忆可信度随时间降低（source monitoring theory, Johnson 1993）
+    # OS 类比：Linux ECC memory status — 长期未读取验证的 page 的 ECC 状态降为 unknown
+    # iter488: per-type confidence decay factor
+    # 心理学：不同类型知识的认知可信度衰减速率不同
+    #   - reasoning_chain/procedure：演绎推理步骤，可能过时（FACTOR=1.5 — 较快）
+    #   - design_constraint：规范性知识，不随时间失效（FACTOR=6.0 — 极慢）
+    #   - 其余：默认 2.0（decision, decision_log, episodic 等）
+    # 注意：task_state/prompt_context 在 _SKIP_TYPES 中，不参与 decay，故不设 fast factor
+    # OS 类比：Linux page type hot/cold tier — 不同类型的内存（anonymous vs file-backed）
+    #   有不同的 swap out 策略；规范性知识如 tmpfs（不 swap），时效性知识如 anonymous（优先 swap）
+    _CONFIDENCE_DECAY_FACTOR_DEFAULT = 2.0
+    _CONFIDENCE_DECAY_FACTOR_FAST = 1.5   # reasoning_chain/procedure — 时效推理衰减较快
+    _CONFIDENCE_DECAY_FACTOR_SLOW = 6.0   # design_constraint — 规范知识极慢衰减
+    _CONFIDENCE_FAST_TYPES = frozenset({"reasoning_chain", "procedure"})
+    _CONFIDENCE_SLOW_TYPES = frozenset({"design_constraint"})
+    _MIN_CONFIDENCE = 0.10           # confidence 下界
+
+    decayed = 0
+    decayed_ids: set = set()
+    # iter492: 实际处理上限（Python 层截断，限制写入次数）
+    processed = 0
+    for cid, imp, stab, la, ctype, conf, vstatus, oom_adj in rows:
+        if processed >= effective_max:
+            break
+        if (ctype or "") in _SKIP_TYPES:
+            continue
+        # iter484: verified chunk 豁免 Ebbinghaus decay
+        # 心理学：外部验证的知识（verified by external source/human）不受遗忘影响；
+        #   Bartlett (1932) schema theory — 与 schema 一致且被验证的知识异常稳定。
+        # OS 类比：Linux page pinned via get_user_pages() — 被外部 DMA 锁定的页不参与 reclaim。
+        if vstatus == "verified":
+            continue
+        if not la or not imp or not stab:
+            continue
+
+        try:
+            la_dt = datetime.fromisoformat(la.replace("Z", "+00:00"))
+            delta_days = (now - la_dt).total_seconds() / 86400.0
+        except Exception:
+            continue
+
+        # ── iter491: stability-aware 动态 cutoff ──────────────────────────────
+        # 根据 chunk 的 stability 确定其最小保护期，未达到保护期的 chunk 跳过
+        # OS 类比：Linux MGLRU min_age — 每代页面有最小驻留时间，防止抖动（thrashing）
+        # 心理学：SuperMemo SM-2 — stability 高的记忆复习间隔更长；
+        #   类似地，decay 检查间隔也应随 stability 成比例扩大。
+        effective_stab_val = float(stab or 1.0)
+        if effective_stab_val >= 10.0:
+            required_days = _CUTOFF_VHIGH     # 7天
+        elif effective_stab_val >= 5.0:
+            required_days = _CUTOFF_HIGH      # 3天
+        elif effective_stab_val >= 2.0:
+            required_days = _CUTOFF_MID       # 1天
+        else:
+            required_days = _CUTOFF_WIDE      # 0.5天
+
+        if delta_days < required_days:
+            continue  # 未达到 stability 对应的保护期，跳过
+
+        processed += 1
+
+        # 根据 stability 选择下界：高稳定 chunk 保护下界
+        # iter491: effective_stab_val 已在动态 cutoff 中计算，直接复用
+        effective_stab = max(0.1, effective_stab_val)
+        floor = _STABILITY_HIGH_FLOOR if effective_stab >= _STABILITY_FLOOR_THRESHOLD else _GLOBAL_FLOOR
+
+        # Ebbinghaus: R = e^(-t/S), 新 importance = old × R
+        decay_factor = math.exp(-delta_days / effective_stab)
+        new_imp = max(floor, float(imp) * decay_factor)
+
+        # iter478/iter488: confidence_score 时间衰减（per-type factor）
+        # 公式：new_conf = old × exp(-t / (S × TYPE_CONFIDENCE_FACTOR))
+        # iter488: 时效性知识（task_state/prompt_context）衰减更快，规范知识极慢
+        old_conf = float(conf or 0.7)
+        _ctype_factor = (
+            _CONFIDENCE_DECAY_FACTOR_FAST if (ctype or "") in _CONFIDENCE_FAST_TYPES
+            else _CONFIDENCE_DECAY_FACTOR_SLOW if (ctype or "") in _CONFIDENCE_SLOW_TYPES
+            else _CONFIDENCE_DECAY_FACTOR_DEFAULT
+        )
+        conf_decay_factor = math.exp(-delta_days / (effective_stab * _ctype_factor))
+        new_conf = max(_MIN_CONFIDENCE, old_conf * conf_decay_factor)
+
+        imp_changed = float(imp) - new_imp >= 0.005
+        conf_changed = old_conf - new_conf >= 0.003
+
+        # 任一字段有实质变化才写入
+        if not imp_changed and not conf_changed:
+            continue
+
+        # ── B11: MGLRU-style OOM adj bump on low importance ───────────────
+        # OS 类比：Linux MGLRU kswapd — page 落入最老代（gen=0，可回收）时
+        #   oom_score 自动升高，使其在下次内存压力时优先被驱逐。
+        # 人类记忆：Atkinson-Shiffrin (1968) 记忆衰退模型 — importance 持续
+        #   低于阈值的记忆进入"遗忘候选"状态，不再主动干扰工作记忆。
+        # 机制：new_imp < 0.1 且 oom_adj < 300 → oom_adj += 300（标记淘汰候选）
+        #   oom_adj 已 >= 300 则不重复累加（幂等性）
+        #   豁免：design_constraint（架构约束不参与自动淘汰）
+        _oom_adj_bump = 0
+        if (new_imp < 0.1
+                and (ctype or "") != "design_constraint"
+                and (oom_adj or 0) < 300):
+            _oom_adj_bump = 300 - (oom_adj or 0)  # bump 到 300
+            conn.execute(
+                "UPDATE memory_chunks SET oom_adj=? WHERE id=?",
+                ((oom_adj or 0) + _oom_adj_bump, cid)
+            )
+
+        conn.execute(
+            "UPDATE memory_chunks SET importance=?, confidence_score=?, updated_at=? WHERE id=?",
+            (round(new_imp, 4) if imp_changed else float(imp),
+             round(new_conf, 4) if conf_changed else old_conf,
+             now_iso, cid)
+        )
+        decayed += 1
+        decayed_ids.add(cid)
+
+    return {"decayed": decayed, "total_scanned": len(rows), "decayed_ids": decayed_ids}
+
 
 # ── MGLRU — Multi-Gen LRU（迭代44）────────────────────────────
 
@@ -2722,6 +3015,42 @@ def autotune(conn: sqlite3.Connection, project: str) -> dict:
         except Exception:
             pass
 
+    # ── iter494: Circuit Breaker — 连续恶化检测 ──
+    # OS 类比：TCP anti-windup + perf_event overflow circuit breaker
+    #   当 autotune 控制回路连续 N 次调整后核心指标持续恶化（hit_rate 下降），
+    #   断路（open）暂停调参 + 回滚到最近"好参数快照"；
+    #   经 cb_open_hours 后进入 half-open，试探一次；若成功则关闭熔断。
+    cb_enabled = _cfg("autotune.cb_enabled")
+    if cb_enabled and last_run:
+        try:
+            circuit = last_run.get("circuit", {})
+            cb_state = circuit.get("state", "closed")  # closed / open / half_open
+            cb_consecutive = circuit.get("consecutive_bad", 0)
+            cb_max = _cfg("autotune.cb_consecutive_bad")
+            cb_degrade_pct = _cfg("autotune.cb_degrade_pct") / 100.0
+            cb_open_hours = _cfg("autotune.cb_open_hours")
+
+            if cb_state == "open":
+                # 检查是否到了 half-open 窗口
+                open_since_str = circuit.get("open_since", "")
+                should_half_open = False
+                if open_since_str:
+                    open_since = datetime.fromisoformat(open_since_str)
+                    if open_since.tzinfo is None:
+                        open_since = open_since.replace(tzinfo=timezone.utc)
+                    hours_open = (datetime.now(timezone.utc) - open_since).total_seconds() / 3600
+                    should_half_open = hours_open >= cb_open_hours
+
+                if not should_half_open:
+                    hours_open = circuit.get("hours_open", 0)
+                    return {"tuned": False, "adjustments": [], "stats": {},
+                            "skipped_reason": f"circuit_open (consecutive_bad={cb_consecutive}, "
+                                              f"open_since={open_since_str[:16]})"}
+                # else: 进入 half-open，允许本次执行，但 circuit 状态记为 half_open
+                circuit["state"] = "half_open"
+        except Exception:
+            pass
+
     # ── 采集统计数据 ──
     min_traces = _cfg("autotune.min_traces")
     step_pct = _cfg("autotune.step_pct") / 100.0
@@ -2945,13 +3274,89 @@ def autotune(conn: sqlite3.Connection, project: str) -> dict:
             "reason": f"iter137 quota={current_quota}>{chunk_quota_max}(chunk_quota_max) → clamp down (uncapped autotune inflation fix)",
         })
 
-    _autotune_save_state(project, stats, adjustments)
+    # ── iter494: Circuit Breaker — 调整后更新 circuit 状态 ──
+    # 比较本次 hit_rate 和上次 hit_rate，决定连续恶化计数
+    circuit_update = {}
+    if cb_enabled:
+        try:
+            prev_circuit = (last_run or {}).get("circuit", {}) if last_run else {}
+            prev_hit_rate = (last_run or {}).get("stats", {}).get("hit_rate_pct", None) if last_run else None
+            curr_hit_rate = stats.get("hit_rate_pct", None)
+            cb_degrade_pct = _cfg("autotune.cb_degrade_pct") / 100.0
+            cb_max = _cfg("autotune.cb_consecutive_bad")
+            cb_open_hours = _cfg("autotune.cb_open_hours")
+            prev_cb_state = prev_circuit.get("state", "closed")
+            prev_consecutive = prev_circuit.get("consecutive_bad", 0)
+
+            # 判断本次是否"恶化"：hit_rate 相对下降 > degrade_pct
+            is_bad = False
+            if (prev_hit_rate is not None and curr_hit_rate is not None
+                    and prev_hit_rate > 0 and len(adjustments) > 0):
+                # 只在有调整的情况下才判定恶化（无调整时不计入）
+                drop = (prev_hit_rate - curr_hit_rate) / prev_hit_rate
+                is_bad = drop > cb_degrade_pct
+
+            if prev_cb_state == "half_open":
+                if is_bad:
+                    # half_open 试探失败 → 重新 open
+                    circuit_update = {
+                        "state": "open",
+                        "consecutive_bad": prev_consecutive + 1,
+                        "open_since": datetime.now(timezone.utc).isoformat(),
+                        "prev_good_snapshot": prev_circuit.get("prev_good_snapshot", {}),
+                    }
+                else:
+                    # half_open 试探成功 → close
+                    circuit_update = {"state": "closed", "consecutive_bad": 0}
+            elif is_bad:
+                new_consecutive = prev_consecutive + 1
+                if new_consecutive >= cb_max:
+                    # 触发熔断：rollback + open
+                    snapshot = prev_circuit.get("param_snapshot", {})
+                    rolled = _autotune_rollback_params(conn, project, snapshot)
+                    circuit_update = {
+                        "state": "open",
+                        "consecutive_bad": new_consecutive,
+                        "open_since": datetime.now(timezone.utc).isoformat(),
+                        "prev_good_snapshot": snapshot,
+                        "rollback": rolled,
+                    }
+                    # 在 adjustments 里记录回滚事件
+                    for r in rolled:
+                        adjustments.append({
+                            "key": r["key"], "old": r["from"], "new": r["to"],
+                            "reason": f"iter494 circuit_open: rollback after {new_consecutive} consecutive bad adjustments",
+                        })
+                else:
+                    # 累积恶化计数，但尚未熔断
+                    circuit_update = {
+                        "state": "closed",
+                        "consecutive_bad": new_consecutive,
+                        "param_snapshot": {a["key"]: a["old"] for a in adjustments},
+                    }
+            else:
+                # 指标没有恶化（好调整）— 更新快照，重置计数
+                circuit_update = {
+                    "state": "closed",
+                    "consecutive_bad": 0,
+                    "param_snapshot": {a["key"]: a["old"] for a in adjustments} if adjustments else prev_circuit.get("param_snapshot", {}),
+                }
+        except Exception:
+            circuit_update = {}
+
+    _autotune_save_state(project, stats, adjustments, circuit=circuit_update or None)
+
+    cb_info = {}
+    if circuit_update:
+        cb_info = {"circuit_state": circuit_update.get("state", "closed"),
+                   "consecutive_bad": circuit_update.get("consecutive_bad", 0)}
 
     return {
         "tuned": len(adjustments) > 0,
         "adjustments": adjustments,
         "stats": stats,
         "skipped_reason": "" if adjustments else "no adjustment needed",
+        **cb_info,
     }
 
 
@@ -2967,8 +3372,9 @@ def _autotune_load_state(project: str) -> Optional[dict]:
     return None
 
 
-def _autotune_save_state(project: str, stats: dict, adjustments: list) -> None:
-    """持久化 autotune 状态。"""
+def _autotune_save_state(project: str, stats: dict, adjustments: list,
+                         circuit: Optional[dict] = None) -> None:
+    """持久化 autotune 状态。iter494：增加 circuit 字段。"""
     try:
         MEMORY_OS_DIR.mkdir(parents=True, exist_ok=True)
         data = {}
@@ -2979,17 +3385,47 @@ def _autotune_save_state(project: str, stats: dict, adjustments: list) -> None:
                 data = {}
         if not isinstance(data, dict):
             data = {}
-        data[project] = {
+        entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "stats": stats,
             "adjustments": [a["key"] for a in adjustments],
             "adjustment_count": len(adjustments),
         }
+        if circuit is not None:
+            entry["circuit"] = circuit
+        data[project] = entry
         _AUTOTUNE_STATE_FILE.write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
     except Exception:
         pass
+
+
+def _autotune_rollback_params(conn: sqlite3.Connection, project: str,
+                               snapshot: dict) -> list:
+    """
+    iter494：将 per-project sysctl 回滚到 snapshot 中记录的值。
+    OS 类比：git revert — 将文件系统恢复到已知好提交。
+
+    参数：
+      snapshot — {key: value} 调整前各参数的值
+    返回：回滚的参数列表 [{key, from, to}]
+    """
+    try:
+        from config import sysctl_set, get as _cfg
+    except Exception:
+        return []
+
+    rolled = []
+    for key, old_val in snapshot.items():
+        try:
+            current = _cfg(key, project=project)
+            if current != old_val:
+                sysctl_set(key, old_val, project=project)
+                rolled.append({"key": key, "from": current, "to": old_val})
+        except Exception:
+            pass
+    return rolled
 
 # ── 迭代55：Context Pressure Governor ──────────────────────────────
 #

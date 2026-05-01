@@ -75,9 +75,17 @@ def _load_working_set_from_checkpoint(project: str) -> tuple:
                 "reasoning_chain": "[推理]",
                 "conversation_summary": "[摘要]",
                 "excluded_path": "[排除]",
+                "design_constraint": "⚠️ [约束]",
             }
             scored = []
             for c in ckpt["chunks"]:
+                # 迭代14: CRIU restore 也应用 WORKING_SET_TYPES 过滤
+                # 原问题：checkpoint 包含 causal_chain（bug修复记录）被注入
+                # causal_chain 是因果追踪，对新 session 价值低（已修复的 bug 更是噪音）
+                # 设计原则：CRIU 路径不应绕过 working set 类型过滤
+                # OS 类比：CRIU restore 只恢复 mlock 的关键内存段，不恢复匿名 dirty page
+                if c.get("chunk_type") not in WORKING_SET_TYPES:
+                    continue
                 # 用 working_set_score + restore_boost 评分
                 base_score = _unified_ws_score(c["importance"], c["last_accessed"])
                 score = base_score + restore_boost  # checkpoint 命中加权
@@ -681,22 +689,35 @@ def main():
         from net.agent_notify import consume_pending_notifications
         _notifs = consume_pending_notifications(_session_id, limit=3)
         if _notifs:
-            lines.append("【跨Agent知识同步】")
+            # 迭代13: 信噪比过滤 — 只注入有实质内容的跨Agent知识
+            # 原问题："+12个chunk" 是纯计数，Claude 无法从数字推导出任何知识
+            # 新策略：只注入有 decisions/constraints 的通知，且带摘要
+            # OS 类比：inotify IN_CLOSE_WRITE 过滤 — 只在文件真正写完时通知，
+            #   忽略 IN_ACCESS（只读）事件，减少无意义 wake-up
+            _substantive = []
             for _n in _notifs:
-                _proj = _n.get("project", "?")
                 _stats = _n.get("stats", {})
                 _d = _stats.get("decisions", 0)
                 _c = _stats.get("constraints", 0)
-                _total = _stats.get("chunks", 0)
-                _summary = f"+{_total}个chunk"
-                if _d:
-                    _summary += f"（{_d}决策"
+                _summary_chunks = _n.get("top_summaries", [])  # 实质摘要列表
+                # 只有 decisions 或 constraints 时才注入（纯 chunk 数量没有召回价值）
+                if _d > 0 or _c > 0:
+                    _proj = _n.get("project", "?")
+                    _label = []
+                    if _d:
+                        _label.append(f"{_d}决策")
                     if _c:
-                        _summary += f" {_c}约束"
-                    _summary += "）"
-                lines.append(f"- {_proj}: {_summary}")
-            # 重新组装（已有 context_text 可能不含新内容）
-            context_text = "\n".join(lines)
+                        _label.append(f"{_c}约束")
+                    _label_str = "、".join(_label)
+                    _substantive.append(f"- {_proj}: 新增{_label_str}")
+                    # 附加最重要的一条摘要
+                    if _summary_chunks:
+                        _substantive.append(f"  最新: {_summary_chunks[0][:60]}")
+            if _substantive:
+                lines.append("【跨Agent知识同步】")
+                lines.extend(_substantive)
+                # 重新组装（已有 context_text 可能不含新内容）
+                context_text = "\n".join(lines)
     except Exception:
         pass  # IPC 消费失败不影响 SessionStart
 
@@ -926,6 +947,43 @@ def main():
         _ipc_conn.close()
     except Exception:
         pass  # IPC 失败不影响主流程
+
+    # ── 语义记忆层预热（跨项目通用知识，__semantic__ project）──────────────────
+    # OS 类比：shared library mmap — 启动时将 libc 等共享库映射入地址空间，
+    # 所有 project 共享同一份语义记忆页，不重复占用 per-project token budget。
+    # 只加载 importance 最高的 top-K，严格控制 token 开销。
+    try:
+        _sem_conn = open_db()
+        ensure_schema(_sem_conn)
+        _sem_rows = _sem_conn.execute("""
+            SELECT summary, content, importance, tags
+            FROM memory_chunks
+            WHERE project='__semantic__'
+              AND chunk_type='semantic_memory'
+              AND COALESCE(oom_adj, 0) <= 0
+            ORDER BY importance DESC
+            LIMIT 5
+        """).fetchall()
+        _sem_conn.close()
+
+        if _sem_rows:
+            _sem_lines = ["【跨项目语义记忆（通用知识）】"]
+            for _sr in _sem_rows:
+                _s_summary, _s_content, _s_imp, _s_tags = _sr
+                _projects = ""
+                try:
+                    _projects = " [来源: " + ", ".join(json.loads(_s_tags or "[]")[:3]) + "]"
+                except Exception:
+                    pass
+                _sem_lines.append(f"- {_s_summary}{_projects}")
+            _sem_text = "\n".join(_sem_lines)
+            # 插入在 context_text 前面（高优先级，类比 mlock 常驻页）
+            _sem_budget = 400  # 严格限制语义层 token 开销
+            if len(_sem_text) > _sem_budget:
+                _sem_text = _sem_text[:_sem_budget] + "…"
+            context_text = _sem_text + "\n\n" + context_text
+    except Exception:
+        pass  # 语义层预热失败不影响 SessionStart
 
     output = {
         "hookSpecificOutput": {

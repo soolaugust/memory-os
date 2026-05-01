@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import tmpfs  # noqa
-from store_vfs import ensure_schema, apply_encoding_variability
+from store_vfs import ensure_schema, apply_encoding_variability_eve as apply_encoding_variability
 import config
 
 

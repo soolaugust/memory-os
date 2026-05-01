@@ -30,7 +30,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import tmpfs  # noqa
 
 from store_vfs import ensure_schema, update_accessed
-from store import insert_chunk
 import config
 
 
@@ -43,32 +42,24 @@ def conn():
     c.close()
 
 
-def _make_chunk(cid, summary="test chunk", last_accessed_ago_secs=0,
-                stability=2.0, project="test"):
+def _insert_raw(conn, cid, stability=2.0, last_accessed_ago_secs=0, project="test"):
+    """直接 SQL 插入，bypass insert_chunk 写入效应，只测 reconsolidation window 逻辑。"""
     now = datetime.now(timezone.utc)
     la = (now - timedelta(seconds=last_accessed_ago_secs)).isoformat()
     now_iso = now.isoformat()
-    return {
-        "id": cid,
-        "created_at": now_iso,
-        "updated_at": now_iso,
-        "project": project,
-        "source_session": "s1",
-        "chunk_type": "decision",
-        "info_class": "semantic",
-        "content": summary,
-        "summary": summary,
-        "tags": [],
-        "importance": 0.8,
-        "retrievability": 0.9,
-        "last_accessed": la,
-        "access_count": 2,
-        "oom_adj": 0,
-        "lru_gen": 0,
-        "stability": stability,
-        "raw_snippet": "",
-        "encoding_context": {},
-    }
+    conn.execute("""
+        INSERT OR REPLACE INTO memory_chunks
+            (id, created_at, updated_at, project, source_session,
+             chunk_type, info_class, content, summary, tags,
+             importance, retrievability, last_accessed, access_count,
+             oom_adj, lru_gen, stability, raw_snippet, encoding_context)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (cid, now_iso, now_iso, project, "s1",
+          "decision", "semantic",
+          f"test chunk {cid}", f"test chunk {cid}", "[]",
+          0.8, 0.9, la, 2,
+          0, 0, stability, "", "{}"))
+    conn.commit()
 
 
 def _get_stability(conn, cid: str) -> float:
@@ -80,17 +71,11 @@ def _get_stability(conn, cid: str) -> float:
 
 def test_rw1_short_gap_no_gain(conn):
     """gap < 1hr → SM-2 quality=3（stability × 1.0）。"""
-    # 30 seconds ago — within short_gap_hours=1hr
-    chunk = _make_chunk("rw1", last_accessed_ago_secs=30, stability=2.0)
-    insert_chunk(conn, chunk)
-    conn.commit()
-
+    _insert_raw(conn, "rw1", last_accessed_ago_secs=30, stability=2.0)
     stab_before = _get_stability(conn, "rw1")
-    update_accessed(conn, ["rw1"])
+    update_accessed(conn, ["rw1"], _sm2_only=True)
     conn.commit()
-
     stab = _get_stability(conn, "rw1")
-    # quality=3 → factor=1.0 → stability unchanged
     ratio = stab / stab_before if stab_before else 0
     assert abs(ratio - 1.0) < 0.05, \
         f"短间隔（30s）质量=3，stability ratio 应 ≈ 1.0，got ratio={ratio:.4f}"
@@ -100,17 +85,11 @@ def test_rw1_short_gap_no_gain(conn):
 
 def test_rw2_medium_gap_light_boost(conn):
     """1hr <= gap < 24hr → SM-2 quality=4（stability × 1.1）。"""
-    # 6 hours ago
-    chunk = _make_chunk("rw2", last_accessed_ago_secs=6*3600, stability=2.0)
-    insert_chunk(conn, chunk)
-    conn.commit()
-
+    _insert_raw(conn, "rw2", last_accessed_ago_secs=6*3600, stability=2.0)
     stab_before = _get_stability(conn, "rw2")
-    update_accessed(conn, ["rw2"])
+    update_accessed(conn, ["rw2"], _sm2_only=True)
     conn.commit()
-
     stab = _get_stability(conn, "rw2")
-    # quality=4 → factor=1.1
     ratio = stab / stab_before if stab_before else 0
     assert abs(ratio - 1.1) < 0.1, \
         f"中间隔（6hr）质量=4，stability ratio 应 ≈ 1.1，got ratio={ratio:.4f}"
@@ -120,17 +99,11 @@ def test_rw2_medium_gap_light_boost(conn):
 
 def test_rw3_long_gap_max_boost(conn):
     """gap >= 24hr → SM-2 quality=5（stability × 1.2）。"""
-    # 3 days ago
-    chunk = _make_chunk("rw3", last_accessed_ago_secs=3*86400, stability=2.0)
-    insert_chunk(conn, chunk)
-    conn.commit()
-
+    _insert_raw(conn, "rw3", last_accessed_ago_secs=3*86400, stability=2.0)
     stab_before = _get_stability(conn, "rw3")
-    update_accessed(conn, ["rw3"])
+    update_accessed(conn, ["rw3"], _sm2_only=True)
     conn.commit()
-
     stab = _get_stability(conn, "rw3")
-    # quality=5 → factor=1.2
     ratio = stab / stab_before if stab_before else 0
     assert abs(ratio - 1.2) < 0.1, \
         f"长间隔（3天）质量=5，stability ratio 应 ≈ 1.2，got ratio={ratio:.4f}"
@@ -140,17 +113,11 @@ def test_rw3_long_gap_max_boost(conn):
 
 def test_rw4_explicit_quality_overrides_recon(conn):
     """显式 recall_quality=3 优先于再巩固窗口推断。"""
-    # gap >= 24hr (would give quality=5), but explicit quality=3 → ×1.0
-    chunk = _make_chunk("rw4", last_accessed_ago_secs=3*86400, stability=2.0)
-    insert_chunk(conn, chunk)
-    conn.commit()
-
+    _insert_raw(conn, "rw4", last_accessed_ago_secs=3*86400, stability=2.0)
     stab_before = _get_stability(conn, "rw4")
-    update_accessed(conn, ["rw4"], recall_quality=3)  # explicit quality=3
+    update_accessed(conn, ["rw4"], recall_quality=3, _sm2_only=True)
     conn.commit()
-
     stab = _get_stability(conn, "rw4")
-    # explicit quality=3 → factor=1.0 → stability unchanged
     ratio = stab / stab_before if stab_before else 0
     assert abs(ratio - 1.0) < 0.05, \
         f"显式 quality=3 优先，stability ratio 应不变，got ratio={ratio:.4f}"
@@ -160,18 +127,9 @@ def test_rw4_explicit_quality_overrides_recon(conn):
 
 def test_rw5_disabled_recon_fallback_quality4(conn, monkeypatch):
     """recon.enabled=False → 回退到固定 quality=4（stability × 1.1）。"""
-    monkeypatch.setenv("MEMORY_OS_RECON_ENABLED", "false")
-    import importlib
-    importlib.reload(config)  # reload to pick up env var (if config uses env)
-
-    chunk = _make_chunk("rw5", last_accessed_ago_secs=3*86400, stability=2.0)
-    insert_chunk(conn, chunk)
-    conn.commit()
-
+    _insert_raw(conn, "rw5", last_accessed_ago_secs=3*86400, stability=2.0)
     stab_before = _get_stability(conn, "rw5")
 
-    # When recon disabled: fixed quality=4 → ×1.1
-    # We test by patching config.get for this key
     original_get = config.get
     def patched_get(key, project=None):
         if key == "recon.enabled":
@@ -180,15 +138,10 @@ def test_rw5_disabled_recon_fallback_quality4(conn, monkeypatch):
 
     import unittest.mock as mock
     with mock.patch.object(config, 'get', side_effect=patched_get):
-        import importlib as _il
-        import store_vfs as _svfs
-        # Reload store_vfs to use patched config
-        update_accessed(conn, ["rw5"])
+        update_accessed(conn, ["rw5"], _sm2_only=True)
     conn.commit()
 
     stab = _get_stability(conn, "rw5")
-    # With recon disabled: quality=4 → ×1.1
-    # Key constraint: ratio should be ≈ 1.1 (not 1.2 which would be quality=5 with gap=3days)
     ratio = stab / stab_before if stab_before else 0
     assert abs(ratio - 1.1) < 0.1, \
         f"禁用 recon 时 quality=4 fallback，ratio 应 ≈ 1.1，got ratio={ratio:.4f}"
@@ -198,35 +151,11 @@ def test_rw5_disabled_recon_fallback_quality4(conn, monkeypatch):
 
 def test_rw6_null_last_accessed_safe_default(conn):
     """last_accessed=None（新 chunk）→ 安全退化 quality=4（×1.1）。"""
-    # Insert chunk with NULL last_accessed
-    now_iso = datetime.now(timezone.utc).isoformat()
-    c = {
-        "id": "rw6",
-        "created_at": now_iso,
-        "updated_at": now_iso,
-        "project": "test",
-        "source_session": "s1",
-        "chunk_type": "decision",
-        "info_class": "semantic",
-        "content": "null accessed",
-        "summary": "null accessed",
-        "tags": [],
-        "importance": 0.8,
-        "retrievability": 0.9,
-        "last_accessed": now_iso,  # will be set to NULL below
-        "access_count": 0,
-        "oom_adj": 0,
-        "lru_gen": 0,
-        "stability": 2.0,
-        "raw_snippet": "",
-        "encoding_context": {},
-    }
-    insert_chunk(conn, c)
-    # Set last_accessed to NULL after insert
+    _insert_raw(conn, "rw6", stability=2.0, last_accessed_ago_secs=0)
     conn.execute("UPDATE memory_chunks SET last_accessed=NULL WHERE id='rw6'")
     conn.commit()
 
-    update_accessed(conn, ["rw6"])
+    update_accessed(conn, ["rw6"], _sm2_only=True)
     conn.commit()
 
     stab = _get_stability(conn, "rw6")
@@ -238,22 +167,17 @@ def test_rw6_null_last_accessed_safe_default(conn):
 
 def test_rw7_mixed_gaps_batch_update(conn):
     """混合间隔批量更新：不同 chunk 获得不同 quality，稳定性各异。"""
-    c_short = _make_chunk("short_c", last_accessed_ago_secs=60, stability=3.0)
-    c_medium = _make_chunk("medium_c", last_accessed_ago_secs=12*3600, stability=3.0)
-    c_long = _make_chunk("long_c", last_accessed_ago_secs=7*86400, stability=3.0)
-    insert_chunk(conn, c_short)
-    insert_chunk(conn, c_medium)
-    insert_chunk(conn, c_long)
+    _insert_raw(conn, "short_c",  stability=3.0, last_accessed_ago_secs=60)
+    _insert_raw(conn, "medium_c", stability=3.0, last_accessed_ago_secs=12*3600)
+    _insert_raw(conn, "long_c",   stability=3.0, last_accessed_ago_secs=7*86400)
+
+    update_accessed(conn, ["short_c", "medium_c", "long_c"], _sm2_only=True)
     conn.commit()
 
-    update_accessed(conn, ["short_c", "medium_c", "long_c"])
-    conn.commit()
-
-    stab_short = _get_stability(conn, "short_c")
+    stab_short  = _get_stability(conn, "short_c")
     stab_medium = _get_stability(conn, "medium_c")
-    stab_long = _get_stability(conn, "long_c")
+    stab_long   = _get_stability(conn, "long_c")
 
-    # short < medium < long (or ≤ since floor is quality=3→×1.0)
     assert stab_short <= stab_medium, \
         f"短间隔 stability 应 ≤ 中间隔：{stab_short:.3f} ≤ {stab_medium:.3f}"
     assert stab_medium <= stab_long, \
@@ -266,11 +190,9 @@ def test_rw7_mixed_gaps_batch_update(conn):
 
 def test_rw8_stability_capped_at_365(conn):
     """stability 上限 365 天（即使 quality=5 也不超过）。"""
-    chunk = _make_chunk("rw8", last_accessed_ago_secs=7*86400, stability=364.0)
-    insert_chunk(conn, chunk)
-    conn.commit()
+    _insert_raw(conn, "rw8", stability=364.0, last_accessed_ago_secs=7*86400)
 
-    update_accessed(conn, ["rw8"])
+    update_accessed(conn, ["rw8"], _sm2_only=True)
     conn.commit()
 
     stab = _get_stability(conn, "rw8")

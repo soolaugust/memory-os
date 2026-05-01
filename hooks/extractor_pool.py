@@ -506,6 +506,14 @@ def submit_extract_task(hook_input: dict, project: str, session_id: str) -> bool
     # 构造 extract_task payload
     text = hook_input.get("last_assistant_message", "")
     from config import get as _sysctl
+
+    # ── 入队前 min_length 门控（最轻量检查，< 0.01ms）──────────────────────────
+    # COW prescan 不在此处做：COW miss 应静默退出而非 fallback 到同步路径；
+    # extractor.py main() 在 pool check 之前已做 min_length 检查，此处保持一致。
+    _min_len = _sysctl("extractor.min_length")
+    if not text or len(text) < _min_len:
+        return True  # 过短，无内容可提取，但告知 Stop hook "已处理"（不触发 fallback）
+
     MAX_CHARS = _sysctl("extractor.max_input_chars")
     if len(text) > MAX_CHARS:
         # 与 extractor.py main() 相同的截断逻辑

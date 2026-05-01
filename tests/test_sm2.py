@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent / "hooks"))
 
 import tmpfs  # noqa
 
-from store_vfs import ensure_schema, insert_chunk, update_accessed
+from store_vfs import ensure_schema, update_accessed
 
 
 def _now_iso():
@@ -43,29 +43,27 @@ def conn():
     c.close()
 
 
-def _make_chunk(cid, stability=1.0, project="test"):
+def _insert_raw(conn, cid, stability=1.0, project="test", last_accessed=None):
+    """直接 SQL 插入，bypass insert_chunk 的写入效应，只测 SM-2 核心逻辑。
+    last_accessed 默认设为 10 分钟前，确保 gap > IOR window(300s)，避免 IOR 干扰 SM-2 ratio。
+    """
+    import datetime as _dt
     now = _now_iso()
-    return {
-        "id": cid,
-        "created_at": now,
-        "updated_at": now,
-        "project": project,
-        "source_session": "s1",
-        "chunk_type": "decision",
-        "info_class": "semantic",
-        "content": f"[decision] chunk {cid}",
-        "summary": f"chunk {cid} summary",
-        "tags": ["decision"],
-        "importance": 0.7,
-        "retrievability": 0.5,
-        "last_accessed": now,
-        "access_count": 1,
-        "oom_adj": 0,
-        "lru_gen": 0,
-        "stability": stability,
-        "raw_snippet": "",
-        "encoding_context": {},
-    }
+    # 默认 10min 前，超出 IOR inhibition_window_secs=300s，不触发 IOR penalty
+    la = last_accessed or (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=10)).isoformat()
+    conn.execute("""
+        INSERT OR REPLACE INTO memory_chunks
+            (id, created_at, updated_at, project, source_session,
+             chunk_type, info_class, content, summary, tags,
+             importance, retrievability, last_accessed, access_count,
+             oom_adj, lru_gen, stability, raw_snippet, encoding_context)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (cid, now, now, project, "s1",
+          "decision", "semantic",
+          f"[decision] chunk {cid}", f"chunk {cid} summary", "[]",
+          0.7, 0.5, la, 1,
+          0, 0, stability, "", "{}"))
+    conn.commit()
 
 
 def _get_stability(conn, cid):
@@ -79,10 +77,9 @@ def _get_stability(conn, cid):
 
 def test_quality5_max_gain(conn):
     """quality=5 → stability × 1.2（最大增益）。"""
-    insert_chunk(conn, _make_chunk("c1", stability=1.0))
-    conn.commit()
-    s_before = _get_stability(conn, "c1")  # 实际写入后 stability（可能被写入效应修改）
-    update_accessed(conn, ["c1"], recall_quality=5)
+    _insert_raw(conn, "c1", stability=1.0)
+    s_before = _get_stability(conn, "c1")
+    update_accessed(conn, ["c1"], recall_quality=5, _sm2_only=True)
     conn.commit()
     s = _get_stability(conn, "c1")
     ratio = s / s_before if s_before else 0
@@ -91,10 +88,9 @@ def test_quality5_max_gain(conn):
 
 def test_quality3_neutral(conn):
     """quality=3 → stability 不变（× 1.0，中性）。"""
-    insert_chunk(conn, _make_chunk("c2", stability=2.5))
-    conn.commit()
+    _insert_raw(conn, "c2", stability=2.5)
     s_before = _get_stability(conn, "c2")
-    update_accessed(conn, ["c2"], recall_quality=3)
+    update_accessed(conn, ["c2"], recall_quality=3, _sm2_only=True)
     conn.commit()
     s = _get_stability(conn, "c2")
     ratio = s / s_before if s_before else 0
@@ -103,10 +99,9 @@ def test_quality3_neutral(conn):
 
 def test_quality0_forgetting(conn):
     """quality=0 → stability × 0.7（遗忘惩罚，下限保护）。"""
-    insert_chunk(conn, _make_chunk("c3", stability=2.0))
-    conn.commit()
+    _insert_raw(conn, "c3", stability=2.0)
     s_before = _get_stability(conn, "c3")
-    update_accessed(conn, ["c3"], recall_quality=0)
+    update_accessed(conn, ["c3"], recall_quality=0, _sm2_only=True)
     conn.commit()
     s = _get_stability(conn, "c3")
     ratio = s / s_before if s_before else 0
@@ -115,10 +110,9 @@ def test_quality0_forgetting(conn):
 
 def test_quality4_mild_gain(conn):
     """quality=4 → stability × 1.1（轻微加固）。"""
-    insert_chunk(conn, _make_chunk("c4", stability=1.0))
-    conn.commit()
+    _insert_raw(conn, "c4", stability=1.0)
     s_before = _get_stability(conn, "c4")
-    update_accessed(conn, ["c4"], recall_quality=4)
+    update_accessed(conn, ["c4"], recall_quality=4, _sm2_only=True)
     conn.commit()
     s = _get_stability(conn, "c4")
     ratio = s / s_before if s_before else 0
@@ -126,39 +120,32 @@ def test_quality4_mild_gain(conn):
 
 
 def test_default_quality_is_4(conn):
-    """recall_quality=None + 1-day gap → iter389 再巩固窗口推断 quality=4 → × 1.1。"""
-    from datetime import timedelta
-    # 设置 last_accessed 为 6 小时前（处于 medium zone，quality=4）
-    chunk = _make_chunk("c5", stability=1.0)
-    chunk["last_accessed"] = (__import__("datetime").datetime.now(
-        __import__("datetime").timezone.utc
-    ) - __import__("datetime").timedelta(hours=6)).isoformat()
-    insert_chunk(conn, chunk)
-    conn.commit()
+    """recall_quality=None + 6hr gap → iter389 再巩固窗口推断 quality=4 → × 1.1。"""
+    import datetime as _dt
+    la = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=6)).isoformat()
+    _insert_raw(conn, "c5", stability=1.0, last_accessed=la)
     s_before = _get_stability(conn, "c5")
-    update_accessed(conn, ["c5"], recall_quality=None)
+    update_accessed(conn, ["c5"], recall_quality=None, _sm2_only=True)
     conn.commit()
     s = _get_stability(conn, "c5")
-    # 6hr gap → quality=4 → ×1.1
     ratio = s / s_before if s_before else 0
     assert abs(ratio - 1.1) < 0.01, f"6hr gap → quality=4 → ×1.1，got ratio={ratio:.4f}"
 
 
 def test_no_quality_param_backward_compat(conn):
     """不传 recall_quality 与 recall_quality=None 行为一致（向后兼容）。"""
-    insert_chunk(conn, _make_chunk("c6", stability=1.0))
-    insert_chunk(conn, _make_chunk("c7", stability=1.0))
-    conn.commit()
-    # Read stability BEFORE update_accessed (after insert, RI may have affected stabilities)
+    import datetime as _dt
+    la = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=6)).isoformat()
+    _insert_raw(conn, "c6", stability=1.0, last_accessed=la)
+    _insert_raw(conn, "c7", stability=1.0, last_accessed=la)
     s6_before = _get_stability(conn, "c6")
     s7_before = _get_stability(conn, "c7")
-    update_accessed(conn, ["c6"])           # 不传 recall_quality
+    update_accessed(conn, ["c6"], _sm2_only=True)
     conn.commit()
-    update_accessed(conn, ["c7"], recall_quality=None)  # 显式 None
+    update_accessed(conn, ["c7"], recall_quality=None, _sm2_only=True)
     conn.commit()
     s6 = _get_stability(conn, "c6")
     s7 = _get_stability(conn, "c7")
-    # Compare SM-2 ratios rather than absolute values (RI at insert time may differ)
     ratio6 = s6 / s6_before if s6_before else 0
     ratio7 = s7 / s7_before if s7_before else 0
     assert abs(ratio6 - ratio7) < 0.01, \
@@ -171,9 +158,8 @@ def test_no_quality_param_backward_compat(conn):
 
 def test_stability_capped_at_365(conn):
     """stability 上限为 365.0 天。"""
-    insert_chunk(conn, _make_chunk("c8", stability=360.0))
-    conn.commit()
-    update_accessed(conn, ["c8"], recall_quality=5)  # 360 × 1.2 = 432 → clamp to 365
+    _insert_raw(conn, "c8", stability=360.0)
+    update_accessed(conn, ["c8"], recall_quality=5, _sm2_only=True)  # 360 × 1.2 = 432 → clamp to 365
     conn.commit()
     s = _get_stability(conn, "c8")
     assert s == 365.0, f"stability 上限应为 365，got {s}"
@@ -181,10 +167,9 @@ def test_stability_capped_at_365(conn):
 
 def test_quality_clamp_below_zero(conn):
     """quality < 0 被 clamp 到 0。"""
-    insert_chunk(conn, _make_chunk("c9", stability=2.0))
-    conn.commit()
+    _insert_raw(conn, "c9", stability=2.0)
     s_before = _get_stability(conn, "c9")
-    update_accessed(conn, ["c9"], recall_quality=-1)  # clamp to 0 → × 0.7
+    update_accessed(conn, ["c9"], recall_quality=-1, _sm2_only=True)  # clamp to 0 → × 0.7
     conn.commit()
     s = _get_stability(conn, "c9")
     ratio = s / s_before if s_before else 0
@@ -193,10 +178,9 @@ def test_quality_clamp_below_zero(conn):
 
 def test_quality_clamp_above_5(conn):
     """quality > 5 被 clamp 到 5。"""
-    insert_chunk(conn, _make_chunk("c10", stability=1.0))
-    conn.commit()
+    _insert_raw(conn, "c10", stability=1.0)
     s_before = _get_stability(conn, "c10")
-    update_accessed(conn, ["c10"], recall_quality=10)  # clamp to 5 → × 1.2
+    update_accessed(conn, ["c10"], recall_quality=10, _sm2_only=True)  # clamp to 5 → × 1.2
     conn.commit()
     s = _get_stability(conn, "c10")
     ratio = s / s_before if s_before else 0
@@ -209,13 +193,10 @@ def test_quality_clamp_above_5(conn):
 
 def test_repeated_quality5_compounds(conn):
     """多次 quality=5 累积增长（指数直到 365 上限）。"""
-    insert_chunk(conn, _make_chunk("c11", stability=1.0))
-    conn.commit()
-
-    # 读取 insert_chunk 后的实际 stability（可能被写入效应修改）
-    s = _get_stability(conn, "c11")
+    _insert_raw(conn, "c11", stability=1.0)
+    s = _get_stability(conn, "c11")  # = 1.0（raw insert，无写入效应）
     for i in range(5):
-        update_accessed(conn, ["c11"], recall_quality=5)
+        update_accessed(conn, ["c11"], recall_quality=5, _sm2_only=True)
         conn.commit()
         s = min(365.0, s * 1.2)
 
@@ -225,13 +206,12 @@ def test_repeated_quality5_compounds(conn):
 
 def test_quality5_beats_quality3_after_multiple_recalls(conn):
     """多次 quality=5 的 stability 显著高于 quality=3 的 stability。"""
-    insert_chunk(conn, _make_chunk("high_q", stability=1.0))
-    insert_chunk(conn, _make_chunk("mid_q", stability=1.0))
-    conn.commit()
+    _insert_raw(conn, "high_q", stability=1.0)
+    _insert_raw(conn, "mid_q", stability=1.0)
 
     for _ in range(5):
-        update_accessed(conn, ["high_q"], recall_quality=5)
-        update_accessed(conn, ["mid_q"], recall_quality=3)
+        update_accessed(conn, ["high_q"], recall_quality=5, _sm2_only=True)
+        update_accessed(conn, ["mid_q"], recall_quality=3, _sm2_only=True)
         conn.commit()
 
     s_high = _get_stability(conn, "high_q")
@@ -246,11 +226,10 @@ def test_quality5_beats_quality3_after_multiple_recalls(conn):
 def test_batch_update_applies_same_quality(conn):
     """批量更新时所有 chunk 应用相同 recall_quality。"""
     for i in range(3):
-        insert_chunk(conn, _make_chunk(f"b{i}", stability=1.0))
-    conn.commit()
+        _insert_raw(conn, f"b{i}", stability=1.0)
 
     s_before = {f"b{i}": _get_stability(conn, f"b{i}") for i in range(3)}
-    update_accessed(conn, ["b0", "b1", "b2"], recall_quality=5)
+    update_accessed(conn, ["b0", "b1", "b2"], recall_quality=5, _sm2_only=True)
     conn.commit()
 
     for i in range(3):

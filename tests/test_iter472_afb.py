@@ -53,6 +53,8 @@ def _utcnow():
 def _insert_chunk(conn, cid, stability=5.0, importance=0.6,
                   access_count=0, project="test"):
     now_iso = _utcnow().isoformat()
+    import datetime as _dt
+    la_iso = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=10)).isoformat()
     conn.execute(
         """INSERT OR REPLACE INTO memory_chunks
            (id, project, chunk_type, content, summary, importance, stability,
@@ -61,7 +63,7 @@ def _insert_chunk(conn, cid, stability=5.0, importance=0.6,
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (cid, project, "decision", f"content {cid}", f"summary {cid}",
          importance, stability, now_iso, now_iso, 0.5,
-         now_iso, access_count, "test_ctx", "")
+         la_iso, access_count, "test_ctx", "")
     )
     conn.commit()
 

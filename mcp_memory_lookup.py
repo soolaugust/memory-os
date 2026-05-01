@@ -101,8 +101,12 @@ def _format_chunk(chunk: dict, rank: int) -> str:
         "causal_chain": "🔗",
     }
     icon = type_icons.get(chunk_type, "📎")
+    if chunk_type == "semantic_memory":
+        icon = "🌐"  # 语义记忆：跨项目通用知识
 
-    lines = [f"{icon} [{rank}] [{chunk_type}] (importance={importance:.2f})"]
+    # 语义层来源标记
+    semantic_tag = " [跨项目语义记忆]" if chunk.get("_from_semantic_layer") else ""
+    lines = [f"{icon} [{rank}] [{chunk_type}]{semantic_tag} (importance={importance:.2f})"]
     lines.append(f"  {summary}")
     if content and len(content) < 500:
         lines.append(f"  ---")
@@ -162,6 +166,25 @@ def memory_lookup(
             # fallback：也尝试 global 层
             global_candidates = fts_search(conn, query, "global", top_k=top_k, chunk_types=ct_tuple)
             candidates = global_candidates
+
+        # ── 语义记忆层激活（跨项目通用知识，__semantic__ project）──────────────
+        # OS 类比：TLB 命中后补充 shared memory page — 语义记忆跨 project 共享，
+        # 任何查询都自动激活相关的通用知识，不受 project 边界限制。
+        _SEMANTIC_PROJECT = "__semantic__"
+        try:
+            semantic_ct = tuple(["semantic_memory"]) if not chunk_types else ct_tuple
+            semantic_candidates = fts_search(
+                conn, query, _SEMANTIC_PROJECT,
+                top_k=max(2, top_k // 2),
+                chunk_types=semantic_ct,
+            )
+            if semantic_candidates:
+                # 标记来源，避免与 project 内 chunk 混淆
+                for c in semantic_candidates:
+                    c["_from_semantic_layer"] = True
+                candidates = candidates + semantic_candidates
+        except Exception:
+            pass  # 语义层激活失败不影响主检索
 
         if not candidates:
             return f"💭 未找到与 '{query}' 相关的记忆。\n  提示：知识库可能还没有这方面的内容，或查询词可以换个角度。"

@@ -1394,6 +1394,38 @@ def main():
     effective_top_k = _sysctl("retriever.top_k_fault") if has_page_fault else _sysctl("retriever.top_k")
     effective_max_chars = _sysctl("retriever.max_context_chars_fault") if has_page_fault else _sysctl("retriever.max_context_chars")
 
+    # ── Adaptive K — Citation Rate 反馈驱动 top_k 动态调整 ──────────────────
+    # OS 类比：Linux readahead 根据 sequential page fault 命中率动态调整
+    #   readahead_max_sectors：命中率高 → 扩大预取窗口，命中率低 → 缩小预取窗口。
+    # 心理学对应：工作记忆容量弹性 — 高度相关的信息可以 "chunking" 扩展有效容量。
+    # 信噪比：citation_rate < 30% → 注入大量无用噪声，缩小 top_k；
+    #          citation_rate > 65% → 大多数注入有效，可适度扩大 top_k。
+    # 实现：读取轻量 citation_stats.{project}.json（无 DB 查询，<1ms），
+    #        在 sysctl 配置值基础上微调 ±1~2，不超过安全边界。
+    if not has_page_fault and _sysctl("retriever.adaptive_k_enabled"):
+        try:
+            import os as _os
+            _proj_safe = project.replace("/", "_").replace(":", "_")[:40]
+            _stats_file = _os.path.join(
+                _os.path.expanduser("~"), ".claude", "memory-os",
+                f"citation_stats.{_proj_safe}.json"
+            )
+            if _os.path.exists(_stats_file):
+                import json as _json_ak
+                _cr_data = _json_ak.loads(open(_stats_file, encoding="utf-8").read())
+                _citation_rate = float(_cr_data.get("citation_rate", 0.5))
+                _ak_min = max(2, _sysctl("retriever.top_k") - 2)
+                _ak_max = min(10, _sysctl("retriever.top_k") + 3)
+                if _citation_rate < 0.30:
+                    # 低命中率 → 收缩（减少噪声注入）
+                    effective_top_k = max(_ak_min, effective_top_k - 1)
+                elif _citation_rate > 0.65:
+                    # 高命中率 → 扩张（注入更多有价值记忆）
+                    effective_top_k = min(_ak_max, effective_top_k + 2)
+                # 30%-65% 区间：维持当前值（稳态）
+        except Exception:
+            pass  # adaptive_k 读取失败不影响主流程
+
     # ── 迭代36：PSI 反馈回路 — 压力驱动的动态降级 ──
     # OS 类比：Linux PSI triggers — cgroup 在压力超阈值时触发 OOM/throttle
     # 当检索系统处于高压力（FULL）时，scheduler 自动从 FULL 降级到 LITE
@@ -1628,9 +1660,17 @@ def main():
         _exclude_set = set(t.strip() for t in _exclude_str.split(",") if t.strip()) if _exclude_str else set()
         _retrieve_types = tuple(t for t in _ALL_RETRIEVE_TYPES if t not in _exclude_set) or None
 
+        # ── B14: Adaptive Oversample Factor — CPUFreq governor 类比 ──────────
+        # OS 类比：Linux cpufreq ondemand governor — 根据 CPU 利用率（负载压力）
+        #   动态调整 P-state（频率），高负载时提频，低负载时降频节能。
+        # 这里：当最近检索延迟 p95 > 目标（50ms）时，降低超采样倍数（3x→2x），
+        #   减少候选池大小，从而降低 _score_chunk 的调用次数。
+        # 读取 sysctl 可控倍数（默认 3，延迟压力下 retriever_governor 可写为 2）
+        _oversample_factor = _sysctl("retriever.oversample_factor") or 3
+        _oversample_factor = max(2, min(4, int(_oversample_factor)))  # 钳制 [2, 4]
         # ── FTS5 索引召回（迭代23 ext3 htree）──
         try:
-            fts_results = fts_search(conn, query, project, top_k=effective_top_k * 3,
+            fts_results = fts_search(conn, query, project, top_k=effective_top_k * _oversample_factor,
                                      chunk_types=_retrieve_types)
             use_fts = bool(fts_results)
         except Exception as _fts_err:
@@ -1748,6 +1788,14 @@ def main():
             pass
 
         def _score_chunk(chunk, relevance):
+            # ── B13: Lazy Scoring Early Exit — 极低 relevance 跳过全量计算 ────
+            # OS 类比：Linux speculative execution abort — 分支预测失败时丢弃管线，
+            #   不把无效结果写入 register file；relevance≈0 的 chunk 即使算完也会被排出 top-K。
+            # 实现：relevance < 0.005（FTS5 等效最小正分数）→ 直接用 importance 近似 score
+            #   避免执行后面 15 个因子的计算（尤其 source_monitor、retroactive_interference
+            #   等需要 DB 查询或 import 的步骤）。
+            if relevance < 0.005:
+                return float(chunk.get("importance", 0.5)) * 0.1  # 极低相关性：快速降权
             # 迭代322: Query-Conditioned Importance — 动态 α
             # OS 类比：CPUFreq P-state — 高负载（高 relevance）降低 importance 依赖；
             #   低负载（弱命中）升高 importance 依赖（靠先验筛选）
@@ -1781,6 +1829,19 @@ def main():
             if (_ret < 0.15
                     and chunk.get("chunk_type") != "design_constraint"):
                 score *= 0.55
+
+            # ── iter482: Confidence Threshold Filter ────────────────────────
+            # 心理学：Monitoring and Control Framework (Nelson & Narens 1990) —
+            #   极低置信度的知识注入上下文会污染推理（garbage-in, garbage-out）；
+            #   epistemically unreliable chunks 应被 metacognitive control 屏蔽。
+            # OS 类比：ECC 内存中 uncorrectable error → 页面下线（offline_pages），
+            #   不再参与任何内存分配，避免静默数据损坏。
+            # 规则：confidence_score < 0.15 的 chunk 分数直接归零（不注入）
+            # 豁免：design_constraint（架构约束即使低置信也需要可见）
+            _conf = float(chunk.get("confidence_score") or 0.7)
+            if (_conf < 0.15
+                    and chunk.get("chunk_type") != "design_constraint"):
+                score = 0.0
 
             # 迭代300：info_class 路由权重调整
             # ephemeral chunk 降权 0.3，避免临时状态挤掉 world/operational 知识
@@ -1951,6 +2012,28 @@ def main():
                                 _ri_penalty = _crp(_ri_age_days, _ri_count, _ri_sim)
                                 if _ri_penalty > 0.001:
                                     score -= _ri_penalty
+            except Exception:
+                pass
+            # ── B10: Global Cross-Project Relevance Gate ────────────────────
+            # 问题：global 层 design_constraint 被豁免遗忘/置信过滤（iter369/iter482），
+            #   低 relevance 的 global chunk 仍能靠高 importance 进入 top-K，污染当前项目。
+            #   实测：aios 项目召回 "kernel patch 人名规则"（relevance≈0.05，importance≈0.85）
+            # OS 类比：Linux cross-NUMA memory access penalty — remote node 访问延迟 ×2；
+            #   global chunk 访问跨 "project namespace"，应有相应延迟惩罚。
+            # 人类记忆：专业知识领域分区（domain-specific memory） — 外科医生在烹饪时
+            #   手术室规程不自动激活，只有 query 显式触发（高 relevance）时才跨域迁移。
+            # 机制：global chunk 在 project != "global" 时，若 relevance < 0.25（低相关性），
+            #   施加 0.50 折扣（design_constraint 豁免阈值调高至 0.40，因其通常具有通用价值）。
+            #   这样 global chunk 只有在 query 明确相关时才能进入 top-K，
+            #   而不是靠 importance 常驻（解决当前问题的根因）。
+            try:
+                _chunk_proj = chunk.get("project", "")
+                if _chunk_proj == "global" and project != "global":
+                    _ctype = chunk.get("chunk_type", "")
+                    # design_constraint 需要更低相关性才触发惩罚（它有更广泛通用价值）
+                    _relevance_gate = 0.40 if _ctype == "design_constraint" else 0.25
+                    if relevance < _relevance_gate:
+                        score *= 0.50
             except Exception:
                 pass
             return score
@@ -3153,7 +3236,8 @@ def main():
                 return "❓"
             if vs == "verified" or cs >= 0.9:
                 return "✅"
-            if cs < 0.5:
+            # iter490: 阈值调整 0.50 → 0.30（减少噪音，只标记真正低可信）
+            if cs < 0.3:
                 return "⚠️"
             return ""
 
@@ -3171,6 +3255,45 @@ def main():
                 _raw_snippets = {r[0]: r[1] for r in _rs_rows if r[1]}
             except Exception:
                 pass
+
+        # ── iter472: Inject-Score 加权排序 ───────────────────────────────────────
+        # 问题：top_k 只按 trigram_score 排序，低 importance 的噪声 chunk 可能排在高 importance
+        #   的相关 chunk 之前，浪费 token 预算，降低 SNR。
+        # 解决：inject_score = trigram_score × sqrt(importance) — 结合相关性和历史重要性。
+        # sqrt（而非直接乘）：平衡相关性和 importance 的贡献（防止 importance 过度主导）。
+        # OS 类比：Linux BFQ I/O 调度 — 综合 weight × throughput 计算 service budget，
+        #   高 importance 进程（foreground app）在同等 I/O 请求时优先获得 dispatch 配额。
+        # 注意：design_constraint chunk 不参与此排序（已有独立前置 header）。
+        if _sysctl("retriever.inject_sort_enabled") and len(top_k) >= 2:
+            try:
+                import math as _math
+                _inj_constraints = [(s, c) for s, c in top_k
+                                    if c.get("chunk_type") == "design_constraint"]
+                _inj_normal = [(s, c) for s, c in top_k
+                               if c.get("chunk_type") != "design_constraint"]
+                if len(_inj_normal) >= 2:
+                    _inj_normal_scored = [
+                        (s, c, s * _math.sqrt(max(0.01, float(c.get("importance") or 0.5))))
+                        for s, c in _inj_normal
+                    ]
+                    _inj_normal_sorted_scored = sorted(_inj_normal_scored,
+                                                       key=lambda x: x[2], reverse=True)
+                    # iter475: min_inject_score 相对门槛过滤 — inject_score < ratio × max → 丢弃
+                    # 防止无关噪声 chunk 占用 token 预算（相对阈值适应不同项目的 score 分布）
+                    # OS 类比：Linux I/O scheduler budget exhaustion — BFQ 在 budget 用尽时
+                    #   丢弃低优先级请求，而非无限排队（防止 latency spike）。
+                    _min_ratio = _sysctl("retriever.inject_score_min_ratio") or 0.10
+                    if _inj_normal_sorted_scored:
+                        _max_score = _inj_normal_sorted_scored[0][2]
+                        _score_threshold = _max_score * _min_ratio
+                        _inj_normal_sorted_scored = [
+                            item for item in _inj_normal_sorted_scored
+                            if item[2] >= _score_threshold
+                        ]
+                    _inj_normal_sorted = [(s, c) for s, c, _ in _inj_normal_sorted_scored]
+                    top_k = _inj_constraints + _inj_normal_sorted
+            except Exception:
+                pass  # inject_sort 失败不阻塞
 
         # ── iter427: Serial Position Effect — 注入顺序优化（Murdock 1962）──────────
         # OS 类比：Linux BFQ/CFQ front-merge — 最高优先级 I/O 请求置于 dispatch queue 头部；
@@ -3220,7 +3343,19 @@ def main():
         for _, c in top_k:
             prefix = _TYPE_PREFIX.get(c.get("chunk_type", ""), "")
             conf = _conf_tag(c)
-            line = f"{conf}{prefix} {c['summary']}".strip()
+            # iter474: Token-budget aware summary truncation — importance tier 控制摘要长度
+            # 高 importance chunk 保留完整摘要（细节更有价值）；低 importance 摘要截短（减少噪声 token）
+            # OS 类比：Linux /proc/slabinfo — 高频对象（hot slab）保留完整元数据，
+            #   低频对象（cold slab）元数据压缩存储，节省 slab cache 空间。
+            _imp_val = float(c.get("importance") or 0.5)
+            if _imp_val >= 0.75:
+                _sum_limit = 200   # 高 importance：保留完整（含 raw_snippet）
+            elif _imp_val >= 0.40:
+                _sum_limit = 100   # 中等：适度截断
+            else:
+                _sum_limit = 60    # 低 importance：大幅截断，减少噪声
+            _summary_truncated = c['summary'][:_sum_limit]
+            line = f"{conf}{prefix} {_summary_truncated}".strip()
             # 迭代306：importance >= 0.75 且有 raw_snippet → 附加原文（≤150字）
             # 迭代361：已 FULL 注入过的 chunk 降级为 LITE（跳过 raw_snippet，节省 ~30-80 tokens）
             rs = _raw_snippets.get(c["id"], "")
@@ -3372,6 +3507,56 @@ def main():
         except Exception:
             pass  # graph 扩散失败不阻塞
 
+        # ── iter471: Second-Chance Diversity Sampling ─────────────────────────
+        # 问题：检索器只按 importance×retrievability 评分，高历史稳定性但当前 importance
+        #   低的 chunk 永远排不到 top_k，形成"死锁衰减"——太冷检不到 → Ebbinghaus 继续衰减
+        #
+        # OS 类比：Linux MGLRU second-chance promotion (Yu Zhao 2022) —
+        #   老代（gen=max）页面被 kswapd 扫到时，若 Accessed bit=1 → 晋升到最年轻代
+        #   给旧热页一次"重新证明自己"的机会，避免 LRU 误淘汰热页
+        #
+        # 心理学：Spaced Retrieval Practice (Cepeda et al. 2006) —
+        #   重新激活边缘记忆比重复强化已有记忆产生更大的长期增益
+        #
+        # 实现：以 10% 概率（_SECOND_CHANCE_PROB）随机采样 1 个 chunk：
+        #   条件：stability >= 5（历史曾被频繁引用）AND importance < 0.20（当前低 importance）
+        #   AND 不在当前 top_k 中（不重复注入）
+        #   注入方式：在 inject_lines 末尾追加，标注 [历史相关]（区分于主检索结果）
+        try:
+            import random as _random
+            _SECOND_CHANCE_PROB = 0.10   # 10% 触发概率（低概率避免噪声）
+            _SECOND_CHANCE_STAB = 5.0    # stability 下限
+            _SECOND_CHANCE_IMP_MAX = 0.20  # importance 上限（只给低 importance 的 chunk 机会）
+            if (not has_page_fault
+                    and _sysctl("retriever.second_chance_enabled")
+                    and _random.random() < _SECOND_CHANCE_PROB):
+                _current_ids = {c["id"] for _, c in top_k}
+                _sc_skip_types = frozenset({
+                    "task_state", "prompt_context", "conversation_summary",
+                    "session_summary", "goal",
+                })
+                _sc_row = conn.execute(
+                    """SELECT id, summary, importance, stability FROM memory_chunks
+                       WHERE project=?
+                         AND COALESCE(stability, 0) >= ?
+                         AND importance < ?
+                         AND importance > 0.05
+                         AND chunk_type NOT IN ('task_state','prompt_context',
+                             'conversation_summary','session_summary','goal')
+                       ORDER BY RANDOM() LIMIT 1""",
+                    (project, _SECOND_CHANCE_STAB, _SECOND_CHANCE_IMP_MAX)
+                ).fetchone()
+                if _sc_row and _sc_row[0] not in _current_ids:
+                    _sc_id, _sc_summary, _sc_imp, _sc_stab = _sc_row
+                    inject_lines.append(
+                        f"\n[历史相关 · stability={_sc_stab:.1f}] {_sc_summary[:120]}"
+                    )
+                    # 加入 top_k（供 write-back 更新 access）
+                    top_k = top_k + [(0.0, {"id": _sc_id, "summary": _sc_summary,
+                                            "importance": _sc_imp, "chunk_type": "second_chance"})]
+        except Exception:
+            pass  # second-chance 失败不阻塞
+
         context_text = "\n".join(inject_lines)
         if len(context_text) > effective_max_chars:
             context_text = context_text[:effective_max_chars] + "…"
@@ -3476,12 +3661,36 @@ def main():
                          duration_ms, conn=wconn)
             _deferred.flush(wconn)
             _fts_tag = 'Y' if use_fts else f'N(glb_disc={_bm25_global_discount})'
+            # ── B10: per-source injection stats (vmstat-style observability) ──
+            # OS 类比：/proc/vmstat pgpgin/pgpgout — 内核 per-source 页面计数器，
+            #   用于分析 page cache 热度分布和 swap 效率。
+            _src_global = sum(1 for _, c in top_k if c.get("project") == "global")
+            _src_local = len(top_k) - _src_global
+            _src_tag = f' src=local:{_src_local}/global:{_src_global}'
             dmesg_log(wconn, DMESG_INFO, "retriever",
-                      f"injected={len(top_k)} candidates={candidates_count} fts={_fts_tag}{'+bm25=' + str(_hybrid_bm25_count) if _hybrid_bm25_count > 0 else ''} {duration_ms:.1f}ms{deadline_info}{drr_info}",
+                      f"injected={len(top_k)} candidates={candidates_count} fts={_fts_tag}{'+bm25=' + str(_hybrid_bm25_count) if _hybrid_bm25_count > 0 else ''}{_src_tag} {duration_ms:.1f}ms{deadline_info}{drr_info}",
                       session_id=session_id, project=project,
                       extra={"top_k_ids": accessed_ids, "priority": priority,
                               "deadline_skipped": deadline_skipped,
-                              "drr_type_distribution": drr_types})
+                              "drr_type_distribution": drr_types,
+                              "src_global": _src_global, "src_local": _src_local})
+            # ── B14: Adaptive Oversample Governor ─────────────────────────
+            # OS 类比：cpufreq ondemand governor — 自动调整超采样倍数
+            # 连续 3 次 duration_ms > 60ms → 降低 oversample_factor（3→2）减少候选池
+            # 连续 3 次 duration_ms < 30ms → 恢复 oversample_factor（2→3）提升召回率
+            try:
+                from config import sysctl_set as _sysctl_set
+                _gov_key = "retriever.oversample_factor"
+                _cur_factor = _sysctl(_gov_key) or 3
+                if duration_ms > 60:
+                    # 高延迟：降低采样倍数（节流）
+                    if _cur_factor > 2:
+                        _sysctl_set(_gov_key, _cur_factor - 1)
+                elif duration_ms < 30 and _cur_factor < 3:
+                    # 低延迟且当前已降级：恢复采样倍数
+                    _sysctl_set(_gov_key, 3)
+            except Exception:
+                pass
             wconn.commit()
             wconn.close()
         except Exception:
