@@ -15870,3 +15870,295 @@ def apply_concreteness_effect(
         return result
     except Exception:
         return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# iter499: Picture Superiority Effect (PSE) — Shepard 1967
+# ══════════════════════════════════════════════════════════════════════════════
+
+def apply_picture_superiority_effect(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+) -> dict:
+    """iter499: Picture Superiority Effect (PSE) — 结构化/图示 chunk 的记忆优势。
+
+    认知科学依据：
+      Shepard (1967) J Verbal Learning & Verbal Behavior — 图片在再认测试中
+        正确率 98% vs 文字 88%（picture superiority effect）。
+      Paivio & Csapo (1973): 图片自动激活 dual-coding（verbal + imaginal）。
+      Defeyter et al. (2009): 效应在 delayed recall 更显著（→ stability 而非短期）。
+
+    memory-os 等价：
+      含 table、list、diagram（ASCII art）、结构化标记的 chunk = "图示编码"。
+      纯 prose 文本 = "verbal only"。
+      结构化 chunk 有更强的空间-视觉编码 → stability 提升。
+
+    OS 类比：B-tree vs linear scan — 结构化索引（B-tree page）
+      比线性日志（sequential log entry）有更高的 locality 命中率。
+    """
+    result = {"pse_boosted": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.pse_enabled"):
+            return result
+
+        indicators = _cfg.get("store_vfs.pse_structure_indicators") or []
+        min_indicators = int(_cfg.get("store_vfs.pse_min_indicators") or 2)
+        stability_bonus = float(_cfg.get("store_vfs.pse_stability_bonus"))
+        max_boost = float(_cfg.get("store_vfs.pse_max_boost"))
+        min_importance = float(_cfg.get("store_vfs.pse_min_importance"))
+
+        for chunk_id in chunk_ids:
+            row = conn.execute(
+                "SELECT stability, importance, content "
+                "FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+            content = row[2] or ""
+
+            if imp < min_importance:
+                continue
+
+            # 计算结构化指标命中数
+            hit_count = sum(1 for ind in indicators if ind in content)
+            if hit_count < min_indicators:
+                continue
+
+            ratio = min(max_boost, stability_bonus * (min(hit_count, 5) - 1))
+            new_stab = min(365.0, stab * (1.0 + ratio))
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+                )
+                result["pse_boosted"] += 1
+        return result
+    except Exception:
+        return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# iter500: Anchoring Effect (AE) — Tversky & Kahneman 1974
+# ══════════════════════════════════════════════════════════════════════════════
+
+def apply_anchoring_effect(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+    project: str = "",
+) -> dict:
+    """iter500: Anchoring Effect (AE) — 项目早期 chunk 作为认知锚点，持久性更强。
+
+    认知科学依据：
+      Tversky & Kahneman (1974) Science — 人类判断严重依赖初始信息（anchor），
+        后续调整不足（anchoring-and-adjustment heuristic）。
+      Mussweiler & Strack (1999): anchor 激活与之一致的知识，形成选择性可访问性。
+      Furnham & Boo (2011): anchoring 是最稳健的认知偏差之一。
+
+    memory-os 等价：
+      项目最早创建的 chunk 是认知锚点 — 定义了项目的"基本假设"和"初始框架"。
+      这些 anchor chunk 在后续决策中隐式引用 → 遗忘成本更高 → stability 加分。
+
+    OS 类比：boot sector / initramfs — 系统启动时最先加载的数据永远保留在内存中
+      （never evicted from page cache），因为所有后续操作隐式依赖它。
+    """
+    result = {"ae_boosted": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.ae_enabled"):
+            return result
+
+        early_pct = float(_cfg.get("store_vfs.ae_early_percentile"))
+        stability_bonus = float(_cfg.get("store_vfs.ae_stability_bonus"))
+        max_boost = float(_cfg.get("store_vfs.ae_max_boost"))
+        min_importance = float(_cfg.get("store_vfs.ae_min_importance"))
+        min_project_chunks = int(_cfg.get("store_vfs.ae_min_project_chunks") or 10)
+
+        # 获取项目 chunk 总数
+        where = "WHERE project=?" if project else "WHERE 1=1"
+        params = (project,) if project else ()
+        total_row = conn.execute(
+            f"SELECT COUNT(*) FROM memory_chunks {where}", params
+        ).fetchone()
+        total = total_row[0] if total_row else 0
+        if total < min_project_chunks:
+            return result
+
+        # 获取 early threshold（按 created_at 排序前 N%）
+        early_count = max(1, int(total * early_pct))
+        early_rows = conn.execute(
+            f"SELECT id FROM memory_chunks {where} ORDER BY created_at ASC LIMIT ?",
+            params + (early_count,)
+        ).fetchall()
+        early_ids = {row[0] for row in early_rows}
+
+        for chunk_id in chunk_ids:
+            if chunk_id not in early_ids:
+                continue
+            row = conn.execute(
+                "SELECT stability, importance FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+
+            if imp < min_importance:
+                continue
+
+            ratio = min(max_boost, stability_bonus)
+            new_stab = min(365.0, stab * (1.0 + ratio))
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+                )
+                result["ae_boosted"] += 1
+        return result
+    except Exception:
+        return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# iter501: Negative Bias Effect (NBE) — Baumeister 2001
+# ══════════════════════════════════════════════════════════════════════════════
+
+def apply_negative_bias_effect(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+) -> dict:
+    """iter501: Negative Bias Effect (NBE) — 负面信息的记忆编码更持久。
+
+    认知科学依据：
+      Baumeister et al. (2001) Review of General Psych — "Bad is stronger than good":
+        负面事件在记忆、情绪、社会交互中的影响力一致大于正面事件。
+      Kensinger & Corkin (2003): 负面情绪词在 delayed recognition 中优于正面词。
+      Ochsner (2000): 负面信息的杏仁核激活更强 → 海马编码更深。
+
+    memory-os 等价：
+      记录 bug/error/failure/regression 的 chunk = 负面信息。
+      这类 chunk 对项目的"生存"更重要（避免重蹈覆辙）→ stability 加分。
+      类似于 Linux 的 EDAC (Error Detection and Correction) — 错误记录永不清除。
+
+    OS 类比：EDAC memory controller error log — CE/UE 错误永久记录在
+      /sys/devices/system/edac/mc/，从不轮转，因为任何错误都是 RAS 分析的关键数据。
+    """
+    result = {"nbe_boosted": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.nbe_enabled"):
+            return result
+
+        keywords = _cfg.get("store_vfs.nbe_negative_keywords") or []
+        stability_bonus = float(_cfg.get("store_vfs.nbe_stability_bonus"))
+        max_boost = float(_cfg.get("store_vfs.nbe_max_boost"))
+        min_importance = float(_cfg.get("store_vfs.nbe_min_importance"))
+
+        kw_lower = [kw.lower() for kw in keywords]
+
+        for chunk_id in chunk_ids:
+            row = conn.execute(
+                "SELECT stability, importance, content, summary "
+                "FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+            content = (row[2] or "").lower()
+            summary = (row[3] or "").lower()
+
+            if imp < min_importance:
+                continue
+
+            text = content + " " + summary
+            hit_count = sum(1 for kw in kw_lower if kw in text)
+            if hit_count < 1:
+                continue
+
+            ratio = min(max_boost, stability_bonus * min(hit_count, 3))
+            new_stab = min(365.0, stab * (1.0 + ratio))
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+                )
+                result["nbe_boosted"] += 1
+        return result
+    except Exception:
+        return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# iter502: Temporal Landmark Effect (TLE) — Shum 1998
+# ══════════════════════════════════════════════════════════════════════════════
+
+def apply_temporal_landmark_effect(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+) -> dict:
+    """iter502: Temporal Landmark Effect (TLE) — 时间地标事件的记忆更鲜明。
+
+    认知科学依据：
+      Shum (1998) Memory & Cognition — 与公共事件（landmark events）在时间上接近
+        的个人记忆更容易被回忆（temporal landmark effect）。
+      Pillemer et al. (1996): 生活转折点作为 temporal anchor 增强相邻记忆的可访问性。
+      Robinson (1986): 转折事件产生"记忆碰撞"（reminiscence bump）效应。
+
+    memory-os 等价：
+      含 deploy/release/merge/milestone 关键词的 chunk = 项目时间地标。
+      这些 chunk 标记了项目的重要节点 → 它们是回忆其他事件的时间锚点 → stability 加分。
+
+    OS 类比：filesystem journal checkpoint — ext4 journal 中的 checkpoint record
+      永远保留，用于灾难恢复时确定"已知正确状态"的最近时间点。
+    """
+    result = {"tle_boosted": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.tle_enabled"):
+            return result
+
+        keywords = _cfg.get("store_vfs.tle_landmark_keywords") or []
+        stability_bonus = float(_cfg.get("store_vfs.tle_stability_bonus"))
+        max_boost = float(_cfg.get("store_vfs.tle_max_boost"))
+        min_importance = float(_cfg.get("store_vfs.tle_min_importance"))
+
+        kw_lower = [kw.lower() for kw in keywords]
+
+        for chunk_id in chunk_ids:
+            row = conn.execute(
+                "SELECT stability, importance, content, summary "
+                "FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+            content = (row[2] or "").lower()
+            summary = (row[3] or "").lower()
+
+            if imp < min_importance:
+                continue
+
+            text = content + " " + summary
+            hit_count = sum(1 for kw in kw_lower if kw in text)
+            if hit_count < 1:
+                continue
+
+            ratio = min(max_boost, stability_bonus * min(hit_count, 2))
+            new_stab = min(365.0, stab * (1.0 + ratio))
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+                )
+                result["tle_boosted"] += 1
+        return result
+    except Exception:
+        return result
