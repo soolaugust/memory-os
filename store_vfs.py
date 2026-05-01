@@ -15546,3 +15546,327 @@ def fts_optimize(conn: sqlite3.Connection, force: bool = False) -> bool:
         return True
     except Exception:
         return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# iter495: Dual-Coding Effect (DCE) — Paivio 1971
+# ══════════════════════════════════════════════════════════════════════════════
+
+def apply_dual_coding_effect(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+) -> dict:
+    """iter495: Dual-Coding Effect (DCE) — 同时具有语言+结构化编码的 chunk stability 更高。
+
+    认知科学依据：
+      Paivio (1971) "Imagery and Verbal Processes" — 双重编码理论（DCT）：
+        信息同时以语言和视觉/结构形式编码时，形成两条独立检索路径，
+        提取成功率比单通道编码高 ~30-50%。
+      Clark & Paivio (1991): 具体性和双编码是长期记忆保持的最强预测指标之一。
+      Mayer (2001) 多媒体学习：文字+图示的联合呈现优于纯文字。
+
+    memory-os 等价：
+      chunk 同时包含自然语言描述 + 代码/结构化数据（URL、路径、SQL） = 双编码。
+      纯文字描述 = 单通道（verbal only）。
+      双编码 chunk 有更多检索线索 → stability 提升。
+
+    OS 类比：RAID-1 mirroring — 数据同时写入两块磁盘，
+      单盘故障不丢失数据（= 单条检索线索失效仍可通过另一条找到）。
+    """
+    result = {"dce_boosted": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.dce_enabled"):
+            return result
+
+        indicators = _cfg.get("store_vfs.dce_code_indicators") or []
+        stability_bonus = float(_cfg.get("store_vfs.dce_stability_bonus"))
+        max_boost = float(_cfg.get("store_vfs.dce_max_boost"))
+        min_importance = float(_cfg.get("store_vfs.dce_min_importance"))
+        min_content_len = int(_cfg.get("store_vfs.dce_min_content_len") or 50)
+
+        indicator_set = [ind.lower() for ind in indicators]
+
+        for chunk_id in chunk_ids:
+            row = conn.execute(
+                "SELECT stability, importance, content "
+                "FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+            content = row[2] or ""
+
+            if imp < min_importance:
+                continue
+            if len(content) < min_content_len:
+                continue
+
+            # 检测结构化编码通道：content 中是否包含代码/URL/路径指标
+            content_lower = content.lower()
+            indicator_count = sum(1 for ind in indicator_set if ind in content_lower)
+            if indicator_count < 2:
+                continue  # 需要至少 2 个指标才构成"双编码"
+
+            # 指标越多，bonus 越大（最多 max_boost）
+            # indicator_count >= 2 才进入此处；2个=1×bonus, 3个=2×bonus, 4个=3×bonus
+            ratio = min(max_boost, stability_bonus * (min(indicator_count, 5) - 1))
+            new_stab = min(365.0, stab * (1.0 + ratio))
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+                )
+                result["dce_boosted"] += 1
+        return result
+    except Exception:
+        return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# iter496: Survival Processing Effect (SPE) — Nairne 2007
+# ══════════════════════════════════════════════════════════════════════════════
+
+def apply_survival_processing_effect(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+) -> dict:
+    """iter496: Survival Processing Effect (SPE) — 生存相关信息的记忆编码优势。
+
+    认知科学依据：
+      Nairne, Thompson & Pandeirada (2007) Psych Science — 与生存相关的信息在
+        自由回忆中表现优于所有传统深加工条件（pleasantness rating, imagery,
+        self-reference），优势 ~10-15%。
+      Nairne & Pandeirada (2008): "记忆系统的首要功能是 fitness-relevant retention"。
+      Kang, McDermott & Cohen (2008): 复制了 survival processing advantage。
+
+    memory-os 等价：
+      与项目"生存"直接相关的 chunk（critical bugs, security issues, blockers,
+      deadlines, outages）= fitness-relevant information。
+      这类 chunk 应获得更强的编码（stability + importance 双重加分）。
+
+    OS 类比：OOM killer priority — 关键进程（init, systemd）的 oom_score_adj = -1000，
+      永远不会被 OOM killer 杀死；同理，survival-critical chunk 获得淘汰保护。
+    """
+    result = {"spe_boosted": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.spe_enabled"):
+            return result
+
+        keywords = _cfg.get("store_vfs.spe_survival_keywords") or []
+        stability_bonus = float(_cfg.get("store_vfs.spe_stability_bonus"))
+        importance_bonus = float(_cfg.get("store_vfs.spe_importance_bonus"))
+        max_boost = float(_cfg.get("store_vfs.spe_max_boost"))
+        min_importance = float(_cfg.get("store_vfs.spe_min_importance"))
+
+        kw_lower = [kw.lower() for kw in keywords]
+
+        for chunk_id in chunk_ids:
+            row = conn.execute(
+                "SELECT stability, importance, content, summary "
+                "FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+            content = (row[2] or "").lower()
+            summary = (row[3] or "").lower()
+
+            if imp < min_importance:
+                continue
+
+            # 计算 survival relevance：关键词命中数
+            text = content + " " + summary
+            hit_count = sum(1 for kw in kw_lower if kw in text)
+            if hit_count < 1:
+                continue
+
+            # stability 提升（与命中数正相关，最多 max_boost）
+            ratio = min(max_boost, stability_bonus * min(hit_count, 3))
+            new_stab = min(365.0, stab * (1.0 + ratio))
+
+            # importance 提升（固定小额加分）
+            new_imp = min(1.0, imp + importance_bonus)
+
+            updated = False
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+                )
+                updated = True
+            if new_imp > imp + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET importance=? WHERE id=?", (new_imp, chunk_id)
+                )
+                updated = True
+            if updated:
+                result["spe_boosted"] += 1
+        return result
+    except Exception:
+        return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# iter497: Bizarreness Effect (BZE) — McDaniel & Einstein 1986
+# ══════════════════════════════════════════════════════════════════════════════
+
+def apply_bizarreness_effect(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+    project: str = "",
+) -> dict:
+    """iter497: Bizarreness Effect (BZE) — 稀有类型 chunk 的记忆编码优势。
+
+    认知科学依据：
+      McDaniel & Einstein (1986) J Exp Psych: LM&C — 奇异句子在混合列表中
+        比普通句子回忆率高 ~15-25%（bizarreness effect）。
+      Einstein & McDaniel (1987): distinctiveness → enhanced encoding。
+      Hunt & Worthen (2006): 奇异性效应源于 item-specific distinctiveness。
+
+    memory-os 等价：
+      当项目中某个 chunk_type 出现频率极低（< threshold）时，该 chunk 具有
+      "奇异性"（distinctiveness）——它从背景中突出，类似 Von Restorff 效应。
+      这类 chunk 应获得 stability 加分（更不易被遗忘）。
+
+    OS 类比：huge page promotion — 当大部分页面是 4KB 时，2MB huge page
+      在 TLB 中获得特殊处理（减少 TLB miss），类似于稀有类型获得特殊保护。
+    """
+    result = {"bze_boosted": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.bze_enabled"):
+            return result
+
+        rare_threshold = float(_cfg.get("store_vfs.bze_rare_type_threshold"))
+        stability_bonus = float(_cfg.get("store_vfs.bze_stability_bonus"))
+        max_boost = float(_cfg.get("store_vfs.bze_max_boost"))
+        min_importance = float(_cfg.get("store_vfs.bze_min_importance"))
+
+        # 计算项目内 chunk_type 频率分布
+        where_clause = "WHERE project=?" if project else "WHERE 1=1"
+        params = (project,) if project else ()
+        total_row = conn.execute(
+            f"SELECT COUNT(*) FROM memory_chunks {where_clause}", params
+        ).fetchone()
+        total = total_row[0] if total_row else 0
+        if total < 5:
+            return result  # 样本太少，无法判断稀有性
+
+        type_counts = {}
+        for row in conn.execute(
+            f"SELECT chunk_type, COUNT(*) FROM memory_chunks {where_clause} GROUP BY chunk_type",
+            params
+        ):
+            type_counts[row[0] or "unknown"] = row[1]
+
+        for chunk_id in chunk_ids:
+            row = conn.execute(
+                "SELECT stability, importance, chunk_type "
+                "FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+            ctype = row[2] or "unknown"
+
+            if imp < min_importance:
+                continue
+
+            # 计算该类型的频率
+            type_freq = type_counts.get(ctype, 0) / total
+            if type_freq >= rare_threshold:
+                continue  # 不够稀有
+
+            # 越稀有，bonus 越大
+            rarity_ratio = 1.0 - (type_freq / rare_threshold)
+            ratio = min(max_boost, stability_bonus * rarity_ratio)
+            new_stab = min(365.0, stab * (1.0 + ratio))
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+                )
+                result["bze_boosted"] += 1
+        return result
+    except Exception:
+        return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# iter498: Concreteness Effect (CCE2) — Paivio 1969
+# ══════════════════════════════════════════════════════════════════════════════
+
+def apply_concreteness_effect(
+    conn: "sqlite3.Connection",
+    chunk_ids: list,
+) -> dict:
+    """iter498: Concreteness Effect (CCE2) — 具体信息比抽象信息的记忆编码更强。
+
+    认知科学依据：
+      Paivio (1969) Psych Bulletin — 具体词（concrete words）在回忆和再认测试中
+        比抽象词（abstract words）高 ~20-30%（concreteness effect）。
+      Schwanenflugel (1991): 具体词同时激活 imaginal + verbal 编码（与 DCT 交互）。
+      Walker & Hulme (1999): 具体性效应在 delayed recall 中尤为显著（→ stability）。
+
+    memory-os 等价：
+      包含具体数据（数字、路径、URL、时间戳、度量单位）的 chunk 比
+      纯抽象描述（"考虑改进性能"）的 chunk 在长期保留中更有价值。
+      具体 chunk 更易被精确匹配召回。
+
+    OS 类比：direct-mapped cache line — 精确地址匹配比 set-associative 的
+      模糊匹配更快命中；具体信息 = 精确地址，抽象信息 = tag 比较。
+    """
+    result = {"cce_boosted": 0}
+    if not chunk_ids:
+        return result
+    try:
+        import config as _cfg
+        if not _cfg.get("store_vfs.cce_enabled"):
+            return result
+
+        indicators = _cfg.get("store_vfs.cce_concrete_indicators") or []
+        min_indicators = int(_cfg.get("store_vfs.cce_min_indicators") or 2)
+        stability_bonus = float(_cfg.get("store_vfs.cce_stability_bonus"))
+        max_boost = float(_cfg.get("store_vfs.cce_max_boost"))
+        min_importance = float(_cfg.get("store_vfs.cce_min_importance"))
+
+        ind_lower = [ind.lower() for ind in indicators]
+
+        for chunk_id in chunk_ids:
+            row = conn.execute(
+                "SELECT stability, importance, content "
+                "FROM memory_chunks WHERE id=?", (chunk_id,)
+            ).fetchone()
+            if not row:
+                continue
+            stab = float(row[0] or 1.0)
+            imp = float(row[1] or 0.0)
+            content = (row[2] or "").lower()
+
+            if imp < min_importance:
+                continue
+
+            # 计算具体性指标命中数
+            hit_count = sum(1 for ind in ind_lower if ind in content)
+            if hit_count < min_indicators:
+                continue
+
+            # bonus 与具体性指标数量正相关
+            ratio = min(max_boost, stability_bonus * min(hit_count, 5) / 2.0)
+            new_stab = min(365.0, stab * (1.0 + ratio))
+            if new_stab > stab + 1e-6:
+                conn.execute(
+                    "UPDATE memory_chunks SET stability=? WHERE id=?", (new_stab, chunk_id)
+                )
+                result["cce_boosted"] += 1
+        return result
+    except Exception:
+        return result

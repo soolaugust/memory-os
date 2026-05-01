@@ -43,7 +43,7 @@ class TestWriteAfterResponseOrder(unittest.TestCase):
 
         # 在注释之后的代码行中查找（只看非注释行）
         print_line = flush_line = commit_line = None
-        for i in range(war_line, min(war_line + 100, len(lines))):
+        for i in range(war_line, min(war_line + 150, len(lines))):
             stripped = lines[i].lstrip()
             if stripped.startswith("#"):
                 continue  # 跳过注释行
