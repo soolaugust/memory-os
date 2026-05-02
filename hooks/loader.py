@@ -1719,6 +1719,28 @@ def main():
             except Exception:
                 pass
 
+        # ── iter573：folio_batch_drain — Converging Signal Batch Reclaim ──
+        if _ict_enabled: _ict_milestones.append(("folio_batch_drain", _ict_time.time()))
+        # OS 类比：Linux folio_batch lru_add_drain() — 多信号收敛提前回收
+        # kcompactd 用 age>=3d 时间门控，folio_batch 用 idle_rounds>=2 观测门控
+        _fbd_result = {"drained": 0}
+        if not _defer_reclaim and not _ts_skip("folio_batch_drain"):
+            try:
+                from store_mm import folio_batch_drain
+                _fbd_result = folio_batch_drain(_log_conn, project)
+                if _fbd_result["drained"] > 0:
+                    dmesg_log(_log_conn, DMESG_INFO, "folio_batch_drain",
+                              f"drained={_fbd_result['drained']} "
+                              f"scanned={_fbd_result['scanned']} "
+                              f"skipped_no_idle={_fbd_result['skipped_no_idle']} "
+                              f"skipped_pinned={_fbd_result['skipped_pinned']} "
+                              f"{_fbd_result['duration_ms']:.1f}ms",
+                              session_id=_session_id, project=project)
+                    _log_conn.commit()
+                _ts_report("folio_batch_drain", _fbd_result.get("drained", 0) > 0)
+            except Exception:
+                pass
+
         # ── iter569：anon_vma_prepare — Entity Map Backfill ──
         if _ict_enabled: _ict_milestones.append(("anon_vma_prepare", _ict_time.time()))
         # OS 类比：Linux anon_vma_prepare() — 为迁移页面建立 rmap 基础设施

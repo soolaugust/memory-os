@@ -8581,6 +8581,7 @@ CGROUP_GROUPS = {
     "reclaim": [
         "shrink_dcache", "oom_reaper", "overcommit_kill", "free_pages_ok",
         "kfree_rcu", "put_page", "munlock_idle", "oom_reaper_onfault", "shrink_slab",
+        "folio_batch_drain",
     ],
     "gc": [
         "gc_namespace", "gc_swap",
@@ -11113,5 +11114,146 @@ def kcompactd(conn: sqlite3.Connection, project: str = None) -> dict:
         "scanned": scanned,
         "skipped_pinned": skipped_pinned,
         "skipped_young": skipped_young,
+        "duration_ms": duration_ms,
+    }
+
+
+# ── iter573: folio_batch_drain — Converging Signal Batch Reclaim ──────────
+
+def folio_batch_drain(conn: sqlite3.Connection, project: str = None) -> dict:
+    """
+    iter573: folio_batch_drain — 多信号收敛批量回收。
+
+    OS 类比：Linux folio_batch / pagevec lru_add_drain()
+      (Andrew Morton, 2002, mm/swap.c)
+      per-CPU pagevec 将多个 LRU 操作批量化：不逐页处理，而是收集 15 个 folio
+      到 batch，一次性通过 lru_add_drain() flush，摊销锁开销和 TLB flush。
+
+    根因：多个独立子系统（oom_score_adj_rebalance R2, vmstat_scan, page_idle,
+      numa_balancing）各自将 chunks 标记为 degraded（oom_adj=300-600），但最终
+      回收器 kcompactd 有 min_age_days=3.0 冷启动保护。在这个 3 天窗口内：
+      - FTS5 索引包含 dead chunks → 检索扫描但永远不选中（浪费 I/O）
+      - 膨胀 total chunk count → deferred_initcall 健康探针看到虚高数字
+      - 零访问率居高不下（41%）→ 系统表面看起来不健康
+
+    方案：用 page_idle bitmap 中的 idle_rounds 作为收敛确认信号。如果一个 chunk：
+      1. oom_adj >= oom_threshold（被降级子系统标记）
+      2. access_count == 0（从未被检索命中）
+      3. importance < imp_ceiling（低价值）
+      4. idle_rounds >= min_idle_rounds（page_idle 独立确认连续空闲 N 轮）
+    则多信号收敛提供等价于 age gate 的置信度，可以提前回收。
+
+    与 kcompactd 互补：
+      kcompactd：age >= 3d 时间门控（对首次标记有效）
+      folio_batch_drain：idle_rounds >= 2 观测门控（对跨 session 确认有效）
+      两者取 OR：任一满足即可回收
+
+    参数：
+      conn — DB 连接
+      project — 项目 ID（None 表示全局扫描）
+
+    返回：
+      dict: drained, scanned, skipped_no_idle, skipped_pinned, duration_ms
+    """
+    import time as _t
+    t0 = _t.time()
+
+    try:
+        from config import get as _cfg
+        enabled = _cfg("folio_batch.enabled")
+        if not enabled:
+            return {"drained": 0, "scanned": 0, "skipped_no_idle": 0,
+                    "skipped_pinned": 0, "duration_ms": 0.0}
+        oom_threshold = _cfg("folio_batch.oom_threshold")
+        imp_ceiling = _cfg("folio_batch.imp_ceiling")
+        min_idle_rounds = _cfg("folio_batch.min_idle_rounds")
+        max_drain = _cfg("folio_batch.max_drain")
+    except Exception:
+        return {"drained": 0, "scanned": 0, "skipped_no_idle": 0,
+                "skipped_pinned": 0, "duration_ms": 0.0}
+
+    # Phase 1: 加载 page_idle bitmap（跨 session 空闲轮次追踪）
+    idle_bitmap = _page_idle_load()
+
+    # Phase 2: 查询候选 — kcompactd 相同条件但不含 age 门控
+    proj_filter = ""
+    params = [oom_threshold, imp_ceiling]
+    if project:
+        proj_filter = "AND (project = ? OR project = 'global')"
+        params.append(project)
+
+    candidates = conn.execute(
+        f"""SELECT id, summary, importance, oom_adj, chunk_type
+            FROM memory_chunks
+            WHERE access_count = 0
+            AND oom_adj >= ?
+            AND importance < ?
+            AND importance > 0
+            AND chunk_type != 'task_state'
+            {proj_filter}
+            ORDER BY oom_adj DESC, importance ASC
+        """,
+        params,
+    ).fetchall()
+
+    scanned = len(candidates)
+    skipped_no_idle = 0
+    skipped_pinned = 0
+    drain_ids = []
+
+    # 加载 pinned chunk IDs
+    try:
+        pinned = set(
+            r[0] for r in conn.execute(
+                "SELECT chunk_id FROM chunk_pins"
+            ).fetchall()
+        )
+    except Exception:
+        pinned = set()
+
+    for row in candidates:
+        if len(drain_ids) >= max_drain:
+            break
+
+        cid, summary, importance, oom_adj, chunk_type = row
+
+        # 保护：pinned (mlock)
+        if cid in pinned:
+            skipped_pinned += 1
+            continue
+
+        # 核心判断：page_idle bitmap 中的 idle_rounds 确认
+        rounds = idle_bitmap.get(cid, 0)
+        if rounds < min_idle_rounds:
+            skipped_no_idle += 1
+            continue
+
+        # 多信号收敛确认：oom_adj>=threshold + acc=0 + imp<ceiling + idle_rounds>=N
+        drain_ids.append(cid)
+
+    # Phase 3: 批量删除（folio_batch flush）
+    if drain_ids:
+        # 使用统一 delete_chunks（自动调用 mmu_notifier_invalidate）
+        delete_chunks(conn, drain_ids)
+        conn.commit()
+
+        # bump chunk_version 使 TLB 失效
+        try:
+            bump_chunk_version()
+        except Exception:
+            pass
+
+        # 从 page_idle bitmap 清除已删除的条目
+        for cid in drain_ids:
+            idle_bitmap.pop(cid, None)
+        _page_idle_save(idle_bitmap)
+
+    duration_ms = (_t.time() - t0) * 1000
+
+    return {
+        "drained": len(drain_ids),
+        "scanned": scanned,
+        "skipped_no_idle": skipped_no_idle,
+        "skipped_pinned": skipped_pinned,
         "duration_ms": duration_ms,
     }

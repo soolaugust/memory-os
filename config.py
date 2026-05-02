@@ -3320,6 +3320,18 @@ _REGISTRY: dict = {
     "kcompactd.max_delete": (20, int, 5, 50, None,
         "单次扫描最大删除量（防止批量删除冲击 FTS5 索引）"),
 
+    # ── iter573: folio_batch_drain — Converging Signal Batch Reclaim ──
+    "folio_batch.enabled": (True, bool, None, None, None,
+        "是否启用多信号收敛批量回收（page_idle 确认 + oom_adj 标记 → 提前回收）"),
+    "folio_batch.oom_threshold": (300, int, 100, 1000, None,
+        "触发回收的最低 oom_adj 值（与 kcompactd 共用 R2 标记阈值）"),
+    "folio_batch.imp_ceiling": (0.3, float, 0.1, 0.8, None,
+        "importance 上限：只回收低价值 chunks"),
+    "folio_batch.min_idle_rounds": (2, int, 1, 10, None,
+        "page_idle bitmap 中最少空闲轮次（替代 kcompactd 的 min_age_days 时间门控）"),
+    "folio_batch.max_drain": (20, int, 5, 50, None,
+        "单次批量 flush 最大删除量"),
+
     # ── iter549: vacuum — Database File Compaction ──
     "vacuum.enabled": (True, bool, None, None, None,
         "是否启用 VACUUM（DB 文件物理收缩）"),
