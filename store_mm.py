@@ -10368,3 +10368,163 @@ def oom_score_adj_rebalance(conn: sqlite3.Connection, project: str) -> dict:
         "scanned": scanned,
         "duration_ms": round((_time.time() - t0) * 1000, 2),
     }
+
+
+# ── iter568: shrink_dcache_sb — Immediate Fragment Reclaim (No Age Gate) ──────
+# OS 类比：Linux shrink_dcache_sb() (Al Viro, 2003, fs/dcache.c)
+#   当超级块 unmount/remount 时，立即释放该 sb 下所有不活跃 dentry，
+#   不需要等 LRU aging 周期。与 prune_dcache_references()（定期 LRU 扫描）
+#   的区别：shrink_dcache_sb 是事件驱动的即时清理，无冷启动延迟。
+#
+# 根因：oom_score_adj_rebalance R4 需要 age >= r4_min_age_days (1.0d) 才触发，
+#   导致刚写入的碎片（age < 1d）即使 _vma_validate() 明确拒绝也无法回收。
+#   当前 VFS 层 _vfs_write_protect() 能拦截新写入，但对历史碎片无能为力。
+#   R4 只标记 oom_adj=1000（等后续 kswapd 回收），shrink_dcache_sb 直接 DELETE。
+#
+# 策略：如果一个 chunk 满足以下全部条件，则立即删除：
+#   1. _vfs_write_protect(summary) == True（当前 VFS 门控会拒绝的内容）
+#   2. access_count == 0（从未被检索命中——零价值证据）
+#   3. 不在 chunk_pins 中（非 mlock）
+#   4. oom_adj > -500（非用户显式保护）
+#   5. chunk_type 不是 task_state（控制面数据）
+#
+# 与 R4 的分工：
+#   R4: 回溯 _retrospective_vma_validate + age 门控 → 标记 oom_adj=1000
+#   shrink_dcache_sb: _vfs_write_protect + 无 age 门控 → 直接 DELETE
+#   R4 覆盖更多语义检查（V1-V5），shrink_dcache_sb 只用 VFS 物理检查（更保守但更果断）
+
+def shrink_dcache_sb(conn: sqlite3.Connection, project: str = None) -> dict:
+    """
+    iter568: 即时碎片回收——对已入库但当前 VFS 门控会拒绝的 zero-access chunk 直接删除。
+
+    OS 类比：Linux shrink_dcache_sb() — 事件驱动的即时释放，无 LRU aging 等待。
+
+    参数：
+      conn — 数据库连接
+      project — 项目 ID（None 时扫描全库）
+
+    返回 dict:
+      deleted: int — 删除的 chunk 数
+      deleted_ids: list — 删除的 chunk ID 列表
+      scanned: int — 扫描的 chunk 数
+      duration_ms: float
+    """
+    from config import get as _cfg
+    t0 = _time.time()
+
+    enabled = _cfg("shrink_dcache_sb.enabled")
+    if not enabled:
+        return {"deleted": 0, "deleted_ids": [], "scanned": 0, "duration_ms": 0.0}
+
+    # 获取 pinned IDs
+    pinned_ids = set()
+    try:
+        if project:
+            pin_rows = conn.execute(
+                "SELECT chunk_id FROM chunk_pins WHERE project IN (?, 'global')",
+                (project,)
+            ).fetchall()
+        else:
+            pin_rows = conn.execute(
+                "SELECT chunk_id FROM chunk_pins"
+            ).fetchall()
+        pinned_ids = {r[0] for r in pin_rows}
+    except Exception:
+        pass
+
+    # 扫描 zero-access chunks
+    if project:
+        rows = conn.execute(
+            """SELECT id, chunk_type, summary, COALESCE(oom_adj, 0)
+               FROM memory_chunks
+               WHERE project IN (?, 'global')
+                 AND access_count = 0""",
+            (project,)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT id, chunk_type, summary, COALESCE(oom_adj, 0)
+               FROM memory_chunks
+               WHERE access_count = 0"""
+        ).fetchall()
+
+    scanned = len(rows)
+    deleted_ids = []
+
+    # import _vfs_write_protect lazily to avoid circular import
+    try:
+        from store_vfs import _vfs_write_protect
+    except ImportError:
+        # fallback: 内联最小检查
+        def _vfs_write_protect(s):
+            s = (s or "").strip()
+            if not s or len(s) < 8:
+                return True
+            if s[0] in ('|', ')', ']', '}', '>', '+', '='):
+                return True
+            if s.count('|') >= 2:
+                return True
+            return False
+
+    max_delete = int(_cfg("shrink_dcache_sb.max_delete"))
+
+    for cid, ctype, summary, oom in rows:
+        if len(deleted_ids) >= max_delete:
+            break
+        # 保护检查
+        if cid in pinned_ids:
+            continue
+        if ctype == "task_state":
+            continue
+        if oom <= -500:
+            continue
+
+        # 核心判断：当前 VFS 门控会拒绝写入？
+        if _vfs_write_protect(summary):
+            deleted_ids.append(cid)
+
+    # 批量删除
+    if deleted_ids:
+        try:
+            # 删除 FTS5 索引
+            for cid in deleted_ids:
+                rowid_row = conn.execute(
+                    "SELECT rowid FROM memory_chunks WHERE id=?", (cid,)
+                ).fetchone()
+                if rowid_row:
+                    conn.execute(
+                        "DELETE FROM memory_chunks_fts WHERE rowid_ref=?",
+                        (str(rowid_row[0]),)
+                    )
+            # 删除 chunk 主记录
+            placeholders = ",".join("?" * len(deleted_ids))
+            conn.execute(
+                f"DELETE FROM memory_chunks WHERE id IN ({placeholders})",
+                deleted_ids
+            )
+            # 清理 entity_edges 中引用这些 chunk 的 edges
+            try:
+                conn.execute(
+                    f"DELETE FROM entity_edges WHERE source_chunk_id IN ({placeholders})",
+                    deleted_ids
+                )
+            except Exception:
+                pass
+            # 清理 recall_traces 中 stale refs
+            # (不清理 recall_traces 自身 — 那些是历史记录，由 gc_traces 管理)
+            conn.commit()
+
+            try:
+                from store_core import bump_chunk_version
+                bump_chunk_version()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    return {
+        "deleted": len(deleted_ids),
+        "deleted_ids": deleted_ids,
+        "scanned": scanned,
+        "duration_ms": round((_time.time() - t0) * 1000, 2),
+    }

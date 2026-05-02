@@ -1679,6 +1679,24 @@ def main():
             except Exception:
                 pass
 
+        # ── iter568：shrink_dcache_sb — Immediate Fragment Reclaim ──
+        if _ict_enabled: _ict_milestones.append(("shrink_dcache_sb", _ict_time.time()))
+        # OS 类比：Linux shrink_dcache_sb() — 事件驱动即时清理，无 LRU aging 等待
+        _shrink_result = {"deleted": 0}
+        if not _defer_reclaim and not _ts_skip("shrink_dcache_sb"):
+            try:
+                from store_mm import shrink_dcache_sb
+                _shrink_result = shrink_dcache_sb(_log_conn, project)
+                if _shrink_result["deleted"] > 0:
+                    dmesg_log(_log_conn, DMESG_INFO, "shrink_dcache_sb",
+                              f"deleted={_shrink_result['deleted']} "
+                              f"scanned={_shrink_result['scanned']} "
+                              f"{_shrink_result['duration_ms']:.1f}ms",
+                              session_id=_session_id, project=project)
+                _ts_report("shrink_dcache_sb", _shrink_result.get("deleted", 0) > 0)
+            except Exception:
+                pass
+
         # ── iter549：vacuum — Database File Compaction ──
         # OS 类比：SSD Background GC / Firmware Compaction — fstrim 通知 SSD 哪些 LBA
         # 空闲，但物理回收需要 SSD 内部 GC 搬迁有效 pages 合并 erase blocks。

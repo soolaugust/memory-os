@@ -3272,6 +3272,12 @@ _REGISTRY: dict = {
     "oom_rebalance.r4_min_age_days": (1.0, float, 0.5, 30.0, None,
         "iter567 R4 规则：chunk 创建超过此天数 + 零访问 + _vma_validate 失败 → oom_adj=1000"),
 
+    # ── iter568: shrink_dcache_sb — Immediate Fragment Reclaim ──
+    "shrink_dcache_sb.enabled": (True, bool, None, None, None,
+        "是否启用即时碎片回收（无 age 门控，直接删除 VFS 层拒绝的 zero-access chunk）"),
+    "shrink_dcache_sb.max_delete": (20, int, 1, 100, None,
+        "单次 shrink_dcache_sb 最大删除数量（防止误删过多）"),
+
     # ── iter549: vacuum — Database File Compaction ──
     "vacuum.enabled": (True, bool, None, None, None,
         "是否启用 VACUUM（DB 文件物理收缩）"),
