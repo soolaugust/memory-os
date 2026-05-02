@@ -968,6 +968,23 @@ def main():
         except Exception:
             pass
 
+        # ── iter558: pelt_update — Per-Entity Load Tracking ──
+        # OS 类比：Linux PELT (Vincent Guittot, 2012) — 更新 per-type util_avg
+        if _ict_enabled: _ict_milestones.append(("pelt_update", _ict_time.time()))
+        try:
+            from store_mm import pelt_update, pelt_save, pelt_load
+            _pelt_state = pelt_update(_log_conn, project)
+            pelt_save(_pelt_state)
+            _pelt_proj = _pelt_state.get(project, {})
+            if _pelt_proj:
+                _pelt_low = [(t, u) for t, u in _pelt_proj.items() if u < 0.15]
+                if _pelt_low:
+                    dmesg_log(_log_conn, DMESG_INFO, "pelt_update",
+                              f"low_util_types: {', '.join(f'{t}={u:.3f}' for t, u in _pelt_low)}",
+                              session_id=_session_id, project=project)
+        except Exception:
+            pass
+
         # ── iter413: Sleep Consolidation — 离线记忆巩固 ──
         # OS 类比：Linux pdflush/writeback — session 间 idle period 内后台巩固 dirty pages
         # Stickgold (2005): 海马重放最近学习的记忆 → stability 提升（light sleep consolidation）
@@ -1121,6 +1138,25 @@ def main():
                               f"scanned={scrub_result['scanned']} {scrub_result['duration_ms']:.1f}ms",
                               session_id=_session_id, project=project)
                 _ts_report("mem_scrub", (scrub_result.get("ce_fixed", 0) + scrub_result.get("ue_marked", 0)) > 0)
+            except Exception:
+                pass
+
+        # ── iter557：bdi_writeback — Boot-Time Dirty Page Content Audit ──
+        # OS 类比：Linux bdi_writeback (Jens Axboe, 2009) — per-BDI 审计 dirty pages
+        if _ict_enabled: _ict_milestones.append(("bdi_writeback", _ict_time.time()))
+        if not _ts_skip("bdi_writeback"):
+            try:
+                from store_mm import bdi_writeback
+                wb_result = bdi_writeback(_log_conn, project)
+                if wb_result.get("dirty_found", 0) > 0:
+                    dmesg_log(_log_conn, DMESG_INFO, "bdi_writeback",
+                              f"audit: dirty={wb_result['dirty_found']} "
+                              f"deleted={wb_result['fragments_deleted']} "
+                              f"demoted={wb_result['low_quality_demoted']} "
+                              f"protected={wb_result['skipped_protected']} "
+                              f"{wb_result['duration_ms']:.1f}ms",
+                              session_id=_session_id, project=project)
+                _ts_report("bdi_writeback", wb_result.get("dirty_found", 0) > 0)
             except Exception:
                 pass
 

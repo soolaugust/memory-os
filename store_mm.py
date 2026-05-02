@@ -9252,3 +9252,375 @@ def sched_autogroup_stats(schedstat_state: dict) -> dict:
         "work_rate": report.get("effective_work_rate", 0),
         "recent_adjustments": recent_adj,
     }
+
+
+# ── iter557: bdi_writeback — Boot-Time Dirty Page Writeback Audit ──────
+# OS 类比：Linux bdi_writeback (Jens Axboe, 2009, kernel 2.6.32, mm/backing-dev.c)
+#   per-BDI (Backing Device Info) writeback 线程替代全局 pdflush。
+#   每个 backing device 独立审计和回写 dirty pages。
+#   boot 时 bdi_forker_thread 扫描所有已注册 BDI，
+#   为有 dirty pages 的设备创建 writeback 线程。
+#
+# 根因：历史 chunks（写入于 iter533/541 写保护之前）永久绕过内容质量检查。
+#   7 个 <30 字符碎片 + 3 个 table-row 泄漏存活在 DB 中，
+#   reclaim 子系统用 importance/access/age 但从不 re-validate 内容质量。
+#   这些 "dirty pages" 永远不会被 writeback（清洗）。
+#
+# 解决：boot-time content re-audit — 用当前 _vfs_write_protect + 额外规则
+#   扫描所有 chunks，标记/删除不符合当前质量标准的历史数据。
+
+def bdi_writeback(conn: "sqlite3.Connection", project: "Optional[str]" = None) -> dict:
+    """iter557: bdi_writeback — boot-time dirty page content audit.
+
+    三阶段处理器：
+      Phase 1 (scan): 扫描所有 chunks，应用当前写保护规则检测 dirty pages
+      Phase 2 (classify): 分类 dirty pages —— fragment(直接删除) vs low_quality(降级)
+      Phase 3 (writeback): 执行清洗 —— 删除碎片 + 降级低质量 + FTS5 一致性
+
+    保护机制：
+      - mlock (oom_adj <= -500) 不删除，只标记
+      - task_state 类型跳过
+      - 单次最多处理 max_per_scan 个
+      - access_count > 0 的不删除（曾被验证有价值），只降级
+
+    返回 dict: {triggered, scanned, dirty_found, fragments_deleted,
+                low_quality_demoted, skipped_protected, duration_ms}
+    """
+    _t0 = _time.time()
+    result = {
+        "triggered": False,
+        "scanned": 0,
+        "dirty_found": 0,
+        "fragments_deleted": 0,
+        "low_quality_demoted": 0,
+        "skipped_protected": 0,
+        "duration_ms": 0.0,
+    }
+
+    try:
+        from config import get as _cfg
+        enabled = _cfg("bdi_writeback.enabled")
+        max_per_scan = int(_cfg("bdi_writeback.max_per_scan"))
+        min_summary_len = int(_cfg("bdi_writeback.min_summary_len"))
+        demote_importance = float(_cfg("bdi_writeback.demote_importance"))
+        demote_oom_adj = int(_cfg("bdi_writeback.demote_oom_adj"))
+    except Exception:
+        enabled = True
+        max_per_scan = 30
+        min_summary_len = 15
+        demote_importance = 0.30
+        demote_oom_adj = 400
+
+    if not enabled:
+        result["duration_ms"] = (_time.time() - _t0) * 1000
+        return result
+
+    result["triggered"] = True
+
+    # ── Phase 1: Scan — 加载所有 chunks 的 summary 进行质量审计 ──
+    query = "SELECT id, summary, chunk_type, importance, access_count, oom_adj FROM memory_chunks"
+    params = ()
+    if project:
+        query += " WHERE project IN (?, 'global')"
+        params = (project,)
+
+    try:
+        rows = conn.execute(query, params).fetchall()
+    except Exception:
+        result["duration_ms"] = (_time.time() - _t0) * 1000
+        return result
+
+    result["scanned"] = len(rows)
+
+    # ── Phase 2: Classify — 检测 dirty pages ──
+    dirty_fragments = []   # 直接删除
+    dirty_low_quality = []  # 降级
+    processed = 0
+
+    for row in rows:
+        if processed >= max_per_scan:
+            break
+        chunk_id, summary, chunk_type, importance, access_count, oom_adj = row
+
+        # 跳过 task_state
+        if chunk_type == "task_state":
+            continue
+
+        if not summary:
+            dirty_fragments.append(chunk_id)
+            processed += 1
+            result["dirty_found"] += 1
+            continue
+
+        s = summary.strip()
+
+        # ── Rule 1: _vfs_write_protect 规则 re-apply ──
+        is_fragment = False
+
+        # 空/极短
+        if len(s) < 8:
+            is_fragment = True
+        # 以截断符号开头
+        elif s[0] in ('|', ')', ']', '}', '>', '+', '=', '：', '）', '】', '》',
+                       ',', '，', '、', ';', '；'):
+            is_fragment = True
+        # markdown 表格行 (>= 2 管道符)
+        elif s.count('|') >= 2:
+            is_fragment = True
+        # 以冒号结尾
+        elif s.rstrip().endswith(':') or s.rstrip().endswith('：'):
+            is_fragment = True
+        # 纯数字/符号行
+        elif re.match(r'^[\d\s.,:;/×\-+=%]+$', s):
+            is_fragment = True
+
+        # ── Rule 2: 额外短文本检测 ──
+        if not is_fragment and len(s) < min_summary_len:
+            is_fragment = True
+
+        # ── Rule 3: markdown 标题行
+        if not is_fragment and s.startswith('#'):
+            is_fragment = True
+
+        # ── Rule 4: 编号列表项碎片 (无技术锚点)
+        if not is_fragment and re.match(r'^\d+\.\s', s) and len(s) < 60:
+            # 有技术锚点则保留
+            if not re.search(r'[.](py|js|ts|go|rs|sh|yaml|json|toml)|`[^`]+`|\d+%|\d+ms', s):
+                is_fragment = True
+
+        # ── Rule 5: 以 dash 开头的短列表项 (< 50 chars, 无技术锚点)
+        if not is_fragment and s.startswith('- ') and len(s) < 50:
+            if not re.search(r'[.](py|js|ts|go|rs|sh|yaml|json|toml)|`[^`]+`|\d+%|\d+ms', s):
+                is_fragment = True
+
+        if not is_fragment:
+            continue
+
+        # ── Classification ──
+        processed += 1
+        result["dirty_found"] += 1
+
+        # mlock 保护：标记但不删除
+        if oom_adj <= -500:
+            result["skipped_protected"] += 1
+            continue
+
+        # 有访问记录：曾被验证有价值，只降级不删除
+        if access_count > 0:
+            dirty_low_quality.append(chunk_id)
+        else:
+            dirty_fragments.append(chunk_id)
+
+    # ── Phase 3: Writeback — 执行清洗 ──
+
+    # 3a: 删除碎片（零访问的 dirty pages）
+    if dirty_fragments:
+        try:
+            delete_chunks(conn, dirty_fragments)
+            conn.commit()
+            result["fragments_deleted"] = len(dirty_fragments)
+        except Exception:
+            pass
+
+    # 3b: 降级低质量（有访问的 dirty pages）
+    for cid in dirty_low_quality:
+        try:
+            conn.execute(
+                "UPDATE memory_chunks SET importance = MIN(importance, ?), oom_adj = MAX(oom_adj, ?) WHERE id = ?",
+                (demote_importance, demote_oom_adj, cid),
+            )
+            result["low_quality_demoted"] += 1
+        except Exception:
+            pass
+
+    if dirty_low_quality:
+        try:
+            conn.commit()
+            bump_chunk_version(conn)
+        except Exception:
+            pass
+
+    result["duration_ms"] = round((_time.time() - _t0) * 1000, 1)
+    return result
+
+
+# ── pelt_load — Per-Entity Load Tracking for Write-Time Admission（iter558）──
+
+_PELT_FILE = os.path.join(MEMORY_OS_DIR, "pelt_state.json")
+
+# Types exempt from PELT discount — always admitted at full importance
+_PELT_EXEMPT_TYPES = frozenset({"task_state", "excluded_path"})
+
+
+def pelt_load() -> dict:
+    """Load PELT state from disk. Format: {project: {chunk_type: util_avg}}."""
+    try:
+        with open(_PELT_FILE, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def pelt_save(state: dict) -> None:
+    """Save PELT state to disk."""
+    try:
+        with open(_PELT_FILE, "w") as f:
+            json.dump(state, f, separators=(",", ":"))
+    except OSError:
+        pass
+
+
+def pelt_update(conn: "sqlite3.Connection", project: str,
+                state: dict = None) -> dict:
+    """iter558: pelt_load — Per-Entity Load Tracking.
+
+    OS 类比：Linux PELT (Per-Entity Load Tracking, Vincent Guittot, 2012,
+    kernel 3.8, sched/pelt.c) — CFS 用几何级数衰减平均追踪每个 sched_entity
+    的 util_avg (0-1024)。高 util 任务放大核，低 util 任务放小核。
+    不是瞬时采样，而是历史加权移动平均（EMA），反映持续利用率。
+
+    计算每个 (project, chunk_type) 的 recall utilization：
+      util_avg = recalled_count / total_count_of_type (capped at 1.0)
+    从 recall_traces 的 top_k_json 统计各类型被实际召回的次数，
+    除以该类型在 DB 中的总数量，得到「利用率」。
+
+    util_avg 高 → 该类型在此项目中被频繁检索（有价值）
+    util_avg 低 → 该类型历史上很少被召回（写入可能是浪费）
+
+    返回 dict: {project: {chunk_type: util_avg}, ...}
+    """
+    if state is None:
+        state = pelt_load()
+
+    try:
+        from config import get as _cfg
+        window = int(_cfg("pelt.window_traces"))
+    except Exception:
+        window = 50
+
+    # ── Phase 1: 统计 recall 中各 type 被召回次数 ──
+    # global 层的 chunks 在其他项目的 traces 中被召回（retriever 查询 IN (proj, 'global')），
+    # 所以 global 的 util 统计需要看 ALL traces，不限 project
+    try:
+        if project == "global":
+            traces = conn.execute(
+                "SELECT top_k_json FROM recall_traces "
+                "ORDER BY ROWID DESC LIMIT ?",
+                (window,),
+            ).fetchall()
+        else:
+            traces = conn.execute(
+                "SELECT top_k_json FROM recall_traces WHERE project=? "
+                "ORDER BY ROWID DESC LIMIT ?",
+                (project, window),
+            ).fetchall()
+    except Exception:
+        return state
+
+    # For global project: only count recalls of chunks that actually belong to global
+    # For regular projects: count all types (including global chunks recalled in their context)
+    global_chunk_ids = set()
+    if project == "global":
+        try:
+            global_chunk_ids = {r[0] for r in conn.execute(
+                "SELECT id FROM memory_chunks WHERE project='global'"
+            ).fetchall()}
+        except Exception:
+            pass
+
+    type_recalled = Counter()
+    for (tk_json,) in traces:
+        try:
+            for item in json.loads(tk_json):
+                ct = item.get("chunk_type")
+                if not ct:
+                    continue
+                # For global: only count if the chunk actually belongs to global
+                if project == "global":
+                    cid = item.get("id", "")
+                    if cid not in global_chunk_ids:
+                        continue
+                type_recalled[ct] += 1
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+    # ── Phase 2: 统计 DB 中各 type 总数 ──
+    try:
+        if project == "global":
+            rows = conn.execute(
+                "SELECT chunk_type, COUNT(*) FROM memory_chunks "
+                "WHERE project='global' GROUP BY chunk_type",
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT chunk_type, COUNT(*) FROM memory_chunks "
+                "WHERE project IN (?, 'global') GROUP BY chunk_type",
+                (project,),
+            ).fetchall()
+    except Exception:
+        return state
+
+    type_totals = {r[0]: r[1] for r in rows}
+
+    # ── Phase 3: 计算 util_avg = recalled / total (capped 1.0) ──
+    proj_state = state.get(project, {})
+    alpha = 0.3  # EMA smoothing factor
+
+    for chunk_type, total in type_totals.items():
+        if chunk_type in _PELT_EXEMPT_TYPES or total == 0:
+            continue
+        raw_util = min(type_recalled.get(chunk_type, 0) / total, 1.0)
+        # EMA: blend with previous value for stability
+        prev = proj_state.get(chunk_type, raw_util)  # cold start = raw
+        proj_state[chunk_type] = round(prev * (1 - alpha) + raw_util * alpha, 4)
+
+    state[project] = proj_state
+    return state
+
+
+def pelt_discount(project: str, chunk_type: str,
+                  importance: float, state: dict = None) -> float:
+    """Write-time importance discount based on PELT utilization.
+
+    如果该 (project, chunk_type) 的 util_avg < low_util_threshold：
+      importance *= discount_factor
+    util_avg 越低，discount 越强（线性插值）。
+
+    exempt types (task_state, excluded_path) 不折扣。
+    冷启动（无历史数据）不折扣。
+
+    返回调整后的 importance。
+    """
+    if chunk_type in _PELT_EXEMPT_TYPES:
+        return importance
+
+    try:
+        from config import get as _cfg
+        enabled = _cfg("pelt.enabled")
+        low_threshold = float(_cfg("pelt.low_util_threshold"))
+        min_discount = float(_cfg("pelt.min_discount_factor"))
+    except Exception:
+        enabled = True
+        low_threshold = 0.15
+        min_discount = 0.50
+
+    if not enabled:
+        return importance
+
+    if state is None:
+        state = pelt_load()
+
+    proj_state = state.get(project, {})
+    util_avg = proj_state.get(chunk_type)
+
+    # 冷启动（无数据）→ 不折扣
+    if util_avg is None:
+        return importance
+
+    # util_avg >= threshold → 不折扣
+    if util_avg >= low_threshold:
+        return importance
+
+    # 线性插值: util_avg=0 → discount=min_discount, util_avg=threshold → discount=1.0
+    discount = min_discount + (1.0 - min_discount) * (util_avg / low_threshold)
+    return round(importance * discount, 4)

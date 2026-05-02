@@ -3322,6 +3322,30 @@ _REGISTRY: dict = {
         "两次自动调整之间的最少间隔 session 数"),
     "sched_autogroup.min_sessions": (5, int, 3, 20, None,
         "启动自动调参所需的最少历史 session 数"),
+
+    # ── iter557: bdi_writeback — Boot-Time Dirty Page Writeback Audit ──
+    # OS 类比：Linux bdi_writeback (Jens Axboe, 2009, kernel 2.6.32)
+    #   per-BDI writeback 线程在 boot 时审计并回写 dirty pages
+    # ── iter558: pelt — Per-Entity Load Tracking ──
+    "pelt.enabled": (True, bool, None, None, None,
+        "是否启用 PELT 写入准入控制"),
+    "pelt.window_traces": (50, int, 10, 200, None,
+        "计算 util_avg 使用的最近 recall_traces 条数"),
+    "pelt.low_util_threshold": (0.15, float, 0.05, 0.50, None,
+        "低利用率阈值——低于此值触发 importance 折扣"),
+    "pelt.min_discount_factor": (0.50, float, 0.20, 0.90, None,
+        "最大折扣因子——util_avg=0 时 importance 乘以此值"),
+
+    "bdi_writeback.enabled": (True, bool, None, None, None,
+        "是否启用 boot-time 内容质量审计"),
+    "bdi_writeback.max_per_scan": (30, int, 5, 100, None,
+        "单次审计最大处理 chunk 数"),
+    "bdi_writeback.min_summary_len": (15, int, 8, 50, None,
+        "summary 最短长度阈值（低于此为碎片）"),
+    "bdi_writeback.demote_importance": (0.30, float, 0.1, 0.6, None,
+        "低质量 chunk 降级目标 importance 上限"),
+    "bdi_writeback.demote_oom_adj": (400, int, 100, 900, None,
+        "低质量 chunk 降级设置的 oom_adj 值"),
 }
 
 # ── 磁盘配置缓存（进程内只读一次）──

@@ -1811,6 +1811,15 @@ def _write_chunk(chunk_type: str, summary: str, project: str, session_id: str,
     except Exception:
         pass
 
+    # iter558: PELT — Per-Entity Load Tracking 写入准入折扣
+    # OS 类比：Linux PELT (Vincent Guittot, 2012) — 按 sched_entity 历史利用率
+    # 决定任务放置。低 util_avg 的 chunk_type importance 自动折扣。
+    try:
+        from store_mm import pelt_discount as _pelt_discount
+        importance = _pelt_discount(project, chunk_type, importance)
+    except Exception:
+        pass
+
     # 迭代315：提取编码情境（Encoding Specificity, Tulving 1973）
     try:
         from store_vfs import extract_encoding_context as _extract_enc_ctx
