@@ -3006,6 +3006,16 @@ _REGISTRY: dict = {
         "iter510: 相邻 traces Jaccard >= 此阈值时触发模糊合并（默认 0.8）"),
     "vma_merge.max_merge_per_scan": (100, int, 10, 500, None,
         "iter510: 每次扫描最多合并 N 条 traces（默认 100）"),
+
+    # ── iter511: page_idle — 空闲页面追踪 ──
+    "page_idle.demote_rounds": (3, int, 2, 10, None,
+        "iter511: 连续 idle ≥ N 轮时执行 importance 降级（默认 3）"),
+    "page_idle.delete_rounds": (5, int, 3, 15, None,
+        "iter511: 连续 idle ≥ N 轮且降级后 importance<0.2 时删除（默认 5）"),
+    "page_idle.decay_factor": (0.7, float, 0.3, 0.95, None,
+        "iter511: 每次降级时 importance *= decay_factor（默认 0.7）"),
+    "page_idle.demote_oom_adj": (200, int, 50, 500, None,
+        "iter511: 每次降级时 oom_adj += N，加速后续回收（默认 200）"),
 }
 
 # ── 磁盘配置缓存（进程内只读一次）──

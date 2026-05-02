@@ -2559,6 +2559,12 @@ def main():
                         ensure_schema(wconn)
                         update_accessed(wconn, accessed_ids, recall_quality=_hd_recall_quality)
                         mglru_promote(wconn, accessed_ids)
+                        # 迭代511：page_idle clear — 从 idle bitmap 移除被命中的 chunks
+                        try:
+                            from store_mm import page_idle_clear as _pic
+                            _pic(accessed_ids, project)
+                        except Exception:
+                            pass
                         _write_trace(session_id, project, prompt_hash, candidates_count,
                                      top_k_data, 1, reason, duration_ms, conn=wconn)
                         _deferred.flush(wconn)
@@ -3643,6 +3649,12 @@ def main():
             ensure_schema(wconn)
             update_accessed(wconn, accessed_ids, recall_quality=_recall_quality_main)
             mglru_promote(wconn, accessed_ids)  # 迭代45：MGLRU promote
+            # 迭代511：page_idle clear — 从 idle bitmap 移除被命中的 chunks
+            try:
+                from store_mm import page_idle_clear as _pic
+                _pic(accessed_ids, project)
+            except Exception:
+                pass
 
             # ── 迭代311-A：Reconsolidation — 召回触发 importance 强化 ────────
             # OS 类比：ARC T2 晋升 — 被反复命中的页面从 T1 晋升，淘汰优先级降低

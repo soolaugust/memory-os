@@ -4066,3 +4066,240 @@ def warmup_swap_cache(conn: sqlite3.Connection, project: str,
 
     except Exception:
         return {"restored_count": 0, "skipped_cooldown": False, "chunk_ids": []}
+
+
+# ── page_idle — Idle Page Tracking（迭代511）────────────────────────────
+# OS 类比：Linux /sys/kernel/mm/page_idle/bitmap (Vladimir Davydov, 2015)
+#
+# Linux page_idle 机制：
+#   用户态工具通过 /sys/kernel/mm/page_idle/bitmap 标记物理页帧为 "idle"，
+#   然后等待一个观察周期。周期结束后仍标记为 idle 的页面说明没被任何进程访问，
+#   可以安全回收。与 LRU 的"相对顺序"和 DAMON 的"采样估算"不同，
+#   page_idle 提供精确的 per-page 活跃/空闲状态。
+#
+# memory-os 类比：
+#   问题：DAMON 依赖 dead_age_days=30（在 2-3 天数据中永不触发），
+#         shrink_dcache 依赖 min_age_days=3（但 import 批量导入的 chunk created_at 较新），
+#         oom_reaper 只看零访问率阈值（全局粗粒度）。
+#   解决：page_idle 按"会话轮次"追踪——每个 SessionStart 标记当前所有 chunks 为 idle，
+#         本轮会话期间被检索命中的 chunk 从 idle set 移除。
+#         下次 SessionStart 时，连续 N 轮仍为 idle 的 chunks 执行降级/淘汰。
+#         这是精确的、按使用事实判定的机制，不依赖绝对时间。
+
+_PAGE_IDLE_FILE = MEMORY_OS_DIR / "page_idle_bitmap.json"
+
+
+def page_idle_mark(conn: sqlite3.Connection, project: str) -> dict:
+    """
+    标记阶段：将当前项目所有 chunk 标记为 idle。
+
+    在 SessionStart 时调用。记录 {chunk_id: idle_rounds} 到 bitmap 文件。
+    - 新出现的 chunk：idle_rounds = 1
+    - 已存在于 bitmap 中的（上轮仍为 idle）：idle_rounds += 1
+    - 上轮被检索命中的（已从 bitmap 移除）：不在文件中，本轮重新标记为 1
+
+    返回：
+      marked — 本轮标记的 chunk 数
+      carried_over — 从上轮延续的（连续 idle）chunk 数
+    """
+    try:
+        # 获取当前项目所有 active chunk IDs
+        rows = conn.execute(
+            """SELECT id FROM memory_chunks
+               WHERE project = ? AND chunk_type != 'task_state'""",
+            (project,)
+        ).fetchall()
+        current_ids = {r[0] for r in rows}
+
+        if not current_ids:
+            return {"marked": 0, "carried_over": 0}
+
+        # 加载上轮 bitmap
+        old_bitmap = _page_idle_load()
+        project_bitmap = old_bitmap.get(project, {})
+
+        # 构建新 bitmap：当前存在的 chunk 全标 idle
+        new_project_bitmap = {}
+        carried_over = 0
+        for cid in current_ids:
+            if cid in project_bitmap:
+                # 连续 idle：轮次 +1
+                new_project_bitmap[cid] = project_bitmap[cid] + 1
+                carried_over += 1
+            else:
+                # 新标记或上轮被访问过（已移除）
+                new_project_bitmap[cid] = 1
+
+        # 保存
+        old_bitmap[project] = new_project_bitmap
+        _page_idle_save(old_bitmap)
+
+        return {"marked": len(new_project_bitmap), "carried_over": carried_over}
+
+    except Exception:
+        return {"marked": 0, "carried_over": 0}
+
+
+def page_idle_clear(chunk_ids: list, project: str) -> int:
+    """
+    清除阶段：将被访问的 chunk 从 idle bitmap 中移除。
+
+    在 retriever 检索命中后调用（与 update_accessed/mglru_promote 同路径）。
+    移除意味着"本轮会话中被使用了"，下次 mark 时不会被判为连续 idle。
+
+    返回：实际清除的 chunk 数
+    """
+    if not chunk_ids:
+        return 0
+    try:
+        bitmap = _page_idle_load()
+        project_bitmap = bitmap.get(project, {})
+        if not project_bitmap:
+            return 0
+
+        cleared = 0
+        for cid in chunk_ids:
+            if cid in project_bitmap:
+                del project_bitmap[cid]
+                cleared += 1
+
+        if cleared > 0:
+            bitmap[project] = project_bitmap
+            _page_idle_save(bitmap)
+
+        return cleared
+    except Exception:
+        return 0
+
+
+def page_idle_scan(conn: sqlite3.Connection, project: str) -> dict:
+    """
+    收割阶段：对连续多轮 idle 的 chunks 执行降级。
+
+    在 SessionStart 时调用（mark 之前），扫描 bitmap 中 idle_rounds >= threshold 的 chunk。
+    动作：
+      - idle_rounds >= idle_demote_rounds (默认 3)：importance *= decay_factor + oom_adj += 200
+      - idle_rounds >= idle_delete_rounds (默认 5)：importance < 0.2 的直接删除
+    保护：
+      - oom_adj <= -500 (mlock) 的 chunk 不处理
+      - design_constraint/quantitative_evidence 类型不删除（只降级）
+      - task_state 不参与（mark 时已排除）
+
+    返回：
+      scanned — 扫描的 chunk 数
+      demoted — 降级的 chunk 数
+      deleted — 删除的 chunk 数
+      max_idle_rounds — 最大连续 idle 轮次
+    """
+    try:
+        from config import get as _cfg
+    except Exception:
+        return {"scanned": 0, "demoted": 0, "deleted": 0, "max_idle_rounds": 0}
+
+    demote_rounds = _cfg("page_idle.demote_rounds")
+    delete_rounds = _cfg("page_idle.delete_rounds")
+    decay_factor = _cfg("page_idle.decay_factor")
+    demote_oom_adj = _cfg("page_idle.demote_oom_adj")
+    protect_types = ("design_constraint", "quantitative_evidence")
+
+    bitmap = _page_idle_load()
+    project_bitmap = bitmap.get(project, {})
+
+    if not project_bitmap:
+        return {"scanned": 0, "demoted": 0, "deleted": 0, "max_idle_rounds": 0}
+
+    # 找出需要处理的 chunk IDs（idle_rounds >= demote_rounds）
+    candidates = {cid: rounds for cid, rounds in project_bitmap.items()
+                  if rounds >= demote_rounds}
+
+    if not candidates:
+        max_rounds = max(project_bitmap.values()) if project_bitmap else 0
+        return {"scanned": len(project_bitmap), "demoted": 0, "deleted": 0,
+                "max_idle_rounds": max_rounds}
+
+    # 批量查询 chunk 元数据
+    cid_list = list(candidates.keys())
+    placeholders = ",".join("?" * len(cid_list))
+    rows = conn.execute(
+        f"""SELECT id, importance, oom_adj, chunk_type FROM memory_chunks
+            WHERE id IN ({placeholders})""",
+        cid_list
+    ).fetchall()
+
+    demoted = 0
+    deleted = 0
+    delete_ids = []
+
+    for chunk_id, importance, oom_adj, chunk_type in rows:
+        # 保护：mlock 的 chunk 不处理
+        if oom_adj <= -500:
+            continue
+
+        idle_rounds = candidates[chunk_id]
+
+        # 降级：importance 衰减 + oom_adj 升高
+        new_importance = importance * decay_factor
+        new_oom_adj = min(oom_adj + demote_oom_adj, OOM_ADJ_MAX)
+
+        # 删除条件：超过 delete_rounds 且 importance 已很低
+        if (idle_rounds >= delete_rounds and new_importance < 0.2
+                and chunk_type not in protect_types):
+            delete_ids.append(chunk_id)
+            deleted += 1
+        else:
+            # 执行降级
+            conn.execute(
+                """UPDATE memory_chunks SET importance = ?, oom_adj = ?
+                   WHERE id = ?""",
+                (round(new_importance, 4), new_oom_adj, chunk_id)
+            )
+            demoted += 1
+
+    # 批量删除
+    if delete_ids:
+        delete_chunks(conn, delete_ids)
+        # 从 bitmap 中移除已删除的
+        for cid in delete_ids:
+            project_bitmap.pop(cid, None)
+        bitmap[project] = project_bitmap
+        _page_idle_save(bitmap)
+
+    if demoted > 0 or deleted > 0:
+        conn.commit()
+        try:
+            bump_chunk_version()
+        except Exception:
+            pass
+        try:
+            dmesg_log(conn, DMESG_INFO, "page_idle",
+                      f"scan: demoted={demoted} deleted={deleted} "
+                      f"candidates={len(candidates)} project={project}",
+                      project=project)
+        except Exception:
+            pass
+
+    max_rounds = max(project_bitmap.values()) if project_bitmap else 0
+    return {"scanned": len(project_bitmap), "demoted": demoted,
+            "deleted": deleted, "max_idle_rounds": max_rounds}
+
+
+def _page_idle_load() -> dict:
+    """加载 page_idle bitmap 文件。"""
+    try:
+        if _PAGE_IDLE_FILE.exists():
+            return json.loads(_PAGE_IDLE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _page_idle_save(data: dict) -> None:
+    """保存 page_idle bitmap 文件。"""
+    try:
+        MEMORY_OS_DIR.mkdir(parents=True, exist_ok=True)
+        _PAGE_IDLE_FILE.write_text(
+            json.dumps(data, ensure_ascii=False),
+            encoding="utf-8"
+        )
+    except Exception:
+        pass
