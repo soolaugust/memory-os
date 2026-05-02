@@ -3261,6 +3261,18 @@ _REGISTRY: dict = {
         "两次 VACUUM 之间的最小间隔（小时）"),
     "vacuum.min_size_kb": (512, int, 64, 102400, None,
         "DB 文件最小大小（KB）：小于此值不值得 VACUUM"),
+
+    # ── iter550: release_task — Per-Session Runtime State Cleanup ──
+    "release_task.enabled": (True, bool, None, None, None,
+        "是否启用 per-session 运行时状态清理"),
+    "release_task.shadow_file_max_age_hours": (24, int, 1, 720, None,
+        ".shadow_trace.*.json 文件最大保留时间（小时）"),
+    "release_task.shadow_db_max_per_content": (2, int, 1, 10, None,
+        "shadow_traces 表每种 top_k_ids 内容最多保留条数"),
+    "release_task.episodes_max_age_hours": (72, int, 1, 720, None,
+        "已注入 session_episodes 最大保留时间（小时）"),
+    "release_task.checkpoint_max_age_hours": (48, int, 1, 720, None,
+        "已消费 checkpoints 最大保留时间（小时）"),
 }
 
 # ── 磁盘配置缓存（进程内只读一次）──

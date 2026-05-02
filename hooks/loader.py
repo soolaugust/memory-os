@@ -1413,6 +1413,36 @@ def main():
         except Exception:
             pass
 
+        # ── iter550：release_task — Per-Session Runtime State Cleanup ──
+        # OS 类比：release_task() (kernel/exit.c) — 进程退出时清理 per-process 运行时状态
+        # (/proc/PID/, fd, mm_struct)。没有 release_task → zombie 资源泄漏。
+        release_task_result = {"total_cleaned": 0, "phases": {}}
+        try:
+            if not _defer_reclaim:  # iter535: deferred_initcall gate
+                from config import get as _cfg550
+                if _cfg550("release_task.enabled"):
+                    from store_mm import release_task
+                    release_task_result = release_task(_log_conn, project)
+                    if release_task_result["total_cleaned"] > 0:
+                        _ph = release_task_result["phases"]
+                        parts = []
+                        if _ph.get("shadow_file_gc", {}).get("removed", 0):
+                            parts.append(f"files={_ph['shadow_file_gc']['removed']}")
+                        if _ph.get("shadow_db_dedup", {}).get("removed", 0):
+                            parts.append(f"db_dedup={_ph['shadow_db_dedup']['removed']}")
+                        if _ph.get("session_episodes_gc", {}).get("removed", 0):
+                            parts.append(f"episodes={_ph['session_episodes_gc']['removed']}")
+                        if _ph.get("checkpoint_gc", {}).get("removed", 0):
+                            parts.append(f"checkpoints={_ph['checkpoint_gc']['removed']}")
+                        dmesg_log(_log_conn, DMESG_INFO, "release_task",
+                                  f"cleaned={release_task_result['total_cleaned']} "
+                                  f"{' '.join(parts)} "
+                                  f"{release_task_result['duration_ms']:.1f}ms",
+                                  session_id=_session_id, project=project)
+                        _log_conn.commit()
+        except Exception:
+            pass
+
         # ── 迭代146：Swap GC — 孤儿 project 清理 ──
         # OS 类比：process exit → free anonymous swap pages (do_exit → exit_mmap)
         # 消亡 project（主表已无 chunk）的 swap 条目永久占位，不会被 swap_in，
@@ -1495,8 +1525,12 @@ def main():
         if vacuum_result.get("vacuumed"):
             vacuum_summary = f" vacuum={vacuum_result['freed_kb']:.0f}KB({vacuum_result['freed_pct']:.1f}%)"
 
+        release_task_summary = ""
+        if release_task_result.get("total_cleaned", 0) > 0:
+            release_task_summary = f" release_task={release_task_result['total_cleaned']}cleaned"
+
         dmesg_log(_log_conn, DMESG_INFO, "loader",
-                  f"session_start latest={'Y' if has_latest else 'N'} working_set={len(working_set)} ctx_len={len(context_text)} watchdog={wd_status}{autotune_summary}{criu_summary}{damon_summary}{mglru_summary}{gc_summary}{rmap_summary}{gc_swap_summary}{slab_summary}{fstrim_summary}{logrotate_summary}{vacuum_summary}{consolidation_summary}",
+                  f"session_start latest={'Y' if has_latest else 'N'} working_set={len(working_set)} ctx_len={len(context_text)} watchdog={wd_status}{autotune_summary}{criu_summary}{damon_summary}{mglru_summary}{gc_summary}{rmap_summary}{gc_swap_summary}{slab_summary}{fstrim_summary}{logrotate_summary}{vacuum_summary}{release_task_summary}{consolidation_summary}",
                   session_id=_session_id, project=project)
         _log_conn.commit()
         _log_conn.close()

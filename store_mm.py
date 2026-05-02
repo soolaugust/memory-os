@@ -7970,3 +7970,177 @@ def vacuum(db_path: str) -> dict:
 
     result["duration_ms"] = round((_time.time() - t0) * 1000, 2)
     return result
+
+
+# ── iter550: release_task — Per-Session Runtime State Cleanup ──────
+def release_task(conn: sqlite3.Connection, project: str = None) -> dict:
+    """
+    iter550: release_task — Per-Session Runtime State Cleanup。
+    OS 类比：Linux release_task() (Linus Torvalds, 1994, kernel/exit.c)
+
+    当进程退出 (do_exit()) 时，release_task() 清理所有 per-process 运行时状态：
+    /proc/PID/ 条目、文件描述符、信号处理器、内存映射。没有 release_task()，
+    zombie 进程永久泄漏资源。systemd-tmpfiles --clean 补充清理 /tmp/ 和 /run/
+    中的累积文件。
+
+    Memory-OS 问题：每次 SessionStart 创建 per-session 状态但从不清理：
+    - .shadow_trace.<session_id>.json 文件（每个 ~380 bytes）→ 数百个文件累积
+    - shadow_traces DB 表（大量行内容重复——47/106 行共享相同 top_k_ids）
+    - session_episodes 中已注入旧记录累积
+    - checkpoints 中已消费/超龄记录累积
+
+    四阶段清理（模仿 release_task + systemd-tmpfiles）：
+      Phase 1: shadow_file_gc — 删除超龄 .shadow_trace.*.json 文件
+      Phase 2: shadow_db_dedup — shadow_traces 表按 top_k_ids 去重
+      Phase 3: session_episodes_gc — 删除已注入的旧 episodes
+      Phase 4: checkpoint_gc — 删除超龄/已消费的 checkpoints
+
+    返回 dict:
+      total_cleaned — 总清理数
+      phases — 各 phase 清理详情
+      duration_ms — 执行时间
+    """
+    t0 = _time.time()
+
+    try:
+        from config import get as _cfg
+    except Exception:
+        return {"total_cleaned": 0, "phases": {}, "duration_ms": 0}
+
+    # 配置参数
+    shadow_file_max_age_hours = int(_cfg("release_task.shadow_file_max_age_hours"))
+    shadow_db_max_per_content = int(_cfg("release_task.shadow_db_max_per_content"))
+    episodes_max_age_hours = int(_cfg("release_task.episodes_max_age_hours"))
+    checkpoint_max_age_hours = int(_cfg("release_task.checkpoint_max_age_hours"))
+
+    total_cleaned = 0
+    phases = {}
+    now = _time.time()
+
+    # ── Phase 1: shadow_file_gc — 清理超龄 .shadow_trace.*.json 文件 ──
+    # OS 类比：systemd-tmpfiles --clean /run/user/UID/
+    try:
+        shadow_pattern = MEMORY_OS_DIR / ".shadow_trace.*.json"
+        import glob as _glob_mod
+        shadow_files = _glob_mod.glob(str(shadow_pattern))
+        removed_files = 0
+        max_age_secs = shadow_file_max_age_hours * 3600
+        for fpath in shadow_files:
+            try:
+                mtime = os.path.getmtime(fpath)
+                if now - mtime > max_age_secs:
+                    os.remove(fpath)
+                    removed_files += 1
+            except Exception:
+                continue
+        phases["shadow_file_gc"] = {
+            "scanned": len(shadow_files),
+            "removed": removed_files,
+        }
+        total_cleaned += removed_files
+    except Exception:
+        phases["shadow_file_gc"] = {"scanned": 0, "removed": 0, "error": True}
+
+    # ── Phase 2: shadow_db_dedup — shadow_traces 表按 content 去重 ──
+    # OS 类比：release_task() → __put_task_struct() 释放重复 mm_struct 引用
+    # 相同 top_k_ids 内容的多行只保留最新一条
+    try:
+        tbl = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='shadow_traces'"
+        ).fetchone()
+        removed_rows = 0
+        total_before = 0
+        if tbl:
+            rows = conn.execute(
+                "SELECT session_id, top_k_ids, updated_at FROM shadow_traces "
+                "ORDER BY updated_at DESC"
+            ).fetchall()
+            total_before = len(rows)
+            # 按 top_k_ids 内容分组
+            content_groups = defaultdict(list)
+            for sid, tk_ids, upd in rows:
+                content_groups[tk_ids].append(sid)
+            # 每组保留最新 max_per_content 条，删除其余
+            delete_ids = []
+            for tk_ids, sids in content_groups.items():
+                if len(sids) > shadow_db_max_per_content:
+                    delete_ids.extend(sids[shadow_db_max_per_content:])
+            if delete_ids:
+                for batch_start in range(0, len(delete_ids), 100):
+                    batch = delete_ids[batch_start:batch_start + 100]
+                    placeholders = ",".join("?" * len(batch))
+                    conn.execute(
+                        f"DELETE FROM shadow_traces WHERE session_id IN ({placeholders})",
+                        batch
+                    )
+                conn.commit()
+                removed_rows = len(delete_ids)
+        phases["shadow_db_dedup"] = {
+            "before": total_before,
+            "removed": removed_rows,
+            "after": total_before - removed_rows,
+        }
+        total_cleaned += removed_rows
+    except Exception:
+        phases["shadow_db_dedup"] = {"before": 0, "removed": 0, "after": 0, "error": True}
+
+    # ── Phase 3: session_episodes_gc — 清理已注入的旧 episodes ──
+    # OS 类比：release_task() → exit_files() — 关闭进程打开的文件描述符
+    # 兼容两种 schema：旧版用 injected+updated_at，新版用 injected_count+ended_at
+    try:
+        tbl = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='session_episodes'"
+        ).fetchone()
+        removed_episodes = 0
+        if tbl:
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=episodes_max_age_hours)).isoformat()
+            # 检测 schema：查看有哪些列
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(session_episodes)").fetchall()}
+            if "injected_count" in cols and "ended_at" in cols:
+                # 新 schema：injected_count > 0 表示已注入
+                cur = conn.execute(
+                    "DELETE FROM session_episodes WHERE injected_count > 0 AND ended_at < ?",
+                    [cutoff]
+                )
+            elif "injected" in cols and "updated_at" in cols:
+                # 旧 schema
+                cur = conn.execute(
+                    "DELETE FROM session_episodes WHERE injected = 1 AND updated_at < ?",
+                    [cutoff]
+                )
+            else:
+                cur = None
+            if cur is not None:
+                removed_episodes = cur.rowcount
+                conn.commit()
+        phases["session_episodes_gc"] = {"removed": removed_episodes}
+        total_cleaned += removed_episodes
+    except Exception:
+        phases["session_episodes_gc"] = {"removed": 0, "error": True}
+
+    # ── Phase 4: checkpoint_gc — 清理超龄/已消费的 checkpoints ──
+    # OS 类比：release_task() → exit_mm() — 释放进程的内存映射
+    try:
+        tbl = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='checkpoints'"
+        ).fetchone()
+        removed_checkpoints = 0
+        if tbl:
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=checkpoint_max_age_hours)).isoformat()
+            cur = conn.execute(
+                "DELETE FROM checkpoints WHERE consumed = 1 AND created_at < ?",
+                [cutoff]
+            )
+            removed_checkpoints = cur.rowcount
+            conn.commit()
+        phases["checkpoint_gc"] = {"removed": removed_checkpoints}
+        total_cleaned += removed_checkpoints
+    except Exception:
+        phases["checkpoint_gc"] = {"removed": 0, "error": True}
+
+    duration_ms = round((_time.time() - t0) * 1000, 2)
+    return {
+        "total_cleaned": total_cleaned,
+        "phases": phases,
+        "duration_ms": duration_ms,
+    }
