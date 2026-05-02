@@ -16467,3 +16467,131 @@ def shrink_dcache(conn: "sqlite3.Connection", project: str = None) -> dict:
 
     result["duration_ms"] = round((_time.time() - _t0) * 1000, 2)
     return result
+
+
+def oom_reaper(conn: "sqlite3.Connection", project: str = None) -> dict:
+    """iter508: oom_reaper — 零访问率超标时的批量降级回收器。
+
+    OS 类比：Linux oom_reaper (Michal Hocko, 2016)
+    ——当 OOM killer 选中牺牲进程后，oom_reaper 内核线程立即回收其匿名页，
+    不等待进程自行退出（进程可能卡在 D 状态）。
+
+    解决的问题：
+      - shrink_dcache min_age_days=3 导致 1-3 天内的 dead pages 不被处理
+      - DAMON dead_age_days=30 在短期数据中永远不触发
+      - kswapd pages_low_pct=80% 在配额充足时不启动
+      - 各回收器的保护条件相互叠加，形成"回收死区"
+      - 结果：82%+ 零访问率，FTS5 候选池被稀释
+
+    触发条件：零访问率 > oom_reaper.zero_access_threshold（默认 70%）
+    策略：选择 lru_gen 最高（最老代）+ importance 最低的零访问 chunks 批量降级
+    保护：design_constraint/quantitative_evidence 类型豁免、pinned 豁免、oom_adj≤-500 豁免
+
+    调用时机：loader.py SessionStart，在 shrink_dcache 之后。
+    """
+    import time as _time
+    _t0 = _time.time()
+
+    result = {
+        "triggered": False,
+        "zero_access_ratio": 0.0,
+        "reaped": 0,
+        "deleted": 0,
+        "duration_ms": 0.0,
+    }
+
+    try:
+        enabled = bool(config.get("oom_reaper.enabled"))
+        threshold = float(config.get("oom_reaper.zero_access_threshold"))
+        max_reap = int(config.get("oom_reaper.max_reap_per_scan"))
+        decay = float(config.get("oom_reaper.importance_decay"))
+        min_total = int(config.get("oom_reaper.min_total_chunks"))
+        protect_types_str = str(config.get("oom_reaper.protect_types"))
+    except Exception:
+        enabled = True
+        threshold = 0.7
+        max_reap = 30
+        decay = 0.5
+        min_total = 50
+        protect_types_str = "design_constraint,quantitative_evidence"
+
+    if not enabled:
+        result["duration_ms"] = round((_time.time() - _t0) * 1000, 2)
+        return result
+
+    protect_types = tuple(t.strip() for t in protect_types_str.split(",") if t.strip())
+
+    # 冷启动保护
+    total = conn.execute("SELECT COUNT(*) FROM memory_chunks").fetchone()[0]
+    if total < min_total:
+        result["duration_ms"] = round((_time.time() - _t0) * 1000, 2)
+        return result
+
+    # 计算零访问率
+    zero_access = conn.execute(
+        "SELECT COUNT(*) FROM memory_chunks WHERE COALESCE(access_count, 0) = 0"
+    ).fetchone()[0]
+    ratio = zero_access / total if total > 0 else 0.0
+    result["zero_access_ratio"] = round(ratio, 4)
+
+    if ratio < threshold:
+        result["duration_ms"] = round((_time.time() - _t0) * 1000, 2)
+        return result
+
+    # 触发 oom_reaper
+    result["triggered"] = True
+
+    # 选择牺牲者：lru_gen 最高 + importance 最低 + 零访问
+    # 排除：受保护类型、task_state、oom_adj≤-500（mlock）、pinned
+    protect_ph = ",".join("?" * len(protect_types)) if protect_types else "'__none__'"
+    sql = f"""
+        SELECT id, importance FROM memory_chunks
+        WHERE COALESCE(access_count, 0) = 0
+          AND chunk_type NOT IN ('task_state', {protect_ph})
+          AND COALESCE(oom_adj, 0) > -500
+        ORDER BY lru_gen DESC, importance ASC
+        LIMIT ?
+    """
+    params = list(protect_types) + [max_reap]
+    candidates = conn.execute(sql, params).fetchall()
+
+    # 排除 pinned chunks
+    pinned_ids = set()
+    try:
+        pin_rows = conn.execute(
+            "SELECT chunk_id FROM chunk_pins WHERE pin_type IN ('hard', 'soft')"
+        ).fetchall()
+        pinned_ids = {r[0] for r in pin_rows}
+    except Exception:
+        pass
+
+    # 执行降级
+    to_delete = []
+    reaped = 0
+    delete_threshold = 0.2
+
+    for chunk_id, imp in candidates:
+        if chunk_id in pinned_ids:
+            continue
+
+        new_imp = round(imp * decay, 4)
+        conn.execute(
+            "UPDATE memory_chunks SET importance = ?, oom_adj = MIN(COALESCE(oom_adj, 0) + 300, 1000) WHERE id = ?",
+            (new_imp, chunk_id),
+        )
+        reaped += 1
+
+        if new_imp < delete_threshold:
+            to_delete.append(chunk_id)
+
+    result["reaped"] = reaped
+
+    if to_delete:
+        result["deleted"] = delete_chunks(conn, to_delete)
+
+    if reaped > 0:
+        conn.commit()
+        bump_chunk_version()
+
+    result["duration_ms"] = round((_time.time() - _t0) * 1000, 2)
+    return result

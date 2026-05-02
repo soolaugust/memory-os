@@ -23,7 +23,7 @@ sys.path.insert(0, str(_ROOT))
 from schema import MemoryChunk
 from utils import resolve_project_id
 from scorer import working_set_score as _unified_ws_score
-from store import open_db, ensure_schema, get_chunks as store_get_chunks, dmesg_log, DMESG_INFO, DMESG_WARN, watchdog_check, damon_scan, mglru_aging, checkpoint_restore, autotune, gc_traces, gc_orphan_swap
+from store import open_db, ensure_schema, get_chunks as store_get_chunks, dmesg_log, DMESG_INFO, DMESG_WARN, watchdog_check, damon_scan, mglru_aging, checkpoint_restore, autotune, gc_traces, rmap_sweep, gc_orphan_swap
 from config import get as _sysctl  # 迭代27: sysctl Runtime Tunables
 
 MEMORY_OS_DIR = Path.home() / ".claude" / "memory-os"
@@ -849,6 +849,19 @@ def main():
         except Exception:
             pass
 
+        # ── iter508：oom_reaper — 零访问率超标时批量降级回收 ──
+        # OS 类比：Linux oom_reaper (Michal Hocko, 2016) — OOM 选中后立即回收匿名页
+        # 不受 min_age_days 限制，专门处理各回收器保护条件叠加形成的"回收死区"
+        try:
+            from store_vfs import oom_reaper
+            reaper_result = oom_reaper(_log_conn, project)
+            if reaper_result.get("triggered"):
+                dmesg_log(_log_conn, DMESG_INFO, "oom_reaper",
+                          f"reap: ratio={reaper_result['zero_access_ratio']:.1%} reaped={reaper_result['reaped']} deleted={reaper_result['deleted']} {reaper_result.get('duration_ms', 0):.1f}ms",
+                          session_id=_session_id, project=project)
+        except Exception:
+            pass
+
         # ── 迭代63：Trace GC — recall_traces 生命周期管理 ──
         # OS 类比：logrotate — SessionStart 时清理过期日志
         gc_result = {"deleted_age": 0, "deleted_rows": 0, "remaining": 0}
@@ -857,6 +870,18 @@ def main():
             if gc_result["deleted_age"] > 0 or gc_result["deleted_rows"] > 0:
                 dmesg_log(_log_conn, DMESG_INFO, "gc",
                           f"trace_gc: age={gc_result['deleted_age']} rows={gc_result['deleted_rows']} remaining={gc_result['remaining']}",
+                          session_id=_session_id, project=project)
+        except Exception:
+            pass
+
+        # ── 迭代509：rmap_sweep — recall_traces stale ref 清理 ──
+        # OS 类比：Linux rmap (Rik van Riel, 2002) — page frame 释放后清除反向映射
+        rmap_result = {"scrubbed_traces": 0, "deleted_traces": 0, "stale_refs_removed": 0}
+        try:
+            rmap_result = rmap_sweep(_log_conn, project)
+            if rmap_result["stale_refs_removed"] > 0:
+                dmesg_log(_log_conn, DMESG_INFO, "gc",
+                          f"rmap_sweep: scrubbed={rmap_result['scrubbed_traces']} deleted={rmap_result['deleted_traces']} stale_refs={rmap_result['stale_refs_removed']}",
                           session_id=_session_id, project=project)
         except Exception:
             pass
@@ -915,6 +940,10 @@ def main():
         if gc_deleted > 0:
             gc_summary = f" gc_traces={gc_deleted}del/{gc_result.get('remaining', 0)}rem"
 
+        rmap_summary = ""
+        if rmap_result.get("stale_refs_removed", 0) > 0:
+            rmap_summary = f" rmap={rmap_result['stale_refs_removed']}refs/{rmap_result['deleted_traces']}del"
+
         gc_swap_summary = ""
         if gc_swap_result.get("deleted_count", 0) > 0:
             gc_swap_summary = f" gc_swap={gc_swap_result['deleted_count']}del({gc_swap_result['freed_pct']}%freed)"
@@ -924,7 +953,7 @@ def main():
             consolidation_summary = f" sleep_consol={consolidation_result['consolidated']}chunks"
 
         dmesg_log(_log_conn, DMESG_INFO, "loader",
-                  f"session_start latest={'Y' if has_latest else 'N'} working_set={len(working_set)} ctx_len={len(context_text)} watchdog={wd_status}{autotune_summary}{criu_summary}{damon_summary}{mglru_summary}{gc_summary}{gc_swap_summary}{consolidation_summary}",
+                  f"session_start latest={'Y' if has_latest else 'N'} working_set={len(working_set)} ctx_len={len(context_text)} watchdog={wd_status}{autotune_summary}{criu_summary}{damon_summary}{mglru_summary}{gc_summary}{rmap_summary}{gc_swap_summary}{consolidation_summary}",
                   session_id=_session_id, project=project)
         _log_conn.commit()
         _log_conn.close()

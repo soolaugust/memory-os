@@ -2952,6 +2952,126 @@ def gc_traces(conn: sqlite3.Connection, project: str = None) -> dict:
         "remaining": remaining,
     }
 
+# ── 迭代509：rmap_sweep — Reverse Mapping Stale Reference Scrubber ─────────
+#
+# OS 类比：Linux rmap (Rik van Riel, 2002)
+#   当 page frame 被释放时，内核通过 reverse mapping 找到所有指向该 frame 的
+#   page table entries (PTEs)，将它们标记为 invalid。没有 rmap，stale PTEs
+#   会导致 use-after-free（进程读到已分配给别人的物理页）。
+#
+#   memory-os 的问题：
+#     chunks 被 oom_reaper/shrink_dcache/kswapd 删除后，recall_traces 的
+#     top_k_json 仍引用已删除 chunk IDs。readahead_pairs() 从这些 ghost refs
+#     计算虚假共现 → 预取不存在的 chunk → 浪费时间 + 污染检索结果。
+#
+#   解决：rmap_sweep() 在 gc_traces 之后运行，遍历所有 recall_traces，
+#     将 top_k_json 中引用不存在 chunks 的条目移除。
+#     空 top_k_json 的 trace 整条删除（无信息价值）。
+
+
+def rmap_sweep(conn: sqlite3.Connection, project: str = None) -> dict:
+    """iter509: rmap_sweep — 清除 recall_traces 中的 stale chunk references.
+
+    OS 类比：Linux rmap (Rik van Riel, 2002) — page frame 释放时清除所有 PTE 反向映射。
+
+    算法：
+      1. 加载当前所有有效 chunk IDs（live set）
+      2. 遍历 recall_traces，解析 top_k_json
+      3. 过滤掉引用不存在 chunk 的条目
+      4. 若全部条目都是 stale → 删除整条 trace
+      5. 若部分 stale → UPDATE top_k_json 只保留有效引用
+
+    返回：
+      scrubbed_traces — 被修改的 trace 数
+      deleted_traces  — 被整条删除的 trace 数（全 stale）
+      stale_refs_removed — 移除的 stale reference 总数
+      total_scanned — 扫描的 trace 总数
+    """
+    # Phase 1: 构建 live chunk ID set
+    if project:
+        live_rows = conn.execute(
+            "SELECT id FROM memory_chunks WHERE project=?", (project,)
+        ).fetchall()
+    else:
+        live_rows = conn.execute("SELECT id FROM memory_chunks").fetchall()
+    live_ids = set(r[0] for r in live_rows)
+
+    # Phase 2: 扫描 recall_traces（用 ROWID 作为稳定标识，因为 id 列可能为 NULL）
+    if project:
+        traces = conn.execute(
+            "SELECT rowid, top_k_json FROM recall_traces WHERE project=? AND top_k_json IS NOT NULL",
+            (project,)
+        ).fetchall()
+    else:
+        traces = conn.execute(
+            "SELECT rowid, top_k_json FROM recall_traces WHERE top_k_json IS NOT NULL"
+        ).fetchall()
+
+    scrubbed = 0
+    deleted = 0
+    stale_refs_removed = 0
+    delete_rowids = []
+    update_batch = []  # (new_json, rowid)
+
+    for rowid, top_k_raw in traces:
+        try:
+            top_k = json.loads(top_k_raw) if isinstance(top_k_raw, str) else top_k_raw
+        except Exception:
+            continue
+        if not isinstance(top_k, list):
+            continue
+
+        # 分离有效和 stale 条目
+        valid = []
+        stale_count = 0
+        for item in top_k:
+            if isinstance(item, dict) and "id" in item:
+                if item["id"] in live_ids:
+                    valid.append(item)
+                else:
+                    stale_count += 1
+            else:
+                valid.append(item)  # 保留非标准格式条目
+
+        if stale_count == 0:
+            continue  # 此 trace 无 stale refs
+
+        stale_refs_removed += stale_count
+
+        if len(valid) == 0:
+            # 全部 stale → 删除整条 trace
+            delete_rowids.append(rowid)
+            deleted += 1
+        else:
+            # 部分 stale → 更新
+            update_batch.append((json.dumps(valid, ensure_ascii=False), rowid))
+            scrubbed += 1
+
+    # Phase 3: 批量写入（使用 ROWID，兼容 id=NULL 的历史记录）
+    if delete_rowids:
+        # SQLite 限制：SQLITE_MAX_VARIABLE_NUMBER 默认 999
+        for i in range(0, len(delete_rowids), 500):
+            batch = delete_rowids[i:i+500]
+            placeholders = ",".join("?" * len(batch))
+            conn.execute(f"DELETE FROM recall_traces WHERE rowid IN ({placeholders})", batch)
+
+    if update_batch:
+        conn.executemany(
+            "UPDATE recall_traces SET top_k_json=? WHERE rowid=?",
+            update_batch
+        )
+
+    if delete_rowids or update_batch:
+        conn.commit()
+
+    return {
+        "scrubbed_traces": scrubbed,
+        "deleted_traces": deleted,
+        "stale_refs_removed": stale_refs_removed,
+        "total_scanned": len(traces),
+    }
+
+
 # ── 迭代51：Autotune — sysctl 参数自优化引擎 ─────────────────────
 #
 # OS 类比：

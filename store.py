@@ -114,6 +114,7 @@ from store_mm import (  # noqa: F401
     aimd_stats,
     aimd_window,
     gc_traces,
+    rmap_sweep,
     autotune,
     context_pressure_governor,
     GOV_LOW,

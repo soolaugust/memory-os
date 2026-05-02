@@ -2986,6 +2986,20 @@ _REGISTRY: dict = {
         "iter505: importance < 0.8 的 chunk 降级因子（默认 0.4）"),
     "shrink.delete_threshold": (0.2, float, 0.05, 0.5, None,
         "iter505: 降级后 importance < 此值直接删除（默认 0.2）"),
+
+    # ── oom_reaper（迭代508）──
+    "oom_reaper.enabled": (True, bool, None, None, None,
+        "iter508: 是否启用 oom_reaper 零访问率治理（默认 True）"),
+    "oom_reaper.zero_access_threshold": (0.7, float, 0.3, 0.95, None,
+        "iter508: 零访问率超过此比例时触发 oom_reaper（默认 0.7 = 70%）"),
+    "oom_reaper.max_reap_per_scan": (30, int, 5, 200, None,
+        "iter508: 每次扫描最多回收 N 个 chunks（默认 30）"),
+    "oom_reaper.importance_decay": (0.5, float, 0.1, 0.9, None,
+        "iter508: importance 降级因子（默认 0.5，即减半）"),
+    "oom_reaper.min_total_chunks": (50, int, 10, 1000, None,
+        "iter508: 至少 N 个 chunks 后才启用（冷启动保护，默认 50）"),
+    "oom_reaper.protect_types": ("design_constraint,quantitative_evidence", str, None, None, None,
+        "iter508: 受保护的 chunk_type（逗号分隔），即使零访问也不回收"),
 }
 
 # ── 磁盘配置缓存（进程内只读一次）──
