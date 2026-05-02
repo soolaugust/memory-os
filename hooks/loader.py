@@ -1347,6 +1347,29 @@ def main():
         except Exception:
             pass
 
+        # ── iter547：fstrim — Auxiliary Table Dead Block TRIM ──
+        # OS 类比：fstrim / FITRIM ioctl (Lukas Czerner, 2010, kernel 2.6.37)
+        # 辅助表（entity_edges/entity_map/chunk_coactivation/chunk_pins 等）
+        # 保留指向已删除 chunks 的 stale references → TRIM 清除死块
+        fstrim_result = {"total_trimmed": 0, "trimmed": {}}
+        try:
+            if not _defer_reclaim:  # iter535: deferred_initcall gate
+                from config import get as _cfg547
+                if _cfg547("fstrim.enabled"):
+                    from store_mm import fstrim
+                    fstrim_result = fstrim(_log_conn)
+                    if fstrim_result["total_trimmed"] > 0:
+                        # Build compact summary of non-zero tables
+                        parts = [f"{k}={v}" for k, v in fstrim_result["trimmed"].items() if v > 0]
+                        dmesg_log(_log_conn, DMESG_INFO, "fstrim",
+                                  f"trimmed={fstrim_result['total_trimmed']} "
+                                  f"({' '.join(parts)}) "
+                                  f"{fstrim_result['duration_ms']:.1f}ms",
+                                  session_id=_session_id, project=project)
+                        _log_conn.commit()
+        except Exception:
+            pass
+
         # ── 迭代146：Swap GC — 孤儿 project 清理 ──
         # OS 类比：process exit → free anonymous swap pages (do_exit → exit_mmap)
         # 消亡 project（主表已无 chunk）的 swap 条目永久占位，不会被 swap_in，
@@ -1417,8 +1440,12 @@ def main():
         if slab_result.get("reclaimed", 0) > 0:
             slab_summary = f" shrink_slab={slab_result['reclaimed']}recl/{slab_result['freeable']}free"
 
+        fstrim_summary = ""
+        if fstrim_result.get("total_trimmed", 0) > 0:
+            fstrim_summary = f" fstrim={fstrim_result['total_trimmed']}trimmed"
+
         dmesg_log(_log_conn, DMESG_INFO, "loader",
-                  f"session_start latest={'Y' if has_latest else 'N'} working_set={len(working_set)} ctx_len={len(context_text)} watchdog={wd_status}{autotune_summary}{criu_summary}{damon_summary}{mglru_summary}{gc_summary}{rmap_summary}{gc_swap_summary}{slab_summary}{consolidation_summary}",
+                  f"session_start latest={'Y' if has_latest else 'N'} working_set={len(working_set)} ctx_len={len(context_text)} watchdog={wd_status}{autotune_summary}{criu_summary}{damon_summary}{mglru_summary}{gc_summary}{rmap_summary}{gc_swap_summary}{slab_summary}{fstrim_summary}{consolidation_summary}",
                   session_id=_session_id, project=project)
         _log_conn.commit()
         _log_conn.close()

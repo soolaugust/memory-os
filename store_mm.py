@@ -7475,3 +7475,194 @@ def shrink_slab(conn: sqlite3.Connection, project: str = None) -> dict:
 
     result["duration_ms"] = round((_time.time() - t0) * 1000, 2)
     return result
+
+
+def fstrim(conn: sqlite3.Connection) -> dict:
+    """
+    iter547: fstrim — Auxiliary Table Dead Block TRIM.
+
+    OS 类比：Linux fstrim / FITRIM ioctl (Lukas Czerner, 2010, kernel 2.6.37)
+      SSD 控制器不知道文件系统层面哪些 LBA 已被释放（unlink/truncate 只更新元数据）。
+      fstrim 遍历 free space bitmap，向 SSD 发送 TRIM/DISCARD 命令，
+      通知设备这些物理块可以回收。不 TRIM → write amplification + GC 效率下降。
+      运行频率：systemd fstrim.timer 每周一次（低频即可，不是每次写都 TRIM）。
+
+    根因：
+      memory_chunks 通过 swap_out/delete_chunks 删除后，8 张辅助表保留 stale references：
+        - entity_edges: source_chunk_id → 已删除 chunk
+        - entity_map: chunk_id → 已删除 chunk
+        - chunk_coactivation: chunk_a/chunk_b → 已删除 chunk
+        - chunk_pins: chunk_id → 已删除 chunk
+        - shm_segments: chunk_id → 已删除 chunk
+        - trigger_conditions: chunk_id → 已删除 chunk
+        - schema_anchors: chunk_id → 已删除 chunk
+        - episodic_consolidations: source_chunk_ids JSON 包含已删除 chunk IDs
+      生产实证：69 active chunks，辅助表 1176 条记录，484 条 stale (41%)。
+      stale records 造成：
+        1. entity graph 查询返回无效结果
+        2. 扫描时间增加（entity_map 262 条中 224 条 stale = 85.5%）
+        3. DB 文件膨胀
+
+    设计：
+      fstrim 扫描每张辅助表，DELETE 所有指向非 ACTIVE chunk 的记录。
+      每张表独立 phase，失败不影响其他表（fault isolation）。
+      运行时机：SessionStart 时，shrink_slab 之后（先回收 zombie，再 TRIM 死块）。
+
+    返回 dict:
+      trimmed: dict — 每张表被 TRIM 的行数
+      total_trimmed: int — 总清理行数
+      duration_ms: float
+    """
+    t0 = _time.time()
+
+    trimmed = {}
+
+    # ── Phase 1: entity_edges — TRIM stale source_chunk_id ──
+    try:
+        r = conn.execute(
+            """DELETE FROM entity_edges
+               WHERE source_chunk_id IS NOT NULL
+                 AND source_chunk_id != ''
+                 AND NOT EXISTS (
+                     SELECT 1 FROM memory_chunks
+                     WHERE id = entity_edges.source_chunk_id
+                       AND chunk_state = 'ACTIVE'
+                 )"""
+        )
+        trimmed["entity_edges"] = r.rowcount
+    except Exception:
+        trimmed["entity_edges"] = 0
+
+    # ── Phase 2: entity_map — TRIM stale chunk_id ──
+    try:
+        r = conn.execute(
+            """DELETE FROM entity_map
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM memory_chunks
+                   WHERE id = entity_map.chunk_id
+                     AND chunk_state = 'ACTIVE'
+               )"""
+        )
+        trimmed["entity_map"] = r.rowcount
+    except Exception:
+        trimmed["entity_map"] = 0
+
+    # ── Phase 3: chunk_coactivation — TRIM rows where either side is dead ──
+    try:
+        r = conn.execute(
+            """DELETE FROM chunk_coactivation
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM memory_chunks
+                   WHERE id = chunk_coactivation.chunk_a
+                     AND chunk_state = 'ACTIVE'
+               )
+               OR NOT EXISTS (
+                   SELECT 1 FROM memory_chunks
+                   WHERE id = chunk_coactivation.chunk_b
+                     AND chunk_state = 'ACTIVE'
+               )"""
+        )
+        trimmed["chunk_coactivation"] = r.rowcount
+    except Exception:
+        trimmed["chunk_coactivation"] = 0
+
+    # ── Phase 4: chunk_pins — TRIM stale pins ──
+    try:
+        r = conn.execute(
+            """DELETE FROM chunk_pins
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM memory_chunks
+                   WHERE id = chunk_pins.chunk_id
+                     AND chunk_state = 'ACTIVE'
+               )"""
+        )
+        trimmed["chunk_pins"] = r.rowcount
+    except Exception:
+        trimmed["chunk_pins"] = 0
+
+    # ── Phase 5: shm_segments — TRIM stale shared memory ──
+    try:
+        r = conn.execute(
+            """DELETE FROM shm_segments
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM memory_chunks
+                   WHERE id = shm_segments.chunk_id
+                     AND chunk_state = 'ACTIVE'
+               )"""
+        )
+        trimmed["shm_segments"] = r.rowcount
+    except Exception:
+        trimmed["shm_segments"] = 0
+
+    # ── Phase 6: trigger_conditions — TRIM stale triggers ──
+    try:
+        r = conn.execute(
+            """DELETE FROM trigger_conditions
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM memory_chunks
+                   WHERE id = trigger_conditions.chunk_id
+                     AND chunk_state = 'ACTIVE'
+               )"""
+        )
+        trimmed["trigger_conditions"] = r.rowcount
+    except Exception:
+        trimmed["trigger_conditions"] = 0
+
+    # ── Phase 7: schema_anchors — TRIM stale anchors ──
+    try:
+        r = conn.execute(
+            """DELETE FROM schema_anchors
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM memory_chunks
+                   WHERE id = schema_anchors.chunk_id
+                     AND chunk_state = 'ACTIVE'
+               )"""
+        )
+        trimmed["schema_anchors"] = r.rowcount
+    except Exception:
+        trimmed["schema_anchors"] = 0
+
+    # ── Phase 8: episodic_consolidations — TRIM fully-stale consolidations ──
+    # (all source_chunk_ids point to deleted chunks → no value)
+    try:
+        rows = conn.execute(
+            "SELECT id, source_chunk_ids FROM episodic_consolidations"
+        ).fetchall()
+        to_delete = []
+        for row_id, src_json in rows:
+            try:
+                src_ids = json.loads(src_json) if src_json else []
+            except (json.JSONDecodeError, TypeError):
+                src_ids = []
+            if not src_ids:
+                to_delete.append(row_id)
+                continue
+            # Check if ALL source chunks are dead
+            placeholders = ",".join("?" * len(src_ids))
+            alive = conn.execute(
+                f"SELECT COUNT(*) FROM memory_chunks "
+                f"WHERE id IN ({placeholders}) AND chunk_state='ACTIVE'",
+                src_ids
+            ).fetchone()[0]
+            if alive == 0:
+                to_delete.append(row_id)
+        if to_delete:
+            placeholders = ",".join("?" * len(to_delete))
+            conn.execute(
+                f"DELETE FROM episodic_consolidations WHERE id IN ({placeholders})",
+                to_delete
+            )
+        trimmed["episodic_consolidations"] = len(to_delete)
+    except Exception:
+        trimmed["episodic_consolidations"] = 0
+
+    total = sum(trimmed.values())
+
+    if total > 0:
+        conn.commit()
+
+    return {
+        "trimmed": trimmed,
+        "total_trimmed": total,
+        "duration_ms": round((_time.time() - t0) * 1000, 2),
+    }

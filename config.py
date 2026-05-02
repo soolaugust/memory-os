@@ -3231,6 +3231,10 @@ _REGISTRY: dict = {
         "单次扫描最大回收数（渐进式，防止单次大量 swap_out）"),
     "shrink.grace_sessions": (3, int, 1, 10, None,
         "新创建 chunk 的宽限 session 数（最近 N session 内创建的跳过）"),
+
+    # ── iter547: fstrim — Auxiliary Table Dead Block TRIM ──
+    "fstrim.enabled": (True, bool, None, None, None,
+        "是否启用 fstrim 辅助表死块清理"),
 }
 
 # ── 磁盘配置缓存（进程内只读一次）──
