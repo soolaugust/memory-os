@@ -3550,6 +3550,52 @@ def autotune(conn: sqlite3.Connection, project: str) -> dict:
             "reason": f"iter137 quota={current_quota}>{chunk_quota_max}(chunk_quota_max) → clamp down (uncapped autotune inflation fix)",
         })
 
+    # ── iter537: 策略 8 — perf_counters 驱动的 min_score_threshold 自适应调节 ──
+    # OS 类比：perf stat IPC counter → 当 IPC 持续低于阈值时触发 microcode 参数调整
+    # 当 low_score_ratio 高（太多弱相关注入）时提高 min_score_threshold；
+    # 当 avg_score 高且 low_score_ratio=0 时适度降低（允许更多探索性注入）
+    perf_quality_enabled = _cfg("perf.autotune_enabled", project=project)
+    if perf_quality_enabled and sample_count >= min_traces:
+        try:
+            _pc = perf_counters(conn, project, window=window if 'window' in dir() else 30)
+            _pc_low_ratio = _pc.get("low_score_ratio", 0.0)
+            _pc_avg_score = _pc.get("avg_score", 0.0)
+            _pc_raise_pct = _cfg("perf.raise_threshold_pct") / 100.0
+            _pc_lower_pct = _cfg("perf.lower_threshold_pct") / 100.0
+            _pc_threshold_max = _cfg("perf.threshold_max")
+            _pc_threshold_min = _cfg("perf.threshold_min")
+            current_threshold = _cfg("retriever.min_score_threshold", project=project)
+
+            if _pc_low_ratio > _pc_raise_pct:
+                # 太多低分注入 → 提高阈值（过滤更严）
+                new_threshold = min(round(current_threshold + 0.05, 4), _pc_threshold_max)
+                if new_threshold != current_threshold:
+                    sysctl_set("retriever.min_score_threshold", new_threshold, project=project)
+                    adjustments.append({
+                        "key": "retriever.min_score_threshold",
+                        "old": current_threshold,
+                        "new": new_threshold,
+                        "reason": f"iter537 perf low_score_ratio={_pc_low_ratio:.2f}>{_pc_raise_pct:.2f} → raise threshold (too many weak injections)",
+                    })
+            elif _pc_low_ratio == 0.0 and _pc_avg_score > 0.7 and current_threshold > _pc_threshold_min:
+                # 所有注入都高质量 + 当前阈值高于最低值 → 适度降低（允许探索）
+                new_threshold = max(round(current_threshold - 0.02, 4), _pc_threshold_min)
+                if new_threshold != current_threshold:
+                    sysctl_set("retriever.min_score_threshold", new_threshold, project=project)
+                    adjustments.append({
+                        "key": "retriever.min_score_threshold",
+                        "old": current_threshold,
+                        "new": new_threshold,
+                        "reason": f"iter537 perf avg_score={_pc_avg_score:.3f}>0.7 low_ratio=0 → lower threshold (allow exploration)",
+                    })
+            stats["perf_counters"] = {
+                "avg_score": _pc_avg_score,
+                "low_score_ratio": _pc_low_ratio,
+                "type_concentration": _pc.get("type_concentration", 0.0),
+            }
+        except Exception:
+            pass
+
     # ── iter494: Circuit Breaker — 调整后更新 circuit 状态 ──
     # 比较本次 hit_rate 和上次 hit_rate，决定连续恶化计数
     circuit_update = {}
@@ -6783,3 +6829,113 @@ def cpuset_quarantine(conn: "sqlite3.Connection", project: str) -> dict:
         pass
 
     return result
+
+
+# ──────────────────────────────────────────────
+# iter537: perf_counters — Retrieval Quality PMU Counters
+# OS 类比：Linux perf_event_open() / perf stat (Ingo Molnár / Thomas Gleixner, 2009)
+#   CPU 通过 PMU 暴露 IPC/cache-miss/branch-misprediction 硬件计数器。
+#   `perf stat` 读取计数器诊断代码是否高效运行。
+#   没有计数器 → 对微架构低效完全盲目。
+# ──────────────────────────────────────────────
+def perf_counters(conn: "sqlite3.Connection", project: str,
+                  window: int = 30) -> dict:
+    """
+    从 recall_traces 聚合检索质量计数器。
+
+    返回 dict:
+      total_traces: int — 窗口内总 trace 数
+      injected_traces: int — 实际注入数
+      injection_rate: float — 注入率
+      avg_score: float — 注入 chunks 平均 score
+      min_score: float — 注入 chunks 最低 score
+      p25_score: float — 注入 chunks 第 25 百分位 score
+      low_score_count: int — score < low_threshold 的注入 chunk 数
+      low_score_ratio: float — 低分注入占比
+      score_histogram: dict — 分桶计数 {bucket_label: count}
+      type_concentration: float — chunk_type 集中度 (HHI, 0~1)
+      top_type: str — 最常被注入的 chunk_type
+    """
+    from config import get as _cfg
+
+    low_threshold = _cfg("perf.low_score_threshold", project=project)
+
+    rows = conn.execute(
+        "SELECT top_k_json, injected FROM recall_traces "
+        "WHERE project=? ORDER BY timestamp DESC LIMIT ?",
+        (project, window)
+    ).fetchall()
+
+    if not rows:
+        return {"total_traces": 0, "injected_traces": 0, "injection_rate": 0.0,
+                "avg_score": 0.0, "min_score": 0.0, "p25_score": 0.0,
+                "low_score_count": 0, "low_score_ratio": 0.0,
+                "score_histogram": {}, "type_concentration": 0.0, "top_type": ""}
+
+    total = len(rows)
+    injected = sum(1 for r in rows if r[1] == 1)
+
+    # 收集所有注入 chunk 的 score 和 type
+    all_scores = []
+    type_counts = {}
+    for top_k_json_str, was_injected in rows:
+        if not was_injected or not top_k_json_str:
+            continue
+        try:
+            items = json.loads(top_k_json_str) if isinstance(top_k_json_str, str) else top_k_json_str
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for item in items:
+            score = item.get("score", 0)
+            if score:
+                all_scores.append(score)
+            ct = item.get("chunk_type", "unknown")
+            type_counts[ct] = type_counts.get(ct, 0) + 1
+
+    if not all_scores:
+        return {"total_traces": total, "injected_traces": injected,
+                "injection_rate": round(injected / total, 3) if total else 0.0,
+                "avg_score": 0.0, "min_score": 0.0, "p25_score": 0.0,
+                "low_score_count": 0, "low_score_ratio": 0.0,
+                "score_histogram": {}, "type_concentration": 0.0, "top_type": ""}
+
+    all_scores.sort()
+    n = len(all_scores)
+    avg_score = sum(all_scores) / n
+    min_score = all_scores[0]
+    p25_score = all_scores[max(0, int(n * 0.25))]
+    low_count = sum(1 for s in all_scores if s < low_threshold)
+    low_ratio = low_count / n
+
+    # Score histogram: 5 buckets [0-0.2), [0.2-0.4), [0.4-0.6), [0.6-0.8), [0.8-1.0+]
+    buckets = {"0.0-0.2": 0, "0.2-0.4": 0, "0.4-0.6": 0, "0.6-0.8": 0, "0.8+": 0}
+    for s in all_scores:
+        if s < 0.2:
+            buckets["0.0-0.2"] += 1
+        elif s < 0.4:
+            buckets["0.2-0.4"] += 1
+        elif s < 0.6:
+            buckets["0.4-0.6"] += 1
+        elif s < 0.8:
+            buckets["0.6-0.8"] += 1
+        else:
+            buckets["0.8+"] += 1
+
+    # Type concentration: Herfindahl-Hirschman Index (HHI)
+    total_type = sum(type_counts.values())
+    hhi = sum((c / total_type) ** 2 for c in type_counts.values()) if total_type else 0.0
+    top_type = max(type_counts, key=type_counts.get) if type_counts else ""
+
+    return {
+        "total_traces": total,
+        "injected_traces": injected,
+        "injection_rate": round(injected / total, 3) if total else 0.0,
+        "avg_score": round(avg_score, 4),
+        "min_score": round(min_score, 4),
+        "p25_score": round(p25_score, 4),
+        "low_score_count": low_count,
+        "low_score_ratio": round(low_ratio, 4),
+        "score_histogram": buckets,
+        "type_concentration": round(hhi, 4),
+        "top_type": top_type,
+    }

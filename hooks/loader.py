@@ -23,7 +23,7 @@ sys.path.insert(0, str(_ROOT))
 from schema import MemoryChunk
 from utils import resolve_project_id
 from scorer import working_set_score as _unified_ws_score
-from store import open_db, ensure_schema, get_chunks as store_get_chunks, dmesg_log, DMESG_INFO, DMESG_WARN, watchdog_check, damon_scan, mglru_aging, checkpoint_restore, autotune, gc_traces, rmap_sweep, vma_merge, page_idle_scan, page_idle_mark, gc_orphan_swap, gc_namespace, overcommit_kill, ksm_scan
+from store import open_db, ensure_schema, get_chunks as store_get_chunks, dmesg_log, DMESG_INFO, DMESG_WARN, watchdog_check, damon_scan, mglru_aging, checkpoint_restore, autotune, gc_traces, rmap_sweep, vma_merge, page_idle_scan, page_idle_mark, gc_orphan_swap, gc_namespace, overcommit_kill, ksm_scan, perf_counters
 from config import get as _sysctl  # 迭代27: sysctl Runtime Tunables
 
 MEMORY_OS_DIR = Path.home() / ".claude" / "memory-os"
@@ -924,6 +924,20 @@ def main():
                           f"tuned: {adj_summary} hit_rate={autotune_result['stats'].get('hit_rate_pct',0)}%",
                           session_id=_session_id, project=project,
                           extra={"adjustments": autotune_result["adjustments"]})
+        except Exception:
+            pass
+
+        # ── iter537: perf_counters — Retrieval Quality PMU Counters ──
+        # OS 类比：perf stat — 读取 PMU 计数器诊断微架构效率
+        try:
+            _pc_result = perf_counters(_log_conn, project)
+            if _pc_result.get("total_traces", 0) > 0:
+                dmesg_log(_log_conn, DMESG_INFO, "perf_counters",
+                          f"avg_score={_pc_result['avg_score']:.3f} "
+                          f"low_ratio={_pc_result['low_score_ratio']:.2f} "
+                          f"hhi={_pc_result['type_concentration']:.3f} "
+                          f"inj_rate={_pc_result['injection_rate']:.2f}",
+                          session_id=_session_id, project=project)
         except Exception:
             pass
 

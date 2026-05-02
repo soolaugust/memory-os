@@ -3165,6 +3165,20 @@ _REGISTRY: dict = {
     # ── iter536: seccomp_filter — Summary Content Sanitizer ──
     "vfs.seccomp_filter_enabled": (True, bool, None, None, None,
         "seccomp BPF 过滤器开关（默认 True）。检测并清洗 summary 中的 JSON 残留/截断碎片"),
+
+    # ── iter537: perf_counters — Retrieval Quality PMU Counters ──
+    "perf.low_score_threshold": (0.40, float, 0.10, 0.80, None,
+        "低质量注入判定阈值。score < 此值的注入 chunk 计入 low_score_count"),
+    "perf.autotune_enabled": (True, bool, None, None, None,
+        "perf_counters 驱动的 min_score_threshold 自适应调节开关"),
+    "perf.raise_threshold_pct": (20.0, float, 5.0, 50.0, None,
+        "low_score_ratio 超过此百分比时提高 min_score_threshold（默认20%：超1/5注入低分则收紧）"),
+    "perf.lower_threshold_pct": (0.0, float, 0.0, 20.0, None,
+        "low_score_ratio 低于此百分比且avg_score高时降低阈值（默认0%：必须完全无低分才放松）"),
+    "perf.threshold_max": (0.50, float, 0.30, 0.80, None,
+        "min_score_threshold 自动调节上限（防止阈值过高导致无结果注入）"),
+    "perf.threshold_min": (0.20, float, 0.05, 0.40, None,
+        "min_score_threshold 自动调节下限（保证最低过滤标准）"),
 }
 
 # ── 磁盘配置缓存（进程内只读一次）──

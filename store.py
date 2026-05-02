@@ -151,4 +151,6 @@ from store_mm import (  # noqa: F401
     _cwnd_to_policy,
     _MADVISE_FILE,
     _madvise_load,
+    # iter537: perf_counters
+    perf_counters,
 )
