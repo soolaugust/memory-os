@@ -10935,3 +10935,183 @@ def mmap_populate(conn: sqlite3.Connection, project: str,
         pass
 
     return None
+
+
+# ── iter572: kcompactd — Proactive Dead Page Reclaim ──────────────────────────
+#
+# OS 类比：Linux kcompactd (Vlastimil Babka, 2016, kernel 4.6, mm/compaction.c)
+#   kswapd 只在 watermark 超标（zone->pages_low）时触发回收。
+#   但 fragmentation 问题在低负载系统上不会通过 kswapd 解决——
+#   kcompactd 在 extfrag_threshold 超标时主动扫描合并碎片，
+#   不需要等到 allocation failure。
+#
+# Memory-OS 等价问题：
+#   oom_score_adj_rebalance R2 将 dead chunks 标记为 oom_adj>=300，
+#   但 kswapd 只在 watermark 超标（count/quota > pages_low_pct=80%）时触发。
+#   生产 DB 100 chunks / quota 200 = 50% watermark，kswapd 永远休眠。
+#   结果：27 个 oom_adj=300 的 dead chunks（imp=0.15, zero-access）
+#   永远占据空间，降低信噪比（zero-access rate 41%）。
+#
+# 与现有机制的分工：
+#   kswapd: watermark > pages_low → 按 retention_score 淘汰（需要高水位触发）
+#   shrink_dcache_sb: VFS 物理检查不通过 + zero-access → 直接删除（只管碎片格式）
+#   oom_score_adj_rebalance R2: 标记 oom_adj=300（只标记不删除）
+#   kcompactd: oom_adj >= threshold + zero-access + age 门控 → 主动删除（低负载也工作）
+
+def kcompactd(conn: sqlite3.Connection, project: str = None) -> dict:
+    """
+    iter572: kcompactd — Proactive Dead Page Reclaim.
+
+    周期性扫描 oom_adj >= oom_threshold 的 zero-access chunks 并主动删除。
+    不受 kswapd watermark 门控限制，在低负载系统上也能清理标记为 dead 的 chunks。
+
+    触发条件（全部满足）：
+      1. access_count == 0（从未被召回过）
+      2. oom_adj >= oom_threshold（已被 R2 或其他规则标记为优先回收）
+      3. importance < imp_ceiling（低价值，不误删高价值 chunk）
+      4. age >= min_age_days（冷启动保护，给新 chunk 曝光机会）
+      5. 不在 chunk_pins 中（mlock 保护）
+      6. 不是 task_state 类型（运行时上下文）
+
+    参数：
+      conn — DB 连接
+      project — 项目 ID（None 表示全局扫描）
+
+    返回：
+      dict: deleted, scanned, skipped_pinned, skipped_young, duration_ms
+    """
+    import time as _t
+    t0 = _t.time()
+
+    try:
+        from config import get as _cfg
+        enabled = _cfg("kcompactd.enabled")
+        if not enabled:
+            return {"deleted": 0, "scanned": 0, "skipped_pinned": 0,
+                    "skipped_young": 0, "duration_ms": 0.0}
+        oom_threshold = _cfg("kcompactd.oom_threshold")
+        imp_ceiling = _cfg("kcompactd.imp_ceiling")
+        min_age_days = _cfg("kcompactd.min_age_days")
+        max_delete = _cfg("kcompactd.max_delete")
+    except Exception:
+        return {"deleted": 0, "scanned": 0, "skipped_pinned": 0,
+                "skipped_young": 0, "duration_ms": 0.0}
+
+    # 查询候选：zero-access + high oom_adj + low importance
+    proj_filter = ""
+    params = [oom_threshold, imp_ceiling]
+    if project:
+        proj_filter = "AND (project = ? OR project = 'global')"
+        params.append(project)
+
+    candidates = conn.execute(
+        f"""SELECT id, summary, importance, oom_adj, created_at, chunk_type
+            FROM memory_chunks
+            WHERE access_count = 0
+            AND oom_adj >= ?
+            AND importance < ?
+            AND importance > 0
+            AND chunk_type != 'task_state'
+            {proj_filter}
+            ORDER BY oom_adj DESC, importance ASC
+        """,
+        params,
+    ).fetchall()
+
+    scanned = len(candidates)
+    skipped_pinned = 0
+    skipped_young = 0
+    deleted_ids = []
+
+    # 加载 pinned chunk IDs
+    try:
+        pinned = set(
+            r[0] for r in conn.execute(
+                "SELECT chunk_id FROM chunk_pins"
+            ).fetchall()
+        )
+    except Exception:
+        pinned = set()
+
+    now = datetime.now(timezone.utc)
+
+    for row in candidates:
+        if len(deleted_ids) >= max_delete:
+            break
+
+        cid, summary, importance, oom_adj, created_at, chunk_type = row
+
+        # mlock 保护
+        if cid in pinned:
+            skipped_pinned += 1
+            continue
+
+        # 冷启动保护：新 chunk 需要时间获得曝光机会
+        try:
+            ca = created_at.replace("Z", "+00:00") if created_at else ""
+            created = datetime.fromisoformat(ca)
+            age_days = (now - created).total_seconds() / 86400.0
+        except Exception:
+            age_days = 0.0
+
+        if age_days < min_age_days:
+            skipped_young += 1
+            continue
+
+        deleted_ids.append(cid)
+
+    # 执行删除
+    if deleted_ids:
+        # 删除 FTS5 索引
+        for cid in deleted_ids:
+            rowid_row = conn.execute(
+                "SELECT rowid FROM memory_chunks WHERE id=?", (cid,)
+            ).fetchone()
+            if rowid_row:
+                conn.execute(
+                    "DELETE FROM memory_chunks_fts WHERE rowid_ref=?",
+                    (str(rowid_row[0]),)
+                )
+
+        # 删除 entity_map 条目
+        placeholders = ",".join("?" * len(deleted_ids))
+        try:
+            conn.execute(
+                f"DELETE FROM entity_map WHERE chunk_id IN ({placeholders})",
+                deleted_ids
+            )
+        except Exception:
+            pass
+
+        # 删除 entity_edges
+        try:
+            conn.execute(
+                f"DELETE FROM entity_edges WHERE source_chunk_id IN ({placeholders})",
+                deleted_ids
+            )
+        except Exception:
+            pass
+
+        # 删除主记录
+        conn.execute(
+            f"DELETE FROM memory_chunks WHERE id IN ({placeholders})",
+            deleted_ids
+        )
+        conn.commit()
+
+        # bump chunk_version 使 TLB 失效
+        try:
+            from store_core import bump_chunk_version
+            bump_chunk_version()
+        except Exception:
+            pass
+
+    duration_ms = (_t.time() - t0) * 1000
+
+    return {
+        "deleted": len(deleted_ids),
+        "scanned": scanned,
+        "skipped_pinned": skipped_pinned,
+        "skipped_young": skipped_young,
+        "duration_ms": duration_ms,
+    }

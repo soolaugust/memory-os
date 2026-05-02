@@ -1697,6 +1697,28 @@ def main():
             except Exception:
                 pass
 
+        # ── iter572：kcompactd — Proactive Dead Page Reclaim ──
+        if _ict_enabled: _ict_milestones.append(("kcompactd", _ict_time.time()))
+        # OS 类比：Linux kcompactd (Vlastimil Babka, 2016) — 低负载时主动回收
+        # oom_adj>=300 + zero-access + low-imp chunks，不受 kswapd watermark 门控
+        _kcompactd_result = {"deleted": 0}
+        if not _defer_reclaim and not _ts_skip("kcompactd"):
+            try:
+                from store_mm import kcompactd
+                _kcompactd_result = kcompactd(_log_conn, project)
+                if _kcompactd_result["deleted"] > 0:
+                    dmesg_log(_log_conn, DMESG_INFO, "kcompactd",
+                              f"deleted={_kcompactd_result['deleted']} "
+                              f"scanned={_kcompactd_result['scanned']} "
+                              f"skipped_pinned={_kcompactd_result['skipped_pinned']} "
+                              f"skipped_young={_kcompactd_result['skipped_young']} "
+                              f"{_kcompactd_result['duration_ms']:.1f}ms",
+                              session_id=_session_id, project=project)
+                    _log_conn.commit()
+                _ts_report("kcompactd", _kcompactd_result.get("deleted", 0) > 0)
+            except Exception:
+                pass
+
         # ── iter569：anon_vma_prepare — Entity Map Backfill ──
         if _ict_enabled: _ict_milestones.append(("anon_vma_prepare", _ict_time.time()))
         # OS 类比：Linux anon_vma_prepare() — 为迁移页面建立 rmap 基础设施

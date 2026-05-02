@@ -3308,6 +3308,18 @@ _REGISTRY: dict = {
     "mmap_populate.exclude_types": ("prompt_context,conversation_summary", str, None, None, None,
         "排除的 chunk_type（逗号分隔）：这些类型不适合强制曝光"),
 
+    # ── iter572: kcompactd — Proactive Dead Page Reclaim ──
+    "kcompactd.enabled": (True, bool, None, None, None,
+        "是否启用主动 dead page 回收（oom_adj 驱动，不受 kswapd watermark 门控）"),
+    "kcompactd.oom_threshold": (300, int, 100, 1000, None,
+        "触发回收的最低 oom_adj 值（R2 标记为 300，R4 标记为 1000）"),
+    "kcompactd.imp_ceiling": (0.3, float, 0.1, 0.8, None,
+        "importance 上限：只回收低价值 chunks（防止误删高价值 chunk）"),
+    "kcompactd.min_age_days": (3.0, float, 0.5, 30.0, None,
+        "最小年龄保护（天）：新 chunk 有时间通过 mmap_populate 获得曝光机会"),
+    "kcompactd.max_delete": (20, int, 5, 50, None,
+        "单次扫描最大删除量（防止批量删除冲击 FTS5 索引）"),
+
     # ── iter549: vacuum — Database File Compaction ──
     "vacuum.enabled": (True, bool, None, None, None,
         "是否启用 VACUUM（DB 文件物理收缩）"),
