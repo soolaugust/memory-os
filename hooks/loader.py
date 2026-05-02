@@ -34,6 +34,88 @@ STORE_DB = MEMORY_OS_DIR / "store.db"
 # 原硬编码：MAX_AGE_SECS=86400, MAX_CONTEXT_CHARS=800, WORKING_SET_TOP_K=5
 # 工作集只恢复高价值 chunk 类型（task_state 已通过 latest.json 恢复）
 WORKING_SET_TYPES = ("decision", "reasoning_chain", "conversation_summary", "design_constraint", "procedure")
+
+
+# ── iter535: deferred_initcall — Conditional Boot Subsystem Bypass ──
+# OS 类比：Linux deferred_struct_pages (Mel Gorman, 2015, kernel 4.2)
+#   CONFIG_DEFERRED_STRUCT_PAGE_INIT 在大内存系统中跳过 boot node 以外的
+#   memmap 初始化，由后台线程按需完成。boot time 缩短 80%+。
+#   对小内存系统（<4GB）不触发——不需要 deferred init。
+#
+# 根因：SessionStart 运行 25 个回收/GC/平衡子系统，每个都执行 SQL 扫描。
+#   生产 DB 72 chunks, 19.4% 零访问率——系统已健康。
+#   大部分子系统 find nothing to do 但仍付 import + query 成本。
+#
+# 策略：一次 O(1) 健康探针决定是否跳过整个 reclaim 阶段。
+def _should_defer_reclaim(conn: sqlite3.Connection, project: str) -> tuple:
+    """
+    快速健康探针：决定是否跳过 reclaim 子系统套件。
+
+    返回 (should_defer: bool, reason: str, metrics: dict)
+
+    跳过条件（全部满足）：
+      1. 总 chunks < defer_max_chunks (默认 150) — 小库不需要激进回收
+      2. 零访问率 < defer_zero_pct (默认 30%) — 数据质量已健康
+      3. 无 zombie (importance < 0.2 + access=0) — 无需最终回收
+      4. 距上次 reclaim < defer_cooldown_hours (默认 2h) — 最近已扫过
+
+    任一条件不满足 → 执行完整 reclaim（不跳过）。
+    """
+    try:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM memory_chunks WHERE project IN (?, 'global')",
+            (project,)
+        ).fetchone()[0]
+    except Exception:
+        return (False, "query_error", {})
+
+    # 条件 1：小库快速路径
+    defer_max = int(_sysctl("loader.defer_max_chunks"))
+    if total >= defer_max:
+        return (False, f"large_db({total}>={defer_max})", {"total": total})
+
+    # 条件 2：零访问率
+    try:
+        zero_acc = conn.execute(
+            "SELECT COUNT(*) FROM memory_chunks WHERE project IN (?, 'global') AND access_count = 0",
+            (project,)
+        ).fetchone()[0]
+    except Exception:
+        zero_acc = 0
+    zero_pct = zero_acc / total if total > 0 else 0
+    defer_zero = _sysctl("loader.defer_zero_pct")
+    if zero_pct >= defer_zero:
+        return (False, f"high_zero({zero_pct:.1%}>={defer_zero:.0%})", {"total": total, "zero_pct": zero_pct})
+
+    # 条件 3：无 zombie
+    try:
+        zombies = conn.execute(
+            "SELECT COUNT(*) FROM memory_chunks WHERE importance < 0.2 AND access_count = 0"
+        ).fetchone()[0]
+    except Exception:
+        zombies = 0
+    if zombies > 0:
+        return (False, f"zombies({zombies})", {"total": total, "zero_pct": zero_pct, "zombies": zombies})
+
+    # 条件 4：最近 reclaim 冷却期
+    defer_cooldown_h = _sysctl("loader.defer_cooldown_hours")
+    try:
+        last_reclaim = conn.execute(
+            "SELECT MAX(timestamp) FROM dmesg WHERE subsystem IN "
+            "('kfree_rcu','free_pages_ok','oom_reaper','overcommit_kill','shrink_dcache','damon','put_page')"
+        ).fetchone()[0]
+        if last_reclaim:
+            from datetime import datetime, timezone
+            last_dt = datetime.fromisoformat(last_reclaim.replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            hours_since = (now - last_dt).total_seconds() / 3600
+            if hours_since >= defer_cooldown_h:
+                return (False, f"cooldown_expired({hours_since:.1f}h>={defer_cooldown_h}h)",
+                        {"total": total, "zero_pct": zero_pct, "hours_since_reclaim": hours_since})
+    except Exception:
+        pass  # 无 dmesg 记录 → 视为已冷却，不强制执行
+
+    return (True, "healthy", {"total": total, "zero_pct": zero_pct, "zombies": zombies})
 # 迭代111: 加入 design_constraint — 当前项目的约束应在 SessionStart 预加载（常驻内核模块类比）
 # iter117: 加入 procedure — wiki 导入的操作协议也需要 SessionStart 预加载（importance≥0.85，具有高稳定性）
 
@@ -868,6 +950,17 @@ def main():
         except Exception:
             pass
 
+        # ── iter535: deferred_initcall — 条件性启动旁路 ──
+        # OS 类比：Linux deferred_struct_pages (Mel Gorman, 2015, kernel 4.2)
+        # 小库+健康 DB 时跳过全部 reclaim/GC/rebalance 子系统（25 个），省 ~100ms+
+        _defer_reclaim, _defer_reason, _defer_metrics = _should_defer_reclaim(_log_conn, project)
+        if _defer_reclaim:
+            dmesg_log(_log_conn, DMESG_DEBUG, "deferred_initcall",
+                      f"skip_reclaim: reason={_defer_reason} total={_defer_metrics.get('total',0)} "
+                      f"zero={_defer_metrics.get('zero_pct',0):.1%}",
+                      session_id=_session_id, project=project)
+        # ── End deferred_initcall gate ──
+
         # ── iter518：migrate_pages — 跨 project_id 知识迁移 ──
         # OS 类比：Linux migrate_pages() (Christoph Lameter, 2006) — 跨 NUMA 节点页面迁移
         # 同一物理仓库产生不同 project_id 时，将旧别名下的知识迁移到当前 project
@@ -916,7 +1009,8 @@ def main():
         # SessionStart 时做一次全量扫描，识别 dead/cold chunk 并主动回收
         damon_result = {"heatmap": {}, "actions": {}}
         try:
-            damon_result = damon_scan(_log_conn, project)
+            if not _defer_reclaim:  # iter535: deferred_initcall gate
+                damon_result = damon_scan(_log_conn, project)
             damon_actions = damon_result.get("actions", {})
             if any(v > 0 for v in damon_actions.values()):
                 _log_conn.commit()
@@ -928,12 +1022,13 @@ def main():
         # 跨所有 project 扫描零访问+超龄 chunks，分级降权/删除，解决 82%+ 零访问率
         shrink_result = {"phase1_candidates": 0, "phase2_demoted": 0, "phase3_deleted": 0}
         try:
-            from store_vfs import shrink_dcache
-            shrink_result = shrink_dcache(_log_conn, project)
-            if shrink_result.get("phase2_demoted", 0) > 0 or shrink_result.get("phase3_deleted", 0) > 0:
-                dmesg_log(_log_conn, DMESG_INFO, "shrink_dcache",
-                          f"reclaim: candidates={shrink_result['phase1_candidates']} demoted={shrink_result['phase2_demoted']} deleted={shrink_result['phase3_deleted']} {shrink_result.get('duration_ms', 0):.1f}ms",
-                          session_id=_session_id, project=project)
+            if not _defer_reclaim:  # iter535: deferred_initcall gate
+                from store_vfs import shrink_dcache
+                shrink_result = shrink_dcache(_log_conn, project)
+                if shrink_result.get("phase2_demoted", 0) > 0 or shrink_result.get("phase3_deleted", 0) > 0:
+                    dmesg_log(_log_conn, DMESG_INFO, "shrink_dcache",
+                              f"reclaim: candidates={shrink_result['phase1_candidates']} demoted={shrink_result['phase2_demoted']} deleted={shrink_result['phase3_deleted']} {shrink_result.get('duration_ms', 0):.1f}ms",
+                              session_id=_session_id, project=project)
         except Exception:
             pass
 
@@ -941,12 +1036,13 @@ def main():
         # OS 类比：Linux oom_reaper (Michal Hocko, 2016) — OOM 选中后立即回收匿名页
         # 不受 min_age_days 限制，专门处理各回收器保护条件叠加形成的"回收死区"
         try:
-            from store_vfs import oom_reaper
-            reaper_result = oom_reaper(_log_conn, project)
-            if reaper_result.get("triggered"):
-                dmesg_log(_log_conn, DMESG_INFO, "oom_reaper",
-                          f"reap: ratio={reaper_result['zero_access_ratio']:.1%} reaped={reaper_result['reaped']} deleted={reaper_result['deleted']} {reaper_result.get('duration_ms', 0):.1f}ms",
-                          session_id=_session_id, project=project)
+            if not _defer_reclaim:  # iter535: deferred_initcall gate
+                from store_vfs import oom_reaper
+                reaper_result = oom_reaper(_log_conn, project)
+                if reaper_result.get("triggered"):
+                    dmesg_log(_log_conn, DMESG_INFO, "oom_reaper",
+                              f"reap: ratio={reaper_result['zero_access_ratio']:.1%} reaped={reaper_result['reaped']} deleted={reaper_result['deleted']} {reaper_result.get('duration_ms', 0):.1f}ms",
+                              session_id=_session_id, project=project)
         except Exception:
             pass
 
@@ -954,11 +1050,12 @@ def main():
         # OS 类比：Linux vm.overcommit_memory=2 (Rik van Riel, 2001) — 严格内存计量
         # global 层批量导入的知识绕过有机准入，85%+ 零访问需要激进回收
         try:
-            oc_result = overcommit_kill(_log_conn)
-            if oc_result.get("triggered"):
-                dmesg_log(_log_conn, DMESG_INFO, "overcommit_kill",
-                          f"reap: global={oc_result['global_total']} zero={oc_result['global_zero_access']}({oc_result['zero_access_ratio']:.1%}) reaped={oc_result['reaped']} deleted={oc_result['deleted']} {oc_result.get('duration_ms', 0):.1f}ms",
-                          session_id=_session_id, project=project)
+            if not _defer_reclaim:  # iter535: deferred_initcall gate
+                oc_result = overcommit_kill(_log_conn)
+                if oc_result.get("triggered"):
+                    dmesg_log(_log_conn, DMESG_INFO, "overcommit_kill",
+                              f"reap: global={oc_result['global_total']} zero={oc_result['global_zero_access']}({oc_result['zero_access_ratio']:.1%}) reaped={oc_result['reaped']} deleted={oc_result['deleted']} {oc_result.get('duration_ms', 0):.1f}ms",
+                              session_id=_session_id, project=project)
         except Exception:
             pass
 
@@ -967,15 +1064,16 @@ def main():
         # 统一最终回收：所有降级器（shrink/reaper/page_idle/overcommit）跑完后，
         # 清理 importance < 0.2 + access_count = 0 的 zombie chunks
         try:
-            from store_mm import free_pages_ok
-            fp_result = free_pages_ok(_log_conn, project)
-            if fp_result["freed"] > 0:
-                dmesg_log(_log_conn, DMESG_INFO, "free_pages_ok",
-                          f"freed={fp_result['freed']} dead={fp_result['total_dead']} "
-                          f"skip_acc={fp_result['skipped_accessed']} "
-                          f"skip_prot={fp_result['skipped_protected']} "
-                          f"{fp_result['duration_ms']:.1f}ms",
-                          session_id=_session_id, project=project)
+            if not _defer_reclaim:  # iter535: deferred_initcall gate
+                from store_mm import free_pages_ok
+                fp_result = free_pages_ok(_log_conn, project)
+                if fp_result["freed"] > 0:
+                    dmesg_log(_log_conn, DMESG_INFO, "free_pages_ok",
+                              f"freed={fp_result['freed']} dead={fp_result['total_dead']} "
+                              f"skip_acc={fp_result['skipped_accessed']} "
+                              f"skip_prot={fp_result['skipped_protected']} "
+                              f"{fp_result['duration_ms']:.1f}ms",
+                              session_id=_session_id, project=project)
         except Exception:
             pass
 
@@ -983,14 +1081,15 @@ def main():
         # OS 类比：Linux kfree_rcu() (Paul E. McKenney, 2002) — 延迟到 grace period 后全局释放
         # free_pages_ok 只扫描当前 project，global 层 zombie 无人回收 → 全局扫描补漏
         try:
-            from store_mm import kfree_rcu
-            kr_result = kfree_rcu(_log_conn)
-            if kr_result["freed"] > 0:
-                dmesg_log(_log_conn, DMESG_INFO, "kfree_rcu",
-                          f"freed={kr_result['freed']} dead={kr_result['total_dead']} "
-                          f"skip_prot={kr_result['skipped_protected']} "
-                          f"{kr_result['duration_ms']:.1f}ms",
-                          session_id=_session_id, project=project)
+            if not _defer_reclaim:  # iter535: deferred_initcall gate
+                from store_mm import kfree_rcu
+                kr_result = kfree_rcu(_log_conn)
+                if kr_result["freed"] > 0:
+                    dmesg_log(_log_conn, DMESG_INFO, "kfree_rcu",
+                              f"freed={kr_result['freed']} dead={kr_result['total_dead']} "
+                              f"skip_prot={kr_result['skipped_protected']} "
+                              f"{kr_result['duration_ms']:.1f}ms",
+                              session_id=_session_id, project=project)
         except Exception:
             pass
 
@@ -998,17 +1097,18 @@ def main():
         # OS 类比：Linux put_page()/__page_cache_release() — refcount=0 时统一释放路径
         # 三盲区修复：UE force kill(imp=0+acc>0) + OOM_MAX reap + bitmap stale scrub
         try:
-            from store_mm import put_page
-            pp_result = put_page(_log_conn, project)
-            total_pp = (pp_result["ue_killed"] + pp_result["oom_max_reaped"]
-                        + pp_result["oom_max_demoted"] + pp_result["bitmap_stale_removed"])
-            if total_pp > 0:
-                dmesg_log(_log_conn, DMESG_INFO, "put_page",
-                          f"ue={pp_result['ue_killed']} oom_reap={pp_result['oom_max_reaped']} "
-                          f"oom_demote={pp_result['oom_max_demoted']} "
-                          f"bitmap_stale={pp_result['bitmap_stale_removed']} "
-                          f"{pp_result['duration_ms']:.1f}ms",
-                          session_id=_session_id, project=project)
+            if not _defer_reclaim:  # iter535: deferred_initcall gate
+                from store_mm import put_page
+                pp_result = put_page(_log_conn, project)
+                total_pp = (pp_result["ue_killed"] + pp_result["oom_max_reaped"]
+                            + pp_result["oom_max_demoted"] + pp_result["bitmap_stale_removed"])
+                if total_pp > 0:
+                    dmesg_log(_log_conn, DMESG_INFO, "put_page",
+                              f"ue={pp_result['ue_killed']} oom_reap={pp_result['oom_max_reaped']} "
+                              f"oom_demote={pp_result['oom_max_demoted']} "
+                              f"bitmap_stale={pp_result['bitmap_stale_removed']} "
+                              f"{pp_result['duration_ms']:.1f}ms",
+                              session_id=_session_id, project=project)
         except Exception:
             pass
 
@@ -1016,15 +1116,16 @@ def main():
         # OS 类比：Linux AutoNUMA (Ingo Molnár, 2012) — 观察访问模式动态迁移页面到正确 NUMA node
         # 双向平衡：高访问+低imp → promote，高imp+零访问+超龄 → demote
         try:
-            from store_mm import numa_balancing
-            nb_result = numa_balancing(_log_conn, project)
-            if nb_result["promoted"] > 0 or nb_result["demoted"] > 0:
-                dmesg_log(_log_conn, DMESG_INFO, "numa_balancing",
-                          f"rebalance: promoted={nb_result['promoted']} "
-                          f"demoted={nb_result['demoted']} "
-                          f"skip_prot={nb_result['skipped_protected']} "
-                          f"{nb_result['duration_ms']:.1f}ms",
-                          session_id=_session_id, project=project)
+            if not _defer_reclaim:  # iter535: deferred_initcall gate
+                from store_mm import numa_balancing
+                nb_result = numa_balancing(_log_conn, project)
+                if nb_result["promoted"] > 0 or nb_result["demoted"] > 0:
+                    dmesg_log(_log_conn, DMESG_INFO, "numa_balancing",
+                              f"rebalance: promoted={nb_result['promoted']} "
+                              f"demoted={nb_result['demoted']} "
+                              f"skip_prot={nb_result['skipped_protected']} "
+                              f"{nb_result['duration_ms']:.1f}ms",
+                              session_id=_session_id, project=project)
         except Exception:
             pass
 
@@ -1032,50 +1133,54 @@ def main():
         # OS 类比：Linux mincore() (Linus Torvalds, 1994) — 查询哪些页面真实驻留在物理内存
         # 诊断高 importance 段的"虚假驻留"并校准 importance
         try:
-            from store_mm import mincore
-            mc_result = mincore(_log_conn, project)
-            if mc_result["calibrated"] > 0:
-                dmesg_log(_log_conn, DMESG_INFO, "mincore",
-                          f"calibrate: high={mc_result['total_high']} "
-                          f"resident={mc_result['resident']} "
-                          f"non_resident={mc_result['non_resident']} "
-                          f"calibrated={mc_result['calibrated']} "
-                          f"{mc_result['duration_ms']:.1f}ms",
-                          session_id=_session_id, project=project)
+            if not _defer_reclaim:  # iter535: deferred_initcall gate
+                from store_mm import mincore
+                mc_result = mincore(_log_conn, project)
+                if mc_result["calibrated"] > 0:
+                    dmesg_log(_log_conn, DMESG_INFO, "mincore",
+                              f"calibrate: high={mc_result['total_high']} "
+                              f"resident={mc_result['resident']} "
+                              f"non_resident={mc_result['non_resident']} "
+                              f"calibrated={mc_result['calibrated']} "
+                              f"{mc_result['duration_ms']:.1f}ms",
+                              session_id=_session_id, project=project)
         except Exception:
             pass
 
         # ── iter514：ksm_scan — 同页合并扫描（去除版本化重复） ──
         # OS 类比：Linux KSM (Andrea Arcangeli, 2009) — ksmd 扫描相同页面合并为 COW 共享页
         try:
-            ksm_result = ksm_scan(_log_conn)
-            if ksm_result.get("triggered"):
-                dmesg_log(_log_conn, DMESG_INFO, "ksm_scan",
-                          f"ksm: groups={ksm_result['groups_found']} merged={ksm_result['chunks_merged']} deleted={ksm_result['chunks_deleted']} {ksm_result.get('duration_ms', 0):.1f}ms",
-                          session_id=_session_id, project=project)
+            if not _defer_reclaim:  # iter535: deferred_initcall gate
+                ksm_result = ksm_scan(_log_conn)
+                if ksm_result.get("triggered"):
+                    dmesg_log(_log_conn, DMESG_INFO, "ksm_scan",
+                              f"ksm: groups={ksm_result['groups_found']} merged={ksm_result['chunks_merged']} deleted={ksm_result['chunks_deleted']} {ksm_result.get('duration_ms', 0):.1f}ms",
+                              session_id=_session_id, project=project)
         except Exception:
             pass
 
         # ── 迭代516：madv_free — 惰性页面回收与 FTS5 索引排除 ──
         # OS 类比：Linux madvise(MADV_FREE) (Minchan Kim, 2016) — 标记页面可释放，移除 PTE mapping
         try:
-            from store_mm import madv_free_scan
-            mf_result = madv_free_scan(_log_conn)
-            if mf_result["unmapped"] > 0 or mf_result["freed"] > 0:
-                dmesg_log(_log_conn, DMESG_INFO, "madv_free",
-                          f"madv_free: unmapped={mf_result['unmapped']} freed={mf_result['freed']} lazy={mf_result['total_lazy']}",
-                          session_id=_session_id, project=project)
+            if not _defer_reclaim:  # iter535: deferred_initcall gate
+                from store_mm import madv_free_scan
+                mf_result = madv_free_scan(_log_conn)
+                if mf_result["unmapped"] > 0 or mf_result["freed"] > 0:
+                    dmesg_log(_log_conn, DMESG_INFO, "madv_free",
+                              f"madv_free: unmapped={mf_result['unmapped']} freed={mf_result['freed']} lazy={mf_result['total_lazy']}",
+                              session_id=_session_id, project=project)
         except Exception:
             pass
 
         # ── 迭代512：gc_namespace — 测试命名空间清理 ──
         # OS 类比：Linux pid_ns_release_proc() — namespace 销毁时批量清理所有 artifacts
         try:
-            ns_result = gc_namespace(_log_conn)
-            if ns_result["traces_deleted"] > 0 or ns_result["chunks_deleted"] > 0:
-                dmesg_log(_log_conn, DMESG_INFO, "gc",
-                          f"gc_namespace: projects={len(ns_result['test_projects'])} traces={ns_result['traces_deleted']} ckpts={ns_result['checkpoints_deleted']} chunks={ns_result['chunks_deleted']}",
-                          session_id=_session_id, project=project)
+            if not _defer_reclaim:  # iter535: deferred_initcall gate
+                ns_result = gc_namespace(_log_conn)
+                if ns_result["traces_deleted"] > 0 or ns_result["chunks_deleted"] > 0:
+                    dmesg_log(_log_conn, DMESG_INFO, "gc",
+                              f"gc_namespace: projects={len(ns_result['test_projects'])} traces={ns_result['traces_deleted']} ckpts={ns_result['checkpoints_deleted']} chunks={ns_result['chunks_deleted']}",
+                              session_id=_session_id, project=project)
         except Exception:
             pass
 
@@ -1137,13 +1242,14 @@ def main():
         # OS 类比：Linux munlock() + MADV_COLD (Minchan Kim, 2019)
         # mlock 保护的 chunk 若连续 N 轮 idle 且 access=0，说明从未被实战验证，撤销保护
         try:
-            from store_mm import munlock_idle
-            munlock_result = munlock_idle(_log_conn, project)
-            if munlock_result["unlocked"] > 0:
-                dmesg_log(_log_conn, DMESG_INFO, "munlock_idle",
-                          f"unlocked={munlock_result['unlocked']} scanned={munlock_result['scanned']} "
-                          f"grace_skip={munlock_result['skipped_grace']}",
-                          session_id=_session_id, project=project)
+            if not _defer_reclaim:  # iter535: deferred_initcall gate
+                from store_mm import munlock_idle
+                munlock_result = munlock_idle(_log_conn, project)
+                if munlock_result["unlocked"] > 0:
+                    dmesg_log(_log_conn, DMESG_INFO, "munlock_idle",
+                              f"unlocked={munlock_result['unlocked']} scanned={munlock_result['scanned']} "
+                              f"grace_skip={munlock_result['skipped_grace']}",
+                              session_id=_session_id, project=project)
         except Exception:
             pass
 
@@ -1151,13 +1257,14 @@ def main():
         # OS 类比：Linux sched_setaffinity() / cpuset (Ingo Molnár, 2004)
         # 召回率超 50% 的垄断 chunk 从 FTS5 物理移除，cooldown 后自动恢复
         try:
-            from store_mm import cpuset_quarantine
-            cpuset_result = cpuset_quarantine(_log_conn, project)
-            if cpuset_result["quarantined"] or cpuset_result["released"]:
-                dmesg_log(_log_conn, DMESG_INFO, "cpuset",
-                          f"quarantine: new={len(cpuset_result['quarantined'])} "
-                          f"released={len(cpuset_result['released'])} active={cpuset_result['active']}",
-                          session_id=_session_id, project=project)
+            if not _defer_reclaim:  # iter535: deferred_initcall gate
+                from store_mm import cpuset_quarantine
+                cpuset_result = cpuset_quarantine(_log_conn, project)
+                if cpuset_result["quarantined"] or cpuset_result["released"]:
+                    dmesg_log(_log_conn, DMESG_INFO, "cpuset",
+                              f"quarantine: new={len(cpuset_result['quarantined'])} "
+                              f"released={len(cpuset_result['released'])} active={cpuset_result['active']}",
+                              session_id=_session_id, project=project)
         except Exception:
             pass
 

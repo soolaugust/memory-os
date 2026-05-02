@@ -122,6 +122,12 @@ _REGISTRY: dict = {
         "iter529: RT 带宽上限 — chunk 在 recall_traces 中出现频率超过此比例时从 working_set 排除"),
     "loader.rt_bandwidth_window": (30, int, 10, 200, None,
         "iter529: 带宽计算窗口大小 — 回溯最近 N 条 injected traces"),
+    "loader.defer_max_chunks": (150, int, 20, 1000, None,
+        "iter535: deferred_initcall — 总 chunks 超过此值时不跳过 reclaim 子系统"),
+    "loader.defer_zero_pct": (0.30, float, 0.05, 0.80, None,
+        "iter535: deferred_initcall — 零访问率超过此值时不跳过 reclaim 子系统"),
+    "loader.defer_cooldown_hours": (2.0, float, 0.5, 24.0, None,
+        "iter535: deferred_initcall — 上次 reclaim 距今超过此小时数时不跳过"),
 
     # ── knowledge_router ──
     "router.top_k_per_source": (3, int, 1, 20, None,
