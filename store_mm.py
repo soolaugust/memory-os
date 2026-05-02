@@ -8144,3 +8144,142 @@ def release_task(conn: sqlite3.Connection, project: str = None) -> dict:
         "phases": phases,
         "duration_ms": duration_ms,
     }
+
+
+# ── iter551: initcall_debug — Boot Subsystem Latency Instrumentation ──────────
+# OS 类比：Linux initcall_debug (Arjan van de Ven, 2008, kernel 2.6.24)
+#   内核启动时每个 __initcall 函数打印执行时间：
+#     "initcall xyz_init+0x0/0x20 returned 0 after 4523 usecs"
+#   配合 systemd-analyze blame / bootchart 定位最慢启动模块。
+#   没有 initcall_debug → 启动变慢只能猜，无法数据驱动优化。
+#
+# Memory-OS 问题：
+#   loader.py SessionStart 运行 25+ 子系统（watchdog, autotune, perf_counters,
+#   damon, shrink_dcache, oom_reaper, overcommit_kill, free_pages_ok, kfree_rcu,
+#   put_page, numa_balancing, mincore, ksm_scan, fstrim, logrotate, vacuum,
+#   release_task...），但只有最终汇总 dmesg 行，没有 per-subsystem 延迟分解。
+#   deferred_initcall (iter535) 是粗粒度全有/全无，不知道具体该跳过谁。
+#
+# 实现：
+#   1. _InitcallTimer context manager — 零侵入计时，记录每个子系统 elapsed_ms
+#   2. initcall_debug() — 分析 timings，输出 Top-N 最慢 + total + deferred 节省
+#   3. loader.py 集成：wrap 每个子系统调用，SessionStart 末尾写 dmesg
+
+class _InitcallTimer:
+    """
+    轻量级 SessionStart 子系统计时收集器。
+
+    用法（在 loader.py 中）：
+        timer = _InitcallTimer()
+        with timer.probe("watchdog"):
+            watchdog_check(conn)
+        with timer.probe("autotune"):
+            autotune(conn, project)
+        ...
+        result = initcall_debug(timer.timings)
+    """
+    __slots__ = ("timings",)
+
+    def __init__(self):
+        self.timings: list = []  # [(name, elapsed_ms, ok)]
+
+    class _Probe:
+        __slots__ = ("_timer", "_name", "_t0")
+
+        def __init__(self, timer: "_InitcallTimer", name: str):
+            self._timer = timer
+            self._name = name
+            self._t0 = 0.0
+
+        def __enter__(self):
+            self._t0 = _time.time()
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            elapsed_ms = (_time.time() - self._t0) * 1000
+            ok = exc_type is None
+            self._timer.timings.append((self._name, round(elapsed_ms, 2), ok))
+            return True  # suppress exceptions — 每个子系统独立 fault isolation
+
+    def probe(self, name: str) -> "_Probe":
+        return self._Probe(self, name)
+
+
+def initcall_debug(timings: list, top_n: int = 5) -> dict:
+    """
+    iter551: initcall_debug — 分析 SessionStart per-subsystem timing 数据。
+
+    OS 类比：
+      Linux initcall_debug (Arjan van de Ven, 2008, kernel 2.6.24)
+      内核启动参数 initcall_debug 为每个 __initcall 函数打印执行耗时：
+        "initcall xyz_init+0x0/0x20 returned 0 after 4523 usecs"
+      systemd-analyze blame 做同样的事——按耗时降序列出所有 systemd unit。
+      这是 Linux 启动优化的基础工具：先 measure，再 optimize。
+
+    Memory-OS 等价：
+      loader.py SessionStart 运行 25+ 子系统，但只有汇总行：
+        "session_start latest=Y working_set=1 ctx_len=313 watchdog=HEALTHY
+         damon=H2/W4/C0/D0 shrink_slab=2recl/2free ..."
+      没有 per-subsystem 延迟 → 无法定位瓶颈 → 无法数据驱动优化。
+      deferred_initcall (iter535) 是粗粒度 all-or-nothing，
+      而 initcall_debug 提供细粒度 per-subsystem 数据，
+      支持 selective defer（只跳过慢且无效的子系统）。
+
+    参数：
+      timings — [(name, elapsed_ms, ok)] 由 _InitcallTimer 收集
+      top_n — 输出 Top-N 最慢子系统（默认 5）
+
+    返回 dict：
+      total_ms — 所有子系统总耗时
+      subsystem_count — 子系统总数
+      top_slow — Top-N 最慢 [{name, ms, ok}]
+      failed — 失败的子系统列表 [{name, ms}]
+      blame_line — 格式化的 blame 行（类似 systemd-analyze blame 输出）
+      below_1ms — 耗时 < 1ms 的子系统数（候选 defer 对象）
+    """
+    if not timings:
+        return {
+            "total_ms": 0,
+            "subsystem_count": 0,
+            "top_slow": [],
+            "failed": [],
+            "blame_line": "",
+            "below_1ms": 0,
+        }
+
+    total_ms = sum(t[1] for t in timings)
+    subsystem_count = len(timings)
+
+    # 按耗时降序排序
+    sorted_timings = sorted(timings, key=lambda t: t[1], reverse=True)
+
+    top_slow = [
+        {"name": name, "ms": ms, "ok": ok}
+        for name, ms, ok in sorted_timings[:top_n]
+    ]
+
+    failed = [
+        {"name": name, "ms": ms}
+        for name, ms, ok in timings if not ok
+    ]
+
+    below_1ms = sum(1 for _, ms, _ in timings if ms < 1.0)
+
+    # blame_line: 类似 systemd-analyze blame 的紧凑格式
+    # "352ms total (25 subsystems) top: watchdog=89ms damon=45ms autotune=38ms ..."
+    blame_parts = [f"{t['name']}={t['ms']:.0f}ms" for t in top_slow if t["ms"] >= 1.0]
+    blame_line = (
+        f"{total_ms:.0f}ms total ({subsystem_count} subsystems) "
+        f"top: {' '.join(blame_parts)}"
+    )
+    if failed:
+        blame_line += f" FAILED: {','.join(f['name'] for f in failed)}"
+
+    return {
+        "total_ms": round(total_ms, 2),
+        "subsystem_count": subsystem_count,
+        "top_slow": top_slow,
+        "failed": failed,
+        "blame_line": blame_line,
+        "below_1ms": below_1ms,
+    }

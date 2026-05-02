@@ -3273,6 +3273,13 @@ _REGISTRY: dict = {
         "已注入 session_episodes 最大保留时间（小时）"),
     "release_task.checkpoint_max_age_hours": (48, int, 1, 720, None,
         "已消费 checkpoints 最大保留时间（小时）"),
+
+    # ── iter551: initcall_debug — Boot Subsystem Latency Instrumentation ──
+    # OS 类比：Linux initcall_debug (Arjan van de Ven, 2008, kernel 2.6.24)
+    "initcall_debug.enabled": (True, bool, None, None, None,
+        "是否启用 SessionStart per-subsystem 延迟追踪"),
+    "initcall_debug.top_n": (5, int, 1, 30, None,
+        "blame 输出中展示的 Top-N 最慢子系统数"),
 }
 
 # ── 磁盘配置缓存（进程内只读一次）──

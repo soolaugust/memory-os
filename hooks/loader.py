@@ -23,7 +23,7 @@ sys.path.insert(0, str(_ROOT))
 from schema import MemoryChunk
 from utils import resolve_project_id
 from scorer import working_set_score as _unified_ws_score
-from store import open_db, ensure_schema, get_chunks as store_get_chunks, dmesg_log, DMESG_INFO, DMESG_WARN, watchdog_check, damon_scan, mglru_aging, checkpoint_restore, autotune, gc_traces, rmap_sweep, vma_merge, page_idle_scan, page_idle_mark, gc_orphan_swap, gc_namespace, overcommit_kill, ksm_scan, perf_counters
+from store import open_db, ensure_schema, get_chunks as store_get_chunks, dmesg_log, DMESG_INFO, DMESG_WARN, DMESG_DEBUG, watchdog_check, damon_scan, mglru_aging, checkpoint_restore, autotune, gc_traces, rmap_sweep, vma_merge, page_idle_scan, page_idle_mark, gc_orphan_swap, gc_namespace, overcommit_kill, ksm_scan, perf_counters
 from config import get as _sysctl  # 迭代27: sysctl Runtime Tunables
 
 MEMORY_OS_DIR = Path.home() / ".claude" / "memory-os"
@@ -870,9 +870,19 @@ def main():
         _log_conn = open_db()
         ensure_schema(_log_conn)
 
+        # ── iter551: initcall_debug — Boot Subsystem Latency Instrumentation ──
+        # OS 类比：Linux initcall_debug (Arjan van de Ven, 2008, kernel 2.6.24)
+        # 为每个 SessionStart 子系统记录执行耗时，定位启动瓶颈。
+        # 使用 milestone 方式：在每个子系统入口处记录 (name, time)，
+        # 最后 diff 计算每段耗时，避免修改 try/except 结构。
+        import time as _ict_time
+        _ict_enabled = bool(_sysctl("initcall_debug.enabled"))
+        _ict_milestones = [("_boot_start", _ict_time.time())] if _ict_enabled else []
+
         # ── 迭代B3：Hook Analyzer 启动健康检查 ──
         # OS 类比：systemd-analyze verify — 启动时检测 unit 配置问题
         # 检测循环依赖和高风险超时，记录 WARN 级别 dmesg
+        if _ict_enabled: _ict_milestones.append(("hook_analyzer", _ict_time.time()))
         try:
             from init.hook_analyzer import HookAnalyzer
             _ha = HookAnalyzer()
@@ -893,6 +903,7 @@ def main():
         except Exception:
             pass  # hook_analyzer 失败不影响 SessionStart 主流程
 
+        if _ict_enabled: _ict_milestones.append(("watchdog", _ict_time.time()))
         wd_result = watchdog_check(_log_conn)
         wd_status = wd_result.get("status", "UNKNOWN")
         wd_repairs = wd_result.get("repairs", [])
@@ -914,6 +925,7 @@ def main():
         # ── 迭代51：Autotune — 参数自优化 ──
         # OS 类比：TCP Window Auto-Tuning — 根据运行时统计自动调整参数
         # SessionStart 时运行，分析 recall_traces 命中率和延迟，微调 per-project sysctl
+        if _ict_enabled: _ict_milestones.append(("autotune", _ict_time.time()))
         autotune_result = {"tuned": False}
         try:
             autotune_result = autotune(_log_conn, project)
@@ -929,6 +941,7 @@ def main():
 
         # ── iter537: perf_counters — Retrieval Quality PMU Counters ──
         # OS 类比：perf stat — 读取 PMU 计数器诊断微架构效率
+        if _ict_enabled: _ict_milestones.append(("perf_counters", _ict_time.time()))
         try:
             _pc_result = perf_counters(_log_conn, project)
             if _pc_result.get("total_traces", 0) > 0:
@@ -944,6 +957,7 @@ def main():
         # ── iter413: Sleep Consolidation — 离线记忆巩固 ──
         # OS 类比：Linux pdflush/writeback — session 间 idle period 内后台巩固 dirty pages
         # Stickgold (2005): 海马重放最近学习的记忆 → stability 提升（light sleep consolidation）
+        if _ict_enabled: _ict_milestones.append(("sleep_consolidation", _ict_time.time()))
         consolidation_result = {"consolidated": 0}
         try:
             from store_vfs import run_sleep_consolidation
@@ -956,6 +970,7 @@ def main():
         # ── 迭代44：MGLRU aging — 推进 generation clock ──
         # OS 类比：MGLRU lru_gen_inc() — SessionStart 时推进所有 chunk 的 gen
         # 被访问的 chunk 在 retriever 中 promote 回 gen 0，未访问的逐渐变老
+        if _ict_enabled: _ict_milestones.append(("mglru_aging", _ict_time.time()))
         mglru_result = {"aged": False}
         try:
             mglru_result = mglru_aging(_log_conn, project)
@@ -967,6 +982,7 @@ def main():
         # ── iter535: deferred_initcall — 条件性启动旁路 ──
         # OS 类比：Linux deferred_struct_pages (Mel Gorman, 2015, kernel 4.2)
         # 小库+健康 DB 时跳过全部 reclaim/GC/rebalance 子系统（25 个），省 ~100ms+
+        if _ict_enabled: _ict_milestones.append(("deferred_initcall", _ict_time.time()))
         _defer_reclaim, _defer_reason, _defer_metrics = _should_defer_reclaim(_log_conn, project)
         if _defer_reclaim:
             dmesg_log(_log_conn, DMESG_DEBUG, "deferred_initcall",
@@ -976,6 +992,7 @@ def main():
         # ── End deferred_initcall gate ──
 
         # ── iter518：migrate_pages — 跨 project_id 知识迁移 ──
+        if _ict_enabled: _ict_milestones.append(("migrate_pages", _ict_time.time()))
         # OS 类比：Linux migrate_pages() (Christoph Lameter, 2006) — 跨 NUMA 节点页面迁移
         # 同一物理仓库产生不同 project_id 时，将旧别名下的知识迁移到当前 project
         # 必须在回收器之前运行，否则旧别名 chunks 可能被误删
@@ -992,6 +1009,7 @@ def main():
             pass
 
         # ── iter519：mem_scrub — ECC patrol scrub 数据完整性巡检 ──
+        if _ict_enabled: _ict_milestones.append(("mem_scrub", _ict_time.time()))
         # OS 类比：Intel EDAC patrol scrub (2005) — 后台巡检修复 ECC CE
         # 在回收器之前运行：修复腐蚀数据避免影响 DAMON/kswapd 决策
         try:
@@ -1019,6 +1037,7 @@ def main():
             pass
 
         # ── 迭代42：DAMON scan — 主动数据访问模式监控 ──
+        if _ict_enabled: _ict_milestones.append(("damon_scan", _ict_time.time()))
         # OS 类比：Linux DAMON (2021) 在系统运行时主动采样 access pattern
         # SessionStart 时做一次全量扫描，识别 dead/cold chunk 并主动回收
         damon_result = {"heatmap": {}, "actions": {}}
@@ -1032,6 +1051,7 @@ def main():
             pass
 
         # ── iter505：shrink_dcache — Cross-Project Stale Object Reclaim ──
+        if _ict_enabled: _ict_milestones.append(("shrink_dcache", _ict_time.time()))
         # OS 类比：Linux shrink_dcache_sb() (Al Viro, 2001) — 超级块级 dentry cache 回收
         # 跨所有 project 扫描零访问+超龄 chunks，分级降权/删除，解决 82%+ 零访问率
         shrink_result = {"phase1_candidates": 0, "phase2_demoted": 0, "phase3_deleted": 0}
@@ -1047,6 +1067,7 @@ def main():
             pass
 
         # ── iter508：oom_reaper — 零访问率超标时批量降级回收 ──
+        if _ict_enabled: _ict_milestones.append(("oom_reaper", _ict_time.time()))
         # OS 类比：Linux oom_reaper (Michal Hocko, 2016) — OOM 选中后立即回收匿名页
         # 不受 min_age_days 限制，专门处理各回收器保护条件叠加形成的"回收死区"
         try:
@@ -1061,6 +1082,7 @@ def main():
             pass
 
         # ── iter513：overcommit_kill — Global 层过度承诺知识回收 ──
+        if _ict_enabled: _ict_milestones.append(("overcommit_kill", _ict_time.time()))
         # OS 类比：Linux vm.overcommit_memory=2 (Rik van Riel, 2001) — 严格内存计量
         # global 层批量导入的知识绕过有机准入，85%+ 零访问需要激进回收
         try:
@@ -1074,6 +1096,7 @@ def main():
             pass
 
         # ── iter521：free_pages_ok — Dead Page Frame Final Reclaim ──
+        if _ict_enabled: _ict_milestones.append(("free_pages_ok", _ict_time.time()))
         # OS 类比：Linux __free_pages_ok() (Linus Torvalds, 1991) — refcount=0 归还 buddy
         # 统一最终回收：所有降级器（shrink/reaper/page_idle/overcommit）跑完后，
         # 清理 importance < 0.2 + access_count = 0 的 zombie chunks
@@ -1092,6 +1115,7 @@ def main():
             pass
 
         # ── iter523：kfree_rcu — Deferred Cross-Project Zombie Reclaim ──
+        if _ict_enabled: _ict_milestones.append(("kfree_rcu", _ict_time.time()))
         # OS 类比：Linux kfree_rcu() (Paul E. McKenney, 2002) — 延迟到 grace period 后全局释放
         # free_pages_ok 只扫描当前 project，global 层 zombie 无人回收 → 全局扫描补漏
         try:
@@ -1108,6 +1132,7 @@ def main():
             pass
 
         # ── iter530：put_page — Unified Final Release + Bitmap Scrub ──
+        if _ict_enabled: _ict_milestones.append(("put_page", _ict_time.time()))
         # OS 类比：Linux put_page()/__page_cache_release() — refcount=0 时统一释放路径
         # 三盲区修复：UE force kill(imp=0+acc>0) + OOM_MAX reap + bitmap stale scrub
         try:
@@ -1127,6 +1152,7 @@ def main():
             pass
 
         # ── iter522：numa_balancing — Access-Pattern Importance Rebalancing ──
+        if _ict_enabled: _ict_milestones.append(("numa_balancing", _ict_time.time()))
         # OS 类比：Linux AutoNUMA (Ingo Molnár, 2012) — 观察访问模式动态迁移页面到正确 NUMA node
         # 双向平衡：高访问+低imp → promote，高imp+零访问+超龄 → demote
         try:
@@ -1144,6 +1170,7 @@ def main():
             pass
 
         # ── iter524：mincore — Memory Residency Validation ──
+        if _ict_enabled: _ict_milestones.append(("mincore", _ict_time.time()))
         # OS 类比：Linux mincore() (Linus Torvalds, 1994) — 查询哪些页面真实驻留在物理内存
         # 诊断高 importance 段的"虚假驻留"并校准 importance
         try:
@@ -1162,6 +1189,7 @@ def main():
             pass
 
         # ── iter514：ksm_scan — 同页合并扫描（去除版本化重复） ──
+        if _ict_enabled: _ict_milestones.append(("ksm_scan", _ict_time.time()))
         # OS 类比：Linux KSM (Andrea Arcangeli, 2009) — ksmd 扫描相同页面合并为 COW 共享页
         try:
             if not _defer_reclaim:  # iter535: deferred_initcall gate
@@ -1174,6 +1202,7 @@ def main():
             pass
 
         # ── 迭代516：madv_free — 惰性页面回收与 FTS5 索引排除 ──
+        if _ict_enabled: _ict_milestones.append(("madv_free", _ict_time.time()))
         # OS 类比：Linux madvise(MADV_FREE) (Minchan Kim, 2016) — 标记页面可释放，移除 PTE mapping
         try:
             if not _defer_reclaim:  # iter535: deferred_initcall gate
@@ -1236,6 +1265,7 @@ def main():
             pass
 
         # ── iter544：trim_shadow_entries — shadow_traces expiry + stale ref scrub ──
+        if _ict_enabled: _ict_milestones.append(("trim_shadow", _ict_time.time()))
         # OS 类比：Linux shadow_lru_isolate() (Johannes Weiner, 2013, mm/workingset.c)
         # shadow entry 超过 active page count 时从 LRU 尾部批量回收
         try:
@@ -1250,6 +1280,7 @@ def main():
             pass
 
         # ── 迭代511：page_idle — 空闲页面精确追踪 ──
+        if _ict_enabled: _ict_milestones.append(("page_idle", _ict_time.time()))
         # OS 类比：Linux page_idle bitmap (Vladimir Davydov, 2015)
         # 先 scan（收割上轮 idle chunks）→ 再 mark（标记本轮）
         try:
@@ -1330,6 +1361,7 @@ def main():
             pass
 
         # ── iter546：shrink_slab — Watermark-Independent Slab Object Reaper ──
+        if _ict_enabled: _ict_milestones.append(("shrink_slab", _ict_time.time()))
         # OS 类比：do_shrink_slab() (Dave Chinner, 2013, mm/vmscan.c)
         # 回收高 oom_adj + 零访问的 zombie chunks，不依赖 kswapd 水位线
         slab_result = {"freeable": 0, "reclaimed": 0, "skipped_grace": 0}
@@ -1444,6 +1476,7 @@ def main():
             pass
 
         # ── 迭代146：Swap GC — 孤儿 project 清理 ──
+        if _ict_enabled: _ict_milestones.append(("gc_swap", _ict_time.time()))
         # OS 类比：process exit → free anonymous swap pages (do_exit → exit_mmap)
         # 消亡 project（主表已无 chunk）的 swap 条目永久占位，不会被 swap_in，
         # 挤压活跃 project 的 swap 使用空间 → SessionStart 清理
@@ -1472,6 +1505,35 @@ def main():
                 _log_conn.commit()
         except Exception:
             pass
+
+        # ── iter551: initcall_debug — 计算 per-subsystem 延迟 ──
+        if _ict_enabled: _ict_milestones.append(("_boot_end", _ict_time.time()))
+        _ict_blame = ""
+        try:
+            from store_mm import initcall_debug as _icd_analyze
+            # 从 milestones 计算 per-subsystem timings:
+            # [(name, elapsed_ms, True)] — milestone[i+1].time - milestone[i].time
+            _ict_timings = []
+            for i in range(len(_ict_milestones) - 1):
+                _m_name = _ict_milestones[i + 1][0]  # 下一个 milestone 的名字
+                if _m_name.startswith("_"):  # skip internal markers
+                    _m_name = _ict_milestones[i][0]
+                else:
+                    _m_name = _ict_milestones[i][0] if not _ict_milestones[i][0].startswith("_") else _m_name
+                # 使用当前 milestone 的名字作为 subsystem 名
+                name = _ict_milestones[i][0]
+                if name.startswith("_"):
+                    continue
+                elapsed_ms = (_ict_milestones[i + 1][1] - _ict_milestones[i][1]) * 1000
+                _ict_timings.append((name, round(elapsed_ms, 2), True))
+            _ict_result = _icd_analyze(_ict_timings)
+            _ict_blame = _ict_result.get("blame_line", "")
+            if _ict_blame:
+                dmesg_log(_log_conn, DMESG_INFO, "initcall_debug",
+                          _ict_blame,
+                          session_id=_session_id, project=project)
+        except Exception:
+            pass  # initcall_debug 失败不影响 SessionStart
 
         # 迭代29 dmesg：SessionStart 加载记录
         damon_summary = ""
