@@ -399,6 +399,17 @@ def _run_extraction_pipeline(payload: dict) -> dict:
         # ── Page fault log ──────────────────────────────────────────────────
         _write_page_fault_log(page_faults, session_id)
 
+        # ── iter581: ksoftirqd — 写入后检查 DB 健康度，不健康时 raise softirq ──
+        if incoming_count > 0:
+            try:
+                _sirq_conn = open_db()
+                ensure_schema(_sirq_conn)
+                from store_mm import raise_softirq
+                raise_softirq(_sirq_conn, project)
+                _sirq_conn.close()
+            except Exception:
+                pass
+
         # ── 广播知识更新 ─────────────────────────────────────────────────────
         try:
             from net.agent_notify import broadcast_knowledge_update

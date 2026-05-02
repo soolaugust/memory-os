@@ -11602,3 +11602,108 @@ def flush_tlb_one(conn: sqlite3.Connection, project: str = None) -> dict:
         "scanned": scanned,
         "duration_ms": round(duration_ms, 2),
     }
+
+
+# ── iter581: ksoftirqd — Runtime Reclaim Trigger ──────────────────────────────
+# OS 类比：Linux ksoftirqd (Linus Torvalds, 2001, kernel/softirq.c)
+# 硬中断 top half（writer/extractor_pool）只设置 softirq pending 标志，
+# bottom half（loader SessionStart）检查标志 → 强制 reclaim bypass deferred_initcall。
+# 解决：大量 import 在 session 中间发生后，deferred_initcall 在下次启动仍判定 healthy（因为
+# 判定使用的是导入前的 DB 快照），导致 reclaim 子系统（kcompactd/folio_batch/flush_tlb）永远不执行。
+
+_SOFTIRQ_FLAG = MEMORY_OS_DIR / ".reclaim_softirq"
+
+
+def raise_softirq(conn: sqlite3.Connection, project: str = None) -> dict:
+    """
+    iter581: 写入路径 softirq — 检查 DB 健康度，不健康时写标志文件触发下次 reclaim。
+
+    检查条件（任一满足→raise）：
+      1. zombies > 0（importance < 0.2 + access_count = 0）
+      2. zero_access_pct >= 40%（系统性低利用）
+
+    由 writer/extractor_pool 在批量写入后调用。
+    loader.py SessionStart 时 consume_softirq() 检查并消费标志。
+    """
+    import time as _rt
+    t0 = _rt.time()
+
+    try:
+        from config import get as _cfg
+        enabled = _cfg("ksoftirqd.enabled")
+        if not enabled:
+            return {"raised": False, "reason": "disabled", "duration_ms": 0.0}
+        zero_threshold = _cfg("ksoftirqd.zero_threshold")
+    except Exception:
+        zero_threshold = 0.40
+
+    proj_clause = "AND project IN (?, 'global')" if project else ""
+    proj_params = [project] if project else []
+
+    try:
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM memory_chunks WHERE 1=1 {proj_clause}",
+            proj_params,
+        ).fetchone()[0]
+        if total == 0:
+            return {"raised": False, "reason": "empty_db", "duration_ms": 0.0}
+
+        zero_acc = conn.execute(
+            f"SELECT COUNT(*) FROM memory_chunks WHERE access_count = 0 {proj_clause}",
+            proj_params,
+        ).fetchone()[0]
+
+        zombies = conn.execute(
+            f"SELECT COUNT(*) FROM memory_chunks WHERE importance < 0.2 AND access_count = 0 {proj_clause}",
+            proj_params,
+        ).fetchone()[0]
+    except Exception:
+        return {"raised": False, "reason": "query_error", "duration_ms": 0.0}
+
+    zero_pct = zero_acc / total
+    should_raise = zombies > 0 or zero_pct >= zero_threshold
+
+    if should_raise:
+        reason = f"zombies={zombies}" if zombies > 0 else f"zero_pct={zero_pct:.1%}"
+        try:
+            _SOFTIRQ_FLAG.write_text(json.dumps({
+                "raised_at": datetime.now(timezone.utc).isoformat(),
+                "reason": reason,
+                "project": project or "all",
+                "total": total,
+                "zero_acc": zero_acc,
+                "zombies": zombies,
+            }), encoding="utf-8")
+        except Exception:
+            pass
+        duration_ms = (_rt.time() - t0) * 1000
+        return {"raised": True, "reason": reason, "total": total,
+                "zero_pct": zero_pct, "zombies": zombies, "duration_ms": round(duration_ms, 2)}
+    else:
+        duration_ms = (_rt.time() - t0) * 1000
+        return {"raised": False, "reason": "healthy", "total": total,
+                "zero_pct": zero_pct, "zombies": zombies, "duration_ms": round(duration_ms, 2)}
+
+
+def consume_softirq() -> dict:
+    """
+    iter581: loader 启动时消费 softirq 标志。
+
+    返回 {"pending": True/False, "info": {...}} 或 {"pending": False}。
+    如果 pending=True，loader 应跳过 deferred_initcall 的 healthy 判定，强制执行 reclaim。
+    消费后删除标志文件（原子性：即使 reclaim 中途失败也不会反复重试）。
+    """
+    if not _SOFTIRQ_FLAG.exists():
+        return {"pending": False}
+
+    try:
+        info = json.loads(_SOFTIRQ_FLAG.read_text(encoding="utf-8"))
+        _SOFTIRQ_FLAG.unlink(missing_ok=True)
+        return {"pending": True, "info": info}
+    except Exception:
+        # 格式错误或读取失败 → 删除并忽略
+        try:
+            _SOFTIRQ_FLAG.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return {"pending": False}

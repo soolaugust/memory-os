@@ -1012,11 +1012,32 @@ def main():
         except Exception:
             pass
 
+        # ── iter581: ksoftirqd — consume pending softirq before defer check ──
+        # OS 类比：Linux ksoftirqd — bottom half 处理写入路径 raise 的 reclaim 请求
+        # 如果 writer/extractor_pool 在上次 session 中检测到 DB 不健康并 raise 了 softirq，
+        # 此处消费标志并强制执行 reclaim（绕过 deferred_initcall 的 healthy 判定）
+        _softirq_pending = False
+        try:
+            from store_mm import consume_softirq
+            _softirq_result = consume_softirq()
+            _softirq_pending = _softirq_result.get("pending", False)
+            if _softirq_pending:
+                dmesg_log(_log_conn, DMESG_INFO, "ksoftirqd",
+                          f"consume_softirq: reason={_softirq_result['info'].get('reason','')} "
+                          f"raised_at={_softirq_result['info'].get('raised_at','')[:19]}",
+                          session_id=_session_id, project=project)
+        except Exception:
+            pass
+
         # ── iter535: deferred_initcall — 条件性启动旁路 ──
         # OS 类比：Linux deferred_struct_pages (Mel Gorman, 2015, kernel 4.2)
         # 小库+健康 DB 时跳过全部 reclaim/GC/rebalance 子系统（25 个），省 ~100ms+
         if _ict_enabled: _ict_milestones.append(("deferred_initcall", _ict_time.time()))
         _defer_reclaim, _defer_reason, _defer_metrics = _should_defer_reclaim(_log_conn, project)
+        # iter581: softirq pending → 强制不 defer（覆盖 healthy 判定）
+        if _softirq_pending and _defer_reclaim:
+            _defer_reclaim = False
+            _defer_reason = "softirq_override"
         if _defer_reclaim:
             dmesg_log(_log_conn, DMESG_DEBUG, "deferred_initcall",
                       f"skip_reclaim: reason={_defer_reason} total={_defer_metrics.get('total',0)} "

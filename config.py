@@ -3323,6 +3323,12 @@ _REGISTRY: dict = {
         "排除的 chunk_type（逗号分隔）：这些类型不适合强制曝光"),
 
     # ── iter572: kcompactd — Proactive Dead Page Reclaim ──
+    # ── iter581: ksoftirqd — Runtime Reclaim Trigger ──
+    "ksoftirqd.enabled": (True, bool, None, None, None,
+        "是否启用写入路径 softirq（检测 zombie/高零访问率 → 标志文件触发下次 reclaim）"),
+    "ksoftirqd.zero_threshold": (0.40, float, 0.20, 0.80, None,
+        "零访问率阈值：超过此值时 raise softirq（强制下次 session reclaim）"),
+
     "kcompactd.enabled": (True, bool, None, None, None,
         "是否启用主动 dead page 回收（oom_adj 驱动，不受 kswapd watermark 门控）"),
     "kcompactd.oom_threshold": (300, int, 100, 1000, None,
