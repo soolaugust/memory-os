@@ -75,6 +75,10 @@ _STARV_RAMP = _sysctl("scorer.starvation_ramp_days")
 _TMV_ACC_THRESHOLD = _sysctl("scorer.tmv_acc_threshold") or 50
 _TMV_DISCOUNT_WEIGHT = _sysctl("scorer.tmv_discount_weight") or 0.30
 _TMV_DISCOUNT_FLOOR = _sysctl("scorer.tmv_discount_floor") or 0.55
+# ── iter527: cgroup_cpu_max 带宽硬限常量预加载 ──
+_BW_MAX_PCT = _sysctl("scorer.bw_max_pct") or 0.30
+_BW_THROTTLE = _sysctl("scorer.bw_throttle") or 0.15
+_BW_WINDOW = _sysctl("scorer.bw_window") or 30
 
 # ── iter261: math.log2 查表 ──────────────────────────────────────
 # access_bonus (access_count 1..270) 和 saturation_penalty (recall_count 1..270)
@@ -200,6 +204,44 @@ def saturation_penalty(recall_count: int) -> float:
     _l = _LOG2_1P[recall_count] if recall_count < _LOG2_TABLE_SIZE else math.log2(1 + recall_count)
     penalty = _SAT_FACTOR * _l
     return min(_SAT_CAP, penalty)
+
+
+def bandwidth_throttle(recall_count: int, window: int = 0) -> float:
+    """
+    iter527：cgroup_cpu_max — 硬性召回带宽限制器。
+    OS 类比：Linux cgroup v2 cpu.max (Tejun Heo, 2015) — 每个 cgroup 声明
+      MAX PERIOD（如 50000 100000 = 50% 带宽），超额则 throttle 直到下一周期。
+      不同于 nice/weight（软优先级），cpu.max 是硬上限（hard cap）。
+
+    问题（数据驱动）：
+      chunk 3192147e (design_constraint, access=89) 出现在 43% 的 recall_traces 中。
+      saturation_penalty caps at 0.25（对数曲线太缓），无法阻止该 chunk 持续垄断 Top-K。
+      正反馈循环：高 recall → 高 access → 高 access_bonus → 更高 score → 更高 recall。
+
+    解决：
+      当 recall_count / window > bw_max_pct 时，返回乘法 throttle 因子。
+      最终 score *= bandwidth_throttle(...)，将该 chunk 压制到极低分数。
+
+    返回值：
+      1.0 — 未超 bandwidth（正常参与评分）
+      bw_throttle (默认0.15) — 超额后的乘法折扣（85% 削减）
+
+    与 saturation_penalty 互补：
+      saturation_penalty: 软惩罚，加法减去，上限 0.25，所有 recall_count>0 都触发
+      bandwidth_throttle: 硬限制，乘法削减，仅超过 bw_max_pct 阈值时触发
+      前者平滑降频，后者断路保护——类比 CPU throttle thermal trip 和 thermal warning 的关系。
+    """
+    if recall_count <= 0:
+        return 1.0
+    _w = window if window > 0 else _BW_WINDOW
+    if _w <= 0:
+        return 1.0
+    # 带宽利用率 = recall_count / window_size
+    utilization = recall_count / _w
+    if utilization <= _BW_MAX_PCT:
+        return 1.0  # 未超带宽上限
+    # 超额：应用硬 throttle
+    return _BW_THROTTLE
 
 
 def tmv_saturation_discount(access_count: int) -> float:
@@ -459,12 +501,13 @@ def retrieval_score(relevance: float, importance: float,
     迭代312：新增 session_recall 额外饱和惩罚（Session-scoped Familiarity Suppression）。
     迭代315：新增 context_match（情境匹配加分，Encoding Specificity）。
 
-    十项互补机制：
+    十一项互补机制：
       freshness: 新 chunk 在 grace period 内获得初始曝光
       access:    被使用的 chunk 积累经验优势
       exploration: 低访问 chunk 获得伪随机偶发机会
       starvation: access_count=0 的老 chunk 获得递增加分
-      saturation: 反复被召回的 chunk 获得递增惩罚
+      saturation: 反复被召回的 chunk 获得递增惩罚（软 penalty，加法）
+      bandwidth: 召回频率超 30% 带宽时硬性削减（硬 throttle，乘法）
       session_recall: session 内重复注入获得 2× 饱和惩罚（防止信息茧房）
       verification: 已验证 chunk 加分，disputed chunk 惩罚（ECC）
       lru_gen: gen=0(热) 加分最大，gen 越大惩罚递增（语义 LRU）
@@ -507,7 +550,10 @@ def retrieval_score(relevance: float, importance: float,
     base = eff_imp * w_imp + rec * (1.0 - w_imp)
     # 迭代315: Encoding Specificity — 情境匹配加分
     cm = context_match_score(query_context, encoding_context)
-    return relevance * (base + ab + fb) + eb + sb - sp + vb - vp + lgb - ndp + cm
+    score = relevance * (base + ab + fb) + eb + sb - sp + vb - vp + lgb - ndp + cm
+    # iter527: cgroup_cpu_max — 硬性带宽限制（超额时乘法削减）
+    bw = bandwidth_throttle(recall_count)
+    return score * bw
 
 
 def working_set_score(importance: float, last_accessed: str) -> float:

@@ -2312,6 +2312,14 @@ _REGISTRY: dict = {
     "scorer.starvation_ramp_days": (3.0, float, 0.5, 14.0, None,
         "饥饿加分线性增长区间：从 min_age 到 min_age+ramp_days 线性增长到满额"),
 
+    # ── cgroup_cpu_max（iter527）——
+    "scorer.bw_max_pct": (0.30, float, 0.10, 0.80, None,
+        "带宽上限：chunk 在 window 内 recall_count/window 超过此比例时触发硬限"),
+    "scorer.bw_throttle": (0.15, float, 0.01, 0.50, None,
+        "超额后乘法因子（0.15=削减85%分数），类似 cpu.max quota exhausted 后 throttle"),
+    "scorer.bw_window": (30, int, 10, 100, None,
+        "带宽计算的 recall_traces 窗口大小（与 chunk_recall_counts window 一致）"),
+
     # ── Memory Balloon（迭代46）──
     "balloon.global_pool": (1000, int, 100, 10000, None,
         "全局 chunk 总量池（所有项目共享），各项目配额从此池中动态分配"),
