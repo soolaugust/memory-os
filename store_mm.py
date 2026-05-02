@@ -10843,3 +10843,95 @@ def populate_pte(conn: sqlite3.Connection, project: str = None) -> dict:
         "unmapped_found": unmapped_found,
         "duration_ms": round((_time.time() - t0) * 1000, 2),
     }
+
+
+# ── iter571: mmap_populate — Probabilistic Cold Page Promotion ──────────────
+#
+# OS 类比：Linux MAP_POPULATE / madvise(MADV_WILLNEED) (Linus Torvalds, 2002,
+#   mm/mmap.c + mm/readahead.c) — mmap(MAP_POPULATE) 在映射时主动预填充 PTE
+#   并触发 readahead 将页面从磁盘加载到 page cache，而非等到首次访问时
+#   page fault。对于大文件映射，MAP_POPULATE 避免后续每页 4KB 一次的
+#   demand-paging fault（~2µs/fault × 256K pages = ~500ms 延迟）。
+#
+# 根因：IWCSI (iter334) 的 cold_start 只在 len(positive) < effective_top_k
+#   时触发。生产环境 BM25 几乎总能找到足够候选（64/64 traces 有 top_k），
+#   导致 cold_start 从不触发。结果：57.1% dark page rate（56/98 chunks 从未
+#   被召回），39.8% 零访问率。高 importance 的 dark chunks 因为词汇不匹配
+#   （encoding-retrieval mismatch, Tulving 1983）被 BM25 永久遮蔽。
+#
+# 策略：每 N 次 FULL 召回（由 recall_counter % interval == 0 决定），
+#   unconditionally 将 top_k 中最低分的一个 slot 替换为 DB 中最高 importance
+#   的零访问 chunk。与 IWCSI 区别：
+#   - IWCSI: 只在 positive 不足时触发（稀有事件）→ 被动
+#   - mmap_populate: 每 N 次 FULL 召回无条件触发 → 主动
+#   - 目标: 确保所有 chunks 在 N×interval 次召回内至少获得 1 次曝光机会
+
+def mmap_populate(conn: sqlite3.Connection, project: str,
+                  top_k_ids: set, session_recall_count: int = 0) -> Optional[dict]:
+    """
+    Probabilistic Cold Page Promotion — 从 DB 中选取 1 个最高 importance
+    的零访问 chunk（不在 top_k_ids 中）作为替换候选。
+
+    参数:
+      conn — 只读 DB 连接
+      project — 当前项目 ID
+      top_k_ids — 当前 top_k 中已有的 chunk ID 集合
+      session_recall_count — 当前会话的 FULL 召回计数器
+
+    返回:
+      dict(chunk row) — 待注入的 cold chunk，或 None（不触发/无候选）
+
+    触发条件:
+      1. mmap_populate.enabled = True
+      2. session_recall_count % interval == 0（周期性触发）
+      3. DB 中存在满足条件的零访问 chunk
+    """
+    from config import get as _cfg
+
+    if not _cfg("mmap_populate.enabled"):
+        return None
+
+    interval = _cfg("mmap_populate.interval")
+    if interval < 1:
+        interval = 5
+
+    # 周期性触发：每 interval 次 FULL 召回执行一次
+    if session_recall_count % interval != 0:
+        return None
+
+    imp_threshold = _cfg("mmap_populate.imp_threshold")
+    exclude_types = set(_cfg("mmap_populate.exclude_types").split(",")) if _cfg("mmap_populate.exclude_types") else set()
+
+    # 查询：零访问 + importance >= threshold + 不在当前 top_k + 不是 ghost
+    # 按 importance DESC 取第一个（最值得曝光的 dark page）
+    ph = ",".join("?" * len(top_k_ids)) if top_k_ids else "'__none__'"
+    params = []
+
+    sql = (
+        "SELECT * FROM memory_chunks "
+        "WHERE access_count = 0 "
+        "AND importance >= ? "
+        "AND importance > 0 "
+        "AND (project = ? OR project = 'global') "
+    )
+    params.extend([imp_threshold, project])
+
+    if top_k_ids:
+        sql += f"AND id NOT IN ({','.join('?' * len(top_k_ids))}) "
+        params.extend(sorted(top_k_ids))
+
+    if exclude_types:
+        for et in exclude_types:
+            sql += "AND chunk_type != ? "
+            params.append(et.strip())
+
+    sql += "ORDER BY importance DESC, created_at DESC LIMIT 1"
+
+    try:
+        row = conn.execute(sql, params).fetchone()
+        if row:
+            return dict(row)
+    except Exception:
+        pass
+
+    return None

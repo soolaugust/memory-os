@@ -3294,6 +3294,20 @@ _REGISTRY: dict = {
     "populate_pte.min_entity_len": (3, int, 2, 10, None,
         "实体名最小长度（过滤噪声短词）"),
 
+    # ── iter571: mmap_populate — Probabilistic Cold Page Promotion ──
+    # OS 类比：MAP_POPULATE / madvise(MADV_WILLNEED) — 主动预填充 cold pages 到
+    #   working set，打破 cold→no_access→cold 死锁循环
+    # 与 IWCSI(iter334) 区别：IWCSI 只在 positive 不足时触发（被动），
+    #   mmap_populate 每 N 次 FULL 召回无条件触发（主动），确保 dark pages 轮转曝光
+    "mmap_populate.enabled": (True, bool, None, None, None,
+        "是否启用 cold page 概率性轮转曝光（每 N 次 FULL 召回替换最低分 slot）"),
+    "mmap_populate.interval": (3, int, 2, 10, None,
+        "触发间隔：每 N 次 FULL 召回执行一次 cold page promotion（默认3，约1/3的召回会轮转）"),
+    "mmap_populate.imp_threshold": (0.5, float, 0.3, 1.0, None,
+        "cold page 最低 importance 门槛（只曝光有价值的 dark pages）"),
+    "mmap_populate.exclude_types": ("prompt_context,conversation_summary", str, None, None, None,
+        "排除的 chunk_type（逗号分隔）：这些类型不适合强制曝光"),
+
     # ── iter549: vacuum — Database File Compaction ──
     "vacuum.enabled": (True, bool, None, None, None,
         "是否启用 VACUUM（DB 文件物理收缩）"),

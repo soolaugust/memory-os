@@ -106,6 +106,9 @@ PAGE_FAULT_LOG = os.path.join(MEMORY_OS_DIR, "page_fault_log.json")
 SHADOW_TRACE_FILE = os.path.join(MEMORY_OS_DIR, ".shadow_trace.json")  # 迭代85: Shadow Trace
 IOR_FILE = os.path.join(MEMORY_OS_DIR, ".ior_state.json")  # iter391: Inhibition of Return
 
+# ── iter571: mmap_populate — session-level FULL recall counter ──
+_mmap_populate_counter = 0
+
 # ── Heavy modules — 延迟加载（迭代61 vDSO Fast Path）──
 # 这些模块只在 Stage 2（完整检索）时才需要
 _modules_loaded = False
@@ -3251,6 +3254,42 @@ def main():
                                       session_id=session_id, project=project)
         except Exception:
             pass  # 展望记忆注入失败不阻塞主流程
+
+        # ── iter571: mmap_populate — Probabilistic Cold Page Promotion ──────
+        # OS 类比：MAP_POPULATE / madvise(MADV_WILLNEED) — 主动将 cold pages
+        #   预填充到 working set，打破 cold→no_access→cold 死锁
+        # 与 IWCSI(iter334) 区别：IWCSI 只在 positive 不足时被动触发，
+        #   mmap_populate 每 N 次 FULL 召回无条件触发，确保 dark pages 轮转曝光
+        global _mmap_populate_counter
+        if priority == "FULL":
+            _mmap_populate_counter += 1
+        if (priority == "FULL"
+                and top_k
+                and _sysctl("mmap_populate.enabled")
+                and not _check_deadline("mmap_populate")):
+            try:
+                from store_mm import mmap_populate as _mmap_populate
+                _existing_ids = {c.get("id", "") for _, c in top_k}
+                _cold_chunk = _mmap_populate(
+                    conn, project, _existing_ids, _mmap_populate_counter)
+                if _cold_chunk:
+                    # 替换 top_k 中最低分的 slot（不增加注入总量）
+                    if len(top_k) > 1:
+                        top_k.sort(key=lambda x: x[0], reverse=True)
+                        _evicted = top_k.pop()  # 移除最低分
+                        _cold_score = float(_cold_chunk.get("importance", 0.5))
+                        top_k.append((_cold_score, _cold_chunk))
+                    else:
+                        _cold_score = float(_cold_chunk.get("importance", 0.5))
+                        top_k.append((_cold_score, _cold_chunk))
+                    _deferred.log(DMESG_INFO, "retriever",
+                                  f"mmap_populate: promoted chunk "
+                                  f"imp={_cold_chunk.get('importance', 0):.2f} "
+                                  f"type={_cold_chunk.get('chunk_type', '?')} "
+                                  f"counter={_mmap_populate_counter}",
+                                  session_id=session_id, project=project)
+            except Exception:
+                pass  # mmap_populate 失败不阻塞主流程
 
         top_k_ids = sorted([c["id"] for _, c in top_k])
         current_hash = hashlib.md5("|".join(top_k_ids).encode()).hexdigest()[:8]
