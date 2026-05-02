@@ -1779,6 +1779,29 @@ def main():
             except Exception:
                 pass
 
+        # ── iter575：unlink_anon_vmas — Dead Edge Pruning ──
+        if _ict_enabled: _ict_milestones.append(("unlink_anon_vmas", _ict_time.time()))
+        # OS 类比：Linux unlink_anon_vmas() (Andrea Arcangeli, 2004, mm/rmap.c)
+        # 清理 entity_edges 中两端 entity 不在 entity_map 中有存活映射的死边
+        # 80%+ edges 对 spreading_activate 不可达，浪费 I/O
+        _uav_result = {"pruned": 0}
+        if not _defer_reclaim and not _ts_skip("unlink_anon_vmas"):
+            try:
+                from store_mm import unlink_anon_vmas
+                _uav_result = unlink_anon_vmas(_log_conn, project)
+                if _uav_result["pruned"] > 0:
+                    dmesg_log(_log_conn, DMESG_INFO, "unlink_anon_vmas",
+                              f"pruned={_uav_result['pruned']} "
+                              f"fully_disconnected={_uav_result['fully_disconnected']} "
+                              f"half_dangling={_uav_result['half_dangling']} "
+                              f"scanned={_uav_result['scanned']} "
+                              f"{_uav_result['duration_ms']:.1f}ms",
+                              session_id=_session_id, project=project)
+                    _log_conn.commit()
+                _ts_report("unlink_anon_vmas", _uav_result.get("pruned", 0) > 0)
+            except Exception:
+                pass
+
         # ── iter549：vacuum — Database File Compaction ──
         # OS 类比：SSD Background GC / Firmware Compaction — fstrim 通知 SSD 哪些 LBA
         # 空闲，但物理回收需要 SSD 内部 GC 搬迁有效 pages 合并 erase blocks。

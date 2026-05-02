@@ -3332,6 +3332,14 @@ _REGISTRY: dict = {
     "folio_batch.max_drain": (20, int, 5, 50, None,
         "单次批量 flush 最大删除量"),
 
+    # ── iter575: unlink_anon_vmas — Dead Edge Pruning ──
+    "unlink_anon_vmas.enabled": (True, bool, None, None, None,
+        "是否启用 entity_edges 死边清理（两端 entity 不可达 → 删除）"),
+    "unlink_anon_vmas.max_prune": (50, int, 10, 200, None,
+        "单次最大删除 edge 数量"),
+    "unlink_anon_vmas.prune_half_dangling": (True, bool, None, None, None,
+        "是否清理只有一端可达的 half-dangling edges（保守模式=False 只清理两端都断的）"),
+
     # ── iter549: vacuum — Database File Compaction ──
     "vacuum.enabled": (True, bool, None, None, None,
         "是否启用 VACUUM（DB 文件物理收缩）"),

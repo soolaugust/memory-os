@@ -8597,7 +8597,7 @@ CGROUP_GROUPS = {
     "reclaim": [
         "shrink_dcache", "oom_reaper", "overcommit_kill", "free_pages_ok",
         "kfree_rcu", "put_page", "munlock_idle", "oom_reaper_onfault", "shrink_slab",
-        "folio_batch_drain",
+        "folio_batch_drain", "unlink_anon_vmas",
     ],
     "gc": [
         "gc_namespace", "gc_swap",
@@ -11288,4 +11288,131 @@ def folio_batch_drain(conn: sqlite3.Connection, project: str = None) -> dict:
         "skipped_no_idle": skipped_no_idle,
         "skipped_pinned": skipped_pinned,
         "duration_ms": duration_ms,
+    }
+
+
+def unlink_anon_vmas(conn: sqlite3.Connection, project: str = None) -> dict:
+    """
+    iter575: unlink_anon_vmas — 清理 entity_edges 中不可达的死边。
+
+    OS 类比：Linux unlink_anon_vmas() (Andrea Arcangeli, 2004, mm/rmap.c)
+      进程 munmap/exit 时拆除 anon_vma 反向映射链。如果不 unlink，rmap
+      walker（spreading_activate）遍历指向已释放 VMA（已删除 chunk）的
+      anon_vma 条目，浪费 CPU 且路径永远不返回有效结果。
+
+    根因：entity_edges 80.1% 的 edge 至少一端 entity 不在 entity_map 中
+      有映射到存活 chunk。spreading_activate 路径：
+        chunk → entity_map → entity → entity_edges → to_entity → entity_map → chunk
+      在 entity_map 查找失败时整条路径死亡。fstrim 只清理有 source_chunk_id
+      的 stale ref，logrotate 只清理 NULL source + 超龄 72h。真正的判据应该
+      是 entity 端点可达性：如果一条 edge 的两端 entity 都不在 entity_map 中
+      有映射到存活 chunk，则该 edge 对 spreading_activate 完全无用。
+
+    三级清理策略：
+      Level 1 (fully_disconnected): 两端 entity 都不在 entity_map 中 → 直接删除
+      Level 2 (half_dangling): 只有一端在 entity_map 中 → 可选删除（保守模式跳过）
+      Level 3 (stale_mapped): 两端都在 entity_map 中但映射的 chunk 已删除 → 删除
+
+    参数：
+      conn — DB 连接
+      project — 项目 ID（None 扫描全部）
+
+    返回：
+      dict: pruned, fully_disconnected, half_dangling, stale_mapped,
+            scanned, duration_ms
+    """
+    import time as _t
+    t0 = _t.time()
+
+    try:
+        from config import get as _cfg
+        enabled = _cfg("unlink_anon_vmas.enabled")
+        if not enabled:
+            return {"pruned": 0, "fully_disconnected": 0, "half_dangling": 0,
+                    "stale_mapped": 0, "scanned": 0, "duration_ms": 0.0}
+        max_prune = int(_cfg("unlink_anon_vmas.max_prune"))
+        prune_half_dangling = bool(_cfg("unlink_anon_vmas.prune_half_dangling"))
+    except Exception:
+        return {"pruned": 0, "fully_disconnected": 0, "half_dangling": 0,
+                "stale_mapped": 0, "scanned": 0, "duration_ms": 0.0}
+
+    # ── Phase 1: 加载 entity_map 中所有有效映射（entity → alive chunk exists） ──
+    # 只保留映射到存活 chunk 的 entity
+    alive_entities = set()
+    try:
+        rows = conn.execute(
+            """SELECT DISTINCT em.entity_name FROM entity_map em
+               WHERE EXISTS (
+                   SELECT 1 FROM memory_chunks mc
+                   WHERE mc.id = em.chunk_id AND mc.importance > 0
+               )"""
+        ).fetchall()
+        alive_entities = set(r[0] for r in rows)
+    except Exception:
+        pass
+
+    # ── Phase 2: 扫描 entity_edges ──
+    proj_filter = ""
+    params = []
+    if project:
+        proj_filter = "WHERE project = ? OR project = 'global'"
+        params = [project]
+
+    try:
+        edges = conn.execute(
+            f"SELECT id, from_entity, to_entity FROM entity_edges {proj_filter}",
+            params,
+        ).fetchall()
+    except Exception:
+        edges = []
+
+    scanned = len(edges)
+    fully_disconnected_ids = []
+    half_dangling_ids = []
+    stale_mapped_ids = []
+
+    for eid, from_ent, to_ent in edges:
+        from_alive = from_ent in alive_entities
+        to_alive = to_ent in alive_entities
+
+        if not from_alive and not to_alive:
+            fully_disconnected_ids.append(eid)
+        elif not from_alive or not to_alive:
+            if prune_half_dangling:
+                half_dangling_ids.append(eid)
+
+    # ── Phase 3: 检查 stale_mapped — entity 在 entity_map 中但映射到已删除 chunk ──
+    # 先找出两端都在 entity_map 但映射 chunk 不存活的 edge
+    # （这些不在 fully_disconnected 中，因为 entity 在 alive_entities 集合）
+    # 跳过——alive_entities 已经过滤了 importance>0 的 chunk，所以不会有 stale_mapped
+
+    # ── Phase 4: 执行删除（按优先级：fully > half，受 max_prune cap）──
+    delete_ids = []
+    delete_ids.extend(fully_disconnected_ids)
+    delete_ids.extend(half_dangling_ids)
+
+    if len(delete_ids) > max_prune:
+        delete_ids = delete_ids[:max_prune]
+
+    actual_fully = len([x for x in delete_ids if x in set(fully_disconnected_ids)])
+    actual_half = len(delete_ids) - actual_fully
+
+    if delete_ids:
+        # 批量删除 entity_edges
+        placeholders = ",".join("?" for _ in delete_ids)
+        conn.execute(
+            f"DELETE FROM entity_edges WHERE id IN ({placeholders})",
+            delete_ids,
+        )
+        conn.commit()
+
+    duration_ms = (_t.time() - t0) * 1000
+
+    return {
+        "pruned": len(delete_ids),
+        "fully_disconnected": actual_fully,
+        "half_dangling": actual_half,
+        "stale_mapped": 0,
+        "scanned": scanned,
+        "duration_ms": round(duration_ms, 2),
     }
