@@ -400,6 +400,14 @@ def _extract_quantitative_conclusions(text: str) -> list:
             continue
         if stripped.startswith('#'):
             continue
+        # ── iter540: pipe_filter — 表格单元格泄漏拦截 ────────────────────
+        # OS 类比：Linux pipe(2) SIGPIPE — 管道读端关闭时 kill 写端，防止数据泄漏到死管道。
+        # 根因：markdown 表格行 `| col1 | col2 |` 含数字+结论动词，通过量化检测门控，
+        #   被误提取为 quantitative_evidence（生产 DB 实证：2 条 `| 根因 |`/`| 清理 |` 碎片）。
+        #   表头检查 `startswith('|---')` 只拦截分隔线，不拦截数据行。
+        # 修复：以 `|` 开头或含 2+ 个 `|`（表格结构特征）→ 跳过。
+        if stripped.startswith('|') or stripped.count('|') >= 2:
+            continue
         # V11: 跳过代码行（Python/shell 语法特征）— 防止 f-string/:25s 被误判为量化数据
         if _CODE_LINE_RE.search(stripped):
             continue
@@ -2830,6 +2838,63 @@ def main():
         _write_page_fault_log(page_faults, session_id)
         sys.exit(0)
 
+    # ── iter539: ulimit_nproc — Per-Invocation Chunk Write Rate Limit ──────────
+    # OS 类比：Linux RLIMIT_NPROC (setrlimit, 1983 BSD) — 限制单用户进程数，
+    #   防止 fork bomb（while(1){fork();}) 耗尽 PID 空间。
+    #   当 fork() 返回 -EAGAIN 时，内核按优先级保留已有进程，拒绝新 fork。
+    #
+    # 根因：单次 extractor 调用可产生无限 chunks（实测一次"aha moment"讨论
+    #   在 1 秒内写入 14 个 chunks，大量是碎片化观察而非可操作决策），
+    #   形成"知识 fork bomb"淹没高质量内容，零访问率从 17.6% 回升到 35.6%。
+    #
+    # 解决：设硬上限 ulimit_nproc（默认 8），超过时：
+    #   1. 给每个候选 chunk 打 priority score（基于 chunk_type importance_map）
+    #   2. 按 priority 降序排列
+    #   3. 取 Top-N，丢弃低优先级 chunk
+    #   4. dmesg 记录丢弃数量
+    _ulimit = _sysctl("extractor.ulimit_nproc")
+    _all_candidates = []
+    # 优先级排序表（与 _write_chunk importance_map 一致，高 = 高优先保留）
+    _type_priority = {
+        "design_constraint": 0.95,
+        "quantitative_evidence": 0.90,
+        "decision": 0.85,
+        "procedure": 0.85,
+        "causal_chain": 0.82,
+        "reasoning_chain": 0.80,
+        "excluded_path": 0.70,
+        "conversation_summary": 0.65,
+    }
+    for s in decisions:
+        _all_candidates.append((s, "decision", _type_priority["decision"]))
+    for s in excluded:
+        _all_candidates.append((s, "excluded_path", _type_priority["excluded_path"]))
+    for s in reasoning:
+        _all_candidates.append((s, "reasoning_chain", _type_priority["reasoning_chain"]))
+    for s in causal_chains:
+        _all_candidates.append((s, "causal_chain", _type_priority["causal_chain"]))
+    for s in conv_summaries:
+        _all_candidates.append((s, "conversation_summary", _type_priority["conversation_summary"]))
+    for s in constraints:
+        _all_candidates.append((s, "design_constraint", _type_priority["design_constraint"]))
+
+    if len(_all_candidates) > _ulimit:
+        # 按 priority 降序，同 priority 按原始顺序（stable sort）
+        _all_candidates.sort(key=lambda x: x[2], reverse=True)
+        _dropped = len(_all_candidates) - _ulimit
+        _all_candidates = _all_candidates[:_ulimit]
+        # 重建各类型列表
+        decisions = [s for s, t, _ in _all_candidates if t == "decision"]
+        excluded = [s for s, t, _ in _all_candidates if t == "excluded_path"]
+        reasoning = [s for s, t, _ in _all_candidates if t == "reasoning_chain"]
+        causal_chains = [s for s, t, _ in _all_candidates if t == "causal_chain"]
+        conv_summaries = [s for s, t, _ in _all_candidates if t == "conversation_summary"]
+        constraints = [s for s, t, _ in _all_candidates if t == "design_constraint"]
+        # dmesg 在事务打开后记录（此处暂存）
+        _ulimit_dropped = _dropped
+    else:
+        _ulimit_dropped = 0
+
     # ── 迭代99：Hook 事务语义（OS 类比：ext4 journal 两阶段提交）──
     # Phase 1 (Prepare)：BEGIN IMMEDIATE — 独占写锁，防止并发写入污染
     # Phase 2 (Commit)：所有 chunk 写入成功后统一 COMMIT
@@ -2858,6 +2923,15 @@ def main():
         #   ZONE_LOW → 预淘汰至 pages_high（后台回收，不阻塞分配）
         #   ZONE_MIN → 同步硬淘汰（direct reclaim，等价于旧 OOM handler）
         incoming_count = len(decisions) + len(excluded) + len(reasoning) + len(conv_summaries) + len(constraints) + len(causal_chains)
+
+        # iter539: ulimit_nproc dmesg（在 conn 可用后记录）
+        if _ulimit_dropped > 0:
+            dmesg_log(conn, DMESG_WARN, "extractor",
+                      f"ulimit_nproc: dropped={_ulimit_dropped} limit={_ulimit} "
+                      f"kept={incoming_count} types=[d={len(decisions)} e={len(excluded)} "
+                      f"r={len(reasoning)} cc={len(causal_chains)} cs={len(conv_summaries)} dc={len(constraints)}]",
+                      session_id=session_id, project=project)
+
         ksw = kswapd_scan(conn, project, incoming_count)
         if ksw["evicted_count"] > 0:
             conn.commit()

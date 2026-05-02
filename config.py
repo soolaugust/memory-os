@@ -3164,6 +3164,11 @@ _REGISTRY: dict = {
     "extractor.sqe_low_density_cap": (0.60, float, 0.20, 0.90, None,
         "低密度内容的 importance 上限（默认 0.60）。信号不足的 chunk 不超过此值"),
 
+    # ── iter539: ulimit_nproc — Per-Invocation Chunk Write Rate Limit ──
+    "extractor.ulimit_nproc": (8, int, 2, 30, None,
+        "单次 extractor 调用最多写入的 chunk 数（防止知识 fork bomb）。"
+        "超过时按 importance 排序取 Top-N，低优先级 chunk 被丢弃"),
+
     # ── iter536: seccomp_filter — Summary Content Sanitizer ──
     "vfs.seccomp_filter_enabled": (True, bool, None, None, None,
         "seccomp BPF 过滤器开关（默认 True）。检测并清洗 summary 中的 JSON 残留/截断碎片"),
