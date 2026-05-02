@@ -3000,6 +3000,12 @@ _REGISTRY: dict = {
         "iter508: 至少 N 个 chunks 后才启用（冷启动保护，默认 50）"),
     "oom_reaper.protect_types": ("design_constraint,quantitative_evidence", str, None, None, None,
         "iter508: 受保护的 chunk_type（逗号分隔），即使零访问也不回收"),
+
+    # ── iter510: vma_merge — Recall Trace Deduplication ──
+    "vma_merge.jaccard_threshold": (0.8, float, 0.5, 1.0, None,
+        "iter510: 相邻 traces Jaccard >= 此阈值时触发模糊合并（默认 0.8）"),
+    "vma_merge.max_merge_per_scan": (100, int, 10, 500, None,
+        "iter510: 每次扫描最多合并 N 条 traces（默认 100）"),
 }
 
 # ── 磁盘配置缓存（进程内只读一次）──

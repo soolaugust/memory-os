@@ -3072,6 +3072,162 @@ def rmap_sweep(conn: sqlite3.Connection, project: str = None) -> dict:
     }
 
 
+# ── 迭代510：vma_merge — Recall Trace Deduplication ──────────────────
+#
+# OS 类比：Linux vma_merge() (Linus Torvalds, 1994)
+#   当进程 mmap() 新区域时，内核检查是否可以与相邻的 vm_area_struct 合并
+#   （相同 vm_flags/vm_file/vm_pgoff 连续）。合并后 find_vma() 的红黑树
+#   节点数减少，遍历开销降低。没有 vma_merge，频繁 mmap/munmap 会导致
+#   mm_struct 碎片化（数千个微小 VMA，O(log N) 查找变慢）。
+#
+#   memory-os 的问题：
+#     recall_traces 中 66% 的记录引用完全相同的 chunk ID 集合（重复 traces），
+#     44% 的相邻 traces Jaccard>=0.8。readahead_pairs() 对每条 trace 做
+#     O(K²) 两两组合计算共现，重复 traces 人为膨胀 co-occurrence 计数
+#     并浪费 CPU。rmap_sweep 也扫描无意义的重复行。
+#
+#   解决：vma_merge() 在 gc_traces + rmap_sweep 之后运行，合并相同或
+#     高度相似（Jaccard>=threshold）的 traces，保留最新时间戳和最高分数。
+
+
+def vma_merge(conn: sqlite3.Connection, project: str = None) -> dict:
+    """iter510: vma_merge — 合并重复/高度相似的 recall_traces.
+
+    OS 类比：Linux vma_merge() — 相邻 VMA 属性相同时自动合并，减少碎片。
+
+    算法：
+      1. 加载所有 traces（按 timestamp DESC），解析 top_k_json → chunk ID set
+      2. 按 chunk ID set 的 frozenset 分组（完全重复检测）
+      3. 每组保留最新的 1 条，删除其余（exact merge）
+      4. 对剩余 traces 做相邻 Jaccard 检测，>=threshold 时合并（fuzzy merge）
+         合并策略：保留 ID 集合的并集 + 最新时间戳
+
+    返回：
+      exact_merged  — 完全重复合并删除的条数
+      fuzzy_merged  — 模糊合并删除的条数
+      remaining     — 合并后剩余条数
+      total_scanned — 扫描的 trace 总数
+    """
+    from config import get as _cfg
+
+    threshold = _cfg("vma_merge.jaccard_threshold")  # default 0.8
+    max_merge_per_scan = _cfg("vma_merge.max_merge_per_scan")  # default 100
+
+    # Phase 1: 加载 traces
+    if project:
+        traces = conn.execute(
+            "SELECT rowid, top_k_json, timestamp FROM recall_traces "
+            "WHERE project=? AND top_k_json IS NOT NULL "
+            "ORDER BY timestamp DESC",
+            (project,)
+        ).fetchall()
+    else:
+        traces = conn.execute(
+            "SELECT rowid, top_k_json, timestamp FROM recall_traces "
+            "WHERE top_k_json IS NOT NULL "
+            "ORDER BY timestamp DESC"
+        ).fetchall()
+
+    if len(traces) < 2:
+        return {"exact_merged": 0, "fuzzy_merged": 0,
+                "remaining": len(traces), "total_scanned": len(traces)}
+
+    # 解析 → (rowid, id_set, timestamp)
+    parsed = []
+    for rowid, top_k_raw, ts in traces:
+        try:
+            top_k = json.loads(top_k_raw) if isinstance(top_k_raw, str) else top_k_raw
+        except Exception:
+            continue
+        if not isinstance(top_k, list):
+            continue
+        ids = frozenset(
+            item["id"] for item in top_k
+            if isinstance(item, dict) and "id" in item
+        )
+        if ids:  # 跳过空集
+            parsed.append((rowid, ids, ts, top_k))
+
+    # Phase 2: Exact merge — 按 frozenset 分组
+    groups = defaultdict(list)  # frozenset → [(rowid, ts, top_k), ...]
+    for rowid, ids, ts, top_k in parsed:
+        groups[ids].append((rowid, ts, top_k))
+
+    delete_rowids = []
+    exact_merged = 0
+
+    for ids_key, members in groups.items():
+        if len(members) <= 1:
+            continue
+        # 按时间降序（已排序），保留第一条（最新），删除其余
+        for rowid, ts, top_k in members[1:]:
+            delete_rowids.append(rowid)
+            exact_merged += 1
+            if exact_merged >= max_merge_per_scan:
+                break
+        if exact_merged >= max_merge_per_scan:
+            break
+
+    # Phase 3: Fuzzy merge — 相邻 Jaccard >= threshold
+    # 先从 parsed 中移除已标记删除的 rowid
+    deleted_set = set(delete_rowids)
+    remaining_parsed = [
+        (rowid, ids, ts, top_k) for rowid, ids, ts, top_k in parsed
+        if rowid not in deleted_set
+    ]
+
+    fuzzy_merged = 0
+    budget = max_merge_per_scan - exact_merged
+
+    if budget > 0 and len(remaining_parsed) >= 2:
+        fuzzy_delete = []
+        i = 0
+        while i < len(remaining_parsed) - 1 and fuzzy_merged < budget:
+            _, ids_a, _, _ = remaining_parsed[i]
+            rowid_b, ids_b, _, _ = remaining_parsed[i + 1]
+            # Jaccard similarity
+            intersection = len(ids_a & ids_b)
+            union = len(ids_a | ids_b)
+            if union > 0 and intersection / union >= threshold:
+                # 合并：删除较旧的（i+1，因为 DESC 排序 i 更新）
+                fuzzy_delete.append(rowid_b)
+                fuzzy_merged += 1
+                # 跳过被合并的条目，继续比较 i 和 i+2
+                remaining_parsed.pop(i + 1)
+            else:
+                i += 1
+        delete_rowids.extend(fuzzy_delete)
+
+    # Phase 4: 批量删除
+    if delete_rowids:
+        for i in range(0, len(delete_rowids), 500):
+            batch = delete_rowids[i:i+500]
+            placeholders = ",".join("?" * len(batch))
+            conn.execute(
+                f"DELETE FROM recall_traces WHERE rowid IN ({placeholders})",
+                batch
+            )
+        conn.commit()
+
+    # 统计剩余
+    if project:
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM recall_traces WHERE project=?",
+            (project,)
+        ).fetchone()[0]
+    else:
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM recall_traces"
+        ).fetchone()[0]
+
+    return {
+        "exact_merged": exact_merged,
+        "fuzzy_merged": fuzzy_merged,
+        "remaining": remaining,
+        "total_scanned": len(traces),
+    }
+
+
 # ── 迭代51：Autotune — sysctl 参数自优化引擎 ─────────────────────
 #
 # OS 类比：
