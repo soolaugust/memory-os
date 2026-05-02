@@ -7180,3 +7180,161 @@ def trim_shadow_entries(conn: sqlite3.Connection, project: str = None) -> dict:
         ).fetchone()[0]
 
     return result
+
+
+# ── iter545: vmstat_scan — Scan Efficiency Accounting & Dark Page Demotion ──────
+#
+# OS 类比：Linux /proc/vmstat pgscan_kswapd/pgsteal_kswapd (Mel Gorman, 2004)
+#   内核追踪每个 zone 的 pgscan（扫描页面数）和 pgsteal（成功回收页面数）。
+#   scan efficiency = pgsteal / pgscan。当效率持续低下（扫描多但回收少），
+#   表明 working set 过大或页面 pin 过多，内核据此切换 direct reclaim 策略、
+#   触发 compaction、或调整 watermark。
+#
+#   memory-os 等价：recall_traces 记录 candidates_count（扫描）和 top_k_json 中
+#   实际 chunk 数（steal/注入）。scan_efficiency = injected_items / candidates_scanned。
+#   当效率持续低于阈值，说明大量 chunk 被反复评估但从未胜出——"futile scanning"。
+#   对长期处于"被扫描但从不被偷取"状态的 dark pages 做 oom_adj 降级，
+#   降低它们在未来检索中的竞争力，为新知识让路。
+#
+def vmstat_scan(conn: sqlite3.Connection, project: str = None) -> dict:
+    """
+    iter545: vmstat_scan — Scan Efficiency Accounting & Dark Page Demotion.
+
+    Phase 1 (accounting): 从 recall_traces 计算 scan/steal counters.
+    Phase 2 (dark page detection): 识别存在时间 >= min_traces 但从未出现
+      在任何 top_k_json 中的 chunks（dark pages）。
+    Phase 3 (demotion): 对 dark pages 增加 oom_adj 惩罚，降低未来竞争力。
+
+    返回:
+      pgscan: int — 窗口内总 candidates 扫描量
+      pgsteal: int — 窗口内总 top_k 注入量
+      scan_efficiency: float — pgsteal/pgscan (0~1)
+      dark_pages_total: int — dark page 数量
+      dark_pages_demoted: int — 本次降级数量
+      dark_pages_skipped: int — 跳过数量（已保护/已降级）
+      duration_ms: float
+    """
+    from config import get as _cfg
+
+    t0 = _time.time()
+
+    window = _cfg("vmstat.window_traces")
+    min_traces_for_dark = _cfg("vmstat.min_traces_dark")
+    demote_adj = _cfg("vmstat.dark_demote_adj")
+    max_demote_per_scan = _cfg("vmstat.max_demote_per_scan")
+
+    result = {
+        "pgscan": 0,
+        "pgsteal": 0,
+        "scan_efficiency": 0.0,
+        "dark_pages_total": 0,
+        "dark_pages_demoted": 0,
+        "dark_pages_skipped": 0,
+        "duration_ms": 0.0,
+    }
+
+    # ── Phase 1: Scan/Steal Accounting ──
+    if project:
+        rows = conn.execute(
+            "SELECT candidates_count, top_k_json FROM recall_traces "
+            "WHERE project=? ORDER BY timestamp DESC LIMIT ?",
+            (project, window)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT candidates_count, top_k_json FROM recall_traces "
+            "ORDER BY timestamp DESC LIMIT ?",
+            (window,)
+        ).fetchall()
+
+    trace_count = len(rows)
+    pgscan = 0
+    pgsteal = 0
+    stolen_ids = set()  # chunk IDs that appeared in any top_k
+
+    for candidates_count, top_k_json_str in rows:
+        pgscan += candidates_count or 0
+        if top_k_json_str:
+            try:
+                items = json.loads(top_k_json_str) if isinstance(top_k_json_str, str) else []
+                pgsteal += len(items)
+                for item in items:
+                    cid = item.get("id", "")
+                    if cid:
+                        stolen_ids.add(cid)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+    result["pgscan"] = pgscan
+    result["pgsteal"] = pgsteal
+    result["scan_efficiency"] = round(pgsteal / pgscan, 4) if pgscan > 0 else 0.0
+
+    # ── Phase 2: Dark Page Detection ──
+    # 只在有足够 trace 历史时进行（避免新项目误判）
+    if trace_count < min_traces_for_dark:
+        result["duration_ms"] = round((_time.time() - t0) * 1000, 2)
+        return result
+
+    # 获取当前项目所有 active chunks
+    if project:
+        all_chunks = conn.execute(
+            "SELECT id, oom_adj, access_count, importance FROM memory_chunks "
+            "WHERE project=? AND chunk_state='ACTIVE'",
+            (project,)
+        ).fetchall()
+    else:
+        all_chunks = conn.execute(
+            "SELECT id, oom_adj, access_count, importance FROM memory_chunks "
+            "WHERE chunk_state='ACTIVE'"
+        ).fetchall()
+
+    # Dark pages: 存在但从未出现在任何 top_k
+    dark_pages = []
+    for chunk_id, oom_adj, access_count, importance in all_chunks:
+        if chunk_id not in stolen_ids:
+            dark_pages.append((chunk_id, oom_adj, access_count, importance))
+
+    result["dark_pages_total"] = len(dark_pages)
+
+    # ── Phase 3: Demotion ──
+    # 只降级：oom_adj >= 0（未保护）且 access_count == 0（从未被检索命中）
+    # 且 importance < 0.9（非关键知识）
+    demoted = 0
+    skipped = 0
+
+    for chunk_id, oom_adj, access_count, importance in dark_pages:
+        if demoted >= max_demote_per_scan:
+            break
+        # 跳过已保护的 chunks（oom_adj < 0 = 有保护策略）
+        if oom_adj < 0:
+            skipped += 1
+            continue
+        # 跳过已被访问过的（可能只是最近 trace window 不够长）
+        if access_count > 0:
+            skipped += 1
+            continue
+        # 跳过高 importance（由用户/系统标记为重要）
+        if importance >= 0.9:
+            skipped += 1
+            continue
+        # 跳过已经被充分降级的（避免重复叠加）
+        if oom_adj >= demote_adj:
+            skipped += 1
+            continue
+
+        # 降级：设置 oom_adj = demote_adj
+        conn.execute(
+            "UPDATE memory_chunks SET oom_adj=? WHERE id=?",
+            (demote_adj, chunk_id)
+        )
+        demoted += 1
+
+    if demoted > 0:
+        conn.commit()
+        bump_chunk_version()
+
+    result["dark_pages_demoted"] = demoted
+    result["dark_pages_skipped"] = skipped
+    result["duration_ms"] = round((_time.time() - t0) * 1000, 2)
+
+    return result

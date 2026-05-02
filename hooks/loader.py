@@ -1312,6 +1312,23 @@ def main():
         except Exception:
             pass
 
+        # ── iter545：vmstat_scan — Scan Efficiency & Dark Page Demotion ──
+        # OS 类比：Linux /proc/vmstat pgscan/pgsteal (Mel Gorman, 2004)
+        # 扫描效率审计：candidates_count(pgscan) vs top_k items(pgsteal)
+        # dark pages（从未出现在 top_k）降级 oom_adj 为新知识让路
+        try:
+            if not _defer_reclaim:  # iter535: deferred_initcall gate
+                from store_mm import vmstat_scan
+                vmstat_result = vmstat_scan(_log_conn, project)
+                if vmstat_result["dark_pages_demoted"] > 0 or vmstat_result["pgscan"] > 0:
+                    dmesg_log(_log_conn, DMESG_INFO, "vmstat",
+                              f"scan_eff={vmstat_result['scan_efficiency']:.2f} "
+                              f"pgscan={vmstat_result['pgscan']} pgsteal={vmstat_result['pgsteal']} "
+                              f"dark={vmstat_result['dark_pages_total']} demoted={vmstat_result['dark_pages_demoted']}",
+                              session_id=_session_id, project=project)
+        except Exception:
+            pass
+
         # ── 迭代146：Swap GC — 孤儿 project 清理 ──
         # OS 类比：process exit → free anonymous swap pages (do_exit → exit_mmap)
         # 消亡 project（主表已无 chunk）的 swap 条目永久占位，不会被 swap_in，

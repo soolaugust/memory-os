@@ -3211,6 +3211,17 @@ _REGISTRY: dict = {
         "shadow_traces 最大保留条目数，超出从最老开始淘汰（iter544）"),
     "shadow.max_expire_per_scan": (200, int, 10, 500, None,
         "单次扫描最大淘汰条目数（iter544：防止单次 GC 时间过长）"),
+
+    # ── iter545: vmstat_scan — Scan Efficiency Accounting & Dark Page Demotion ──
+    # OS 类比：/proc/vmstat pgscan/pgsteal counters (Mel Gorman, 2004)
+    "vmstat.window_traces": (50, int, 10, 200, None,
+        "vmstat 统计窗口大小（最近 N 条 recall_traces）"),
+    "vmstat.min_traces_dark": (5, int, 2, 20, None,
+        "触发 dark page 检测的最少 trace 数（新项目不误判）"),
+    "vmstat.dark_demote_adj": (400, int, 100, 800, None,
+        "dark page 降级 oom_adj 值（越高越容易被回收）"),
+    "vmstat.max_demote_per_scan": (5, int, 1, 20, None,
+        "单次扫描最大降级 dark page 数（渐进式，避免误杀）"),
 }
 
 # ── 磁盘配置缓存（进程内只读一次）──
