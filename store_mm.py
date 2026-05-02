@@ -7830,3 +7830,143 @@ def logrotate(conn: sqlite3.Connection) -> dict:
         "total_rotated": total,
         "duration_ms": round((_time.time() - t0) * 1000, 2),
     }
+
+
+# ── vacuum — Database File Compaction（迭代549）────────────────────────
+
+def vacuum(db_path: str) -> dict:
+    """
+    迭代549：vacuum — Database File Compaction。
+    OS 类比：SSD Background GC / Firmware Compaction (Samsung 840 EVO, ~2013)
+
+    Linux fstrim 通知 SSD 哪些 LBA 已释放（TRIM/DISCARD），但 SSD 内部仍需
+    background GC 将有效 pages 从碎片化的 erase block 搬迁合并，腾出完整
+    erase block 用于后续写入。没有 background GC → write amplification 上升、
+    可用 overprovisioning 空间耗尽、性能下降。
+
+    SQLite 的 freelist pages 等价于 SSD 的 invalidated pages——逻辑已释放
+    （DELETE/DROP 后 page 加入 freelist），但 DB 文件大小不变，OS 仍需读写
+    这些无用 pages 的 I/O（stat/backup/sync）。
+    VACUUM 相当于 SSD 的 background GC：重写整个 DB 为紧凑格式，
+    归还空闲页给 OS 文件系统。
+
+    触发策略（模仿 SSD GC 的保守触发逻辑）：
+      1. freelist_pct >= vacuum_threshold_pct (默认 40%) — 空闲率高到值得整理
+      2. 距上次 vacuum >= vacuum_cooldown_hours (默认 24h) — 避免频繁重写
+      3. DB 文件 >= vacuum_min_size_kb (默认 512KB) — 小文件不值得 vacuum
+
+    参数：
+      db_path — 数据库文件路径（字符串）
+
+    返回 dict：
+      vacuumed — 是否执行了 VACUUM
+      reason — 跳过/执行原因
+      before_size_kb — VACUUM 前文件大小
+      after_size_kb — VACUUM 后文件大小
+      freed_kb — 释放空间
+      freed_pct — 释放百分比
+      freelist_pct — VACUUM 前 freelist 占比
+      duration_ms — 执行时间
+    """
+    t0 = _time.time()
+
+    try:
+        from config import get as _cfg
+    except Exception:
+        return {"vacuumed": False, "reason": "no_config", "duration_ms": 0}
+
+    # 配置参数
+    threshold_pct = float(_cfg("vacuum.threshold_pct"))
+    cooldown_hours = int(_cfg("vacuum.cooldown_hours"))
+    min_size_kb = int(_cfg("vacuum.min_size_kb"))
+
+    result = {
+        "vacuumed": False,
+        "reason": "",
+        "before_size_kb": 0,
+        "after_size_kb": 0,
+        "freed_kb": 0,
+        "freed_pct": 0.0,
+        "freelist_pct": 0.0,
+        "duration_ms": 0.0,
+    }
+
+    # 检查文件存在
+    if not os.path.exists(db_path):
+        result["reason"] = "db_not_found"
+        result["duration_ms"] = round((_time.time() - t0) * 1000, 2)
+        return result
+
+    # 条件 1：最小文件大小
+    before_size = os.path.getsize(db_path)
+    result["before_size_kb"] = round(before_size / 1024, 1)
+    if before_size < min_size_kb * 1024:
+        result["reason"] = f"small_db({result['before_size_kb']:.0f}KB<{min_size_kb}KB)"
+        result["duration_ms"] = round((_time.time() - t0) * 1000, 2)
+        return result
+
+    # 条件 2：冷却期（避免频繁 VACUUM）
+    cooldown_flag = Path(db_path).parent / "vacuum_last.json"
+    now_ts = _time.time()
+    if cooldown_flag.exists():
+        try:
+            vdata = json.loads(cooldown_flag.read_text())
+            last_ts = vdata.get("ts", 0)
+            if now_ts - last_ts < cooldown_hours * 3600:
+                remaining_h = (cooldown_hours * 3600 - (now_ts - last_ts)) / 3600
+                result["reason"] = f"cooldown({remaining_h:.1f}h_remaining)"
+                result["duration_ms"] = round((_time.time() - t0) * 1000, 2)
+                return result
+        except Exception:
+            pass
+
+    # 条件 3：freelist 占比
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+        page_count = conn.execute("PRAGMA page_count").fetchone()[0]
+        freelist_count = conn.execute("PRAGMA freelist_count").fetchone()[0]
+        conn.close()
+    except Exception as e:
+        result["reason"] = f"pragma_error({e})"
+        result["duration_ms"] = round((_time.time() - t0) * 1000, 2)
+        return result
+
+    freelist_pct = (freelist_count / page_count * 100) if page_count > 0 else 0
+    result["freelist_pct"] = round(freelist_pct, 1)
+
+    if freelist_pct < threshold_pct:
+        result["reason"] = f"low_fragmentation({freelist_pct:.1f}%<{threshold_pct}%)"
+        result["duration_ms"] = round((_time.time() - t0) * 1000, 2)
+        return result
+
+    # 所有条件满足，执行 VACUUM
+    try:
+        conn = sqlite3.connect(db_path, timeout=30)
+        conn.execute("VACUUM")
+        conn.close()
+    except Exception as e:
+        result["reason"] = f"vacuum_error({e})"
+        result["duration_ms"] = round((_time.time() - t0) * 1000, 2)
+        return result
+
+    # 计算释放空间
+    after_size = os.path.getsize(db_path)
+    freed = before_size - after_size
+    result["vacuumed"] = True
+    result["reason"] = f"compacted(freelist={freelist_pct:.1f}%)"
+    result["after_size_kb"] = round(after_size / 1024, 1)
+    result["freed_kb"] = round(freed / 1024, 1)
+    result["freed_pct"] = round(freed / before_size * 100, 1) if before_size > 0 else 0
+
+    # 更新冷却标记
+    try:
+        cooldown_flag.write_text(json.dumps({
+            "ts": now_ts,
+            "freed_kb": result["freed_kb"],
+            "freed_pct": result["freed_pct"],
+        }))
+    except Exception:
+        pass
+
+    result["duration_ms"] = round((_time.time() - t0) * 1000, 2)
+    return result

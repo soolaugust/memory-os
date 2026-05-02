@@ -3251,6 +3251,16 @@ _REGISTRY: dict = {
         "tool_patterns 最大保留条数（按 frequency+recency 淘汰）"),
     "logrotate.entity_edges_orphan_max_age_hours": (72, int, 1, 720, None,
         "entity_edges 无 source_chunk_id 的 orphan edges 最大保留时间（小时）"),
+
+    # ── iter549: vacuum — Database File Compaction ──
+    "vacuum.enabled": (True, bool, None, None, None,
+        "是否启用 VACUUM（DB 文件物理收缩）"),
+    "vacuum.threshold_pct": (40.0, float, 10.0, 90.0, None,
+        "freelist 页占比阈值（%）：超过此值才触发 VACUUM"),
+    "vacuum.cooldown_hours": (24, int, 1, 168, None,
+        "两次 VACUUM 之间的最小间隔（小时）"),
+    "vacuum.min_size_kb": (512, int, 64, 102400, None,
+        "DB 文件最小大小（KB）：小于此值不值得 VACUUM"),
 }
 
 # ── 磁盘配置缓存（进程内只读一次）──

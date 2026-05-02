@@ -1391,6 +1391,28 @@ def main():
         except Exception:
             pass
 
+        # ── iter549：vacuum — Database File Compaction ──
+        # OS 类比：SSD Background GC / Firmware Compaction — fstrim 通知 SSD 哪些 LBA
+        # 空闲，但物理回收需要 SSD 内部 GC 搬迁有效 pages 合并 erase blocks。
+        # SQLite freelist pages = invalidated pages, VACUUM = background GC compaction。
+        vacuum_result = {"vacuumed": False, "freed_kb": 0}
+        try:
+            if not _defer_reclaim:  # iter535: deferred_initcall gate
+                from config import get as _cfg549
+                if _cfg549("vacuum.enabled"):
+                    from store_mm import vacuum
+                    vacuum_result = vacuum(str(STORE_DB))
+                    if vacuum_result["vacuumed"]:
+                        dmesg_log(_log_conn, DMESG_INFO, "vacuum",
+                                  f"compacted {vacuum_result['before_size_kb']:.0f}KB→{vacuum_result['after_size_kb']:.0f}KB "
+                                  f"freed={vacuum_result['freed_kb']:.0f}KB({vacuum_result['freed_pct']:.1f}%) "
+                                  f"freelist_was={vacuum_result['freelist_pct']:.1f}% "
+                                  f"{vacuum_result['duration_ms']:.1f}ms",
+                                  session_id=_session_id, project=project)
+                        _log_conn.commit()
+        except Exception:
+            pass
+
         # ── 迭代146：Swap GC — 孤儿 project 清理 ──
         # OS 类比：process exit → free anonymous swap pages (do_exit → exit_mmap)
         # 消亡 project（主表已无 chunk）的 swap 条目永久占位，不会被 swap_in，
@@ -1469,8 +1491,12 @@ def main():
         if logrotate_result.get("total_rotated", 0) > 0:
             logrotate_summary = f" logrotate={logrotate_result['total_rotated']}rotated"
 
+        vacuum_summary = ""
+        if vacuum_result.get("vacuumed"):
+            vacuum_summary = f" vacuum={vacuum_result['freed_kb']:.0f}KB({vacuum_result['freed_pct']:.1f}%)"
+
         dmesg_log(_log_conn, DMESG_INFO, "loader",
-                  f"session_start latest={'Y' if has_latest else 'N'} working_set={len(working_set)} ctx_len={len(context_text)} watchdog={wd_status}{autotune_summary}{criu_summary}{damon_summary}{mglru_summary}{gc_summary}{rmap_summary}{gc_swap_summary}{slab_summary}{fstrim_summary}{logrotate_summary}{consolidation_summary}",
+                  f"session_start latest={'Y' if has_latest else 'N'} working_set={len(working_set)} ctx_len={len(context_text)} watchdog={wd_status}{autotune_summary}{criu_summary}{damon_summary}{mglru_summary}{gc_summary}{rmap_summary}{gc_swap_summary}{slab_summary}{fstrim_summary}{logrotate_summary}{vacuum_summary}{consolidation_summary}",
                   session_id=_session_id, project=project)
         _log_conn.commit()
         _log_conn.close()
