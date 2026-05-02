@@ -30,12 +30,14 @@ def _conn():
 def _ins(conn, project, cid, chunk_type="decision", importance=0.7,
          access_count=0, oom_adj=0, age_days=10):
     created = (datetime.now(timezone.utc) - timedelta(days=age_days)).isoformat()
+    # summary 长度必须 >= 10 字符以通过 _retrospective_vma_validate（iter567 R4）
+    summary = f"test decision chunk {cid}"
     conn.execute(
         """INSERT OR REPLACE INTO memory_chunks
            (id, project, chunk_type, summary, content, importance,
             access_count, oom_adj, created_at, last_accessed)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (cid, project, chunk_type, f"test {cid}", f"content {cid}",
+        (cid, project, chunk_type, summary, f"content {cid}",
          importance, access_count, oom_adj, created, created))
     conn.commit()
 

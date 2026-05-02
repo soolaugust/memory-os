@@ -1667,6 +1667,8 @@ def main():
                         parts.append(f"r2_promote={_oom_rb_result['r2_promoted']}")
                     if _oom_rb_result["r3_protected"]:
                         parts.append(f"r3_protect={_oom_rb_result['r3_protected']}")
+                    if _oom_rb_result.get("r4_invalidated"):
+                        parts.append(f"r4_invalid={_oom_rb_result['r4_invalidated']}")
                     dmesg_log(_log_conn, DMESG_INFO, "oom_rebalance",
                               f"adjusted={_oom_rb_result['adjusted']} "
                               f"({' '.join(parts)}) "

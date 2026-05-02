@@ -10142,6 +10142,39 @@ def prune_icache_sb(conn: sqlite3.Connection, project: str = None) -> dict:
 #   （access_count, recall_frequency, importance drift）不一致。
 #   oom_score_adj_rebalance 定期根据运行时指标重新校准 oom_adj。
 
+def _retrospective_vma_validate(summary: str) -> bool:
+    """
+    iter567: 回溯版 _vma_validate — 对已存储 chunk 的 summary 做最新质量检查。
+
+    OS 类比：Linux ksm_scan hash 比对 — 后台扫描已有页面，检测内容有效性。
+    复制 extractor.py _vma_validate() 的核心规则到此处（避免跨模块 import 循环），
+    并添加额外的回溯检测规则（针对已知的历史碎片模式）。
+
+    返回 True = 通过检查（保留），False = 确认碎片（应标记回收）。
+    """
+    import re as _re567
+    s = summary.strip() if summary else ""
+    if not s or len(s) < 10:
+        return False
+    # V1 行号前缀：Read 工具输出（'1260:- 性能：...'）
+    if _re567.match(r'^\d{1,5}[:：]\s*[-\s]', s):
+        return False
+    # V2 状态/健康报告：emoji + 状态词
+    if _re567.match(r'^[⚠️✅❌🔴🟡🟢]+\s*(?:DEGRADED|PASS|FAIL|WARNING|OK|HEALTHY|ERROR)', s):
+        return False
+    # V3 markdown 表格行（含 2+ pipe）
+    if s.count('|') >= 2:
+        return False
+    # V4 行号引用前缀
+    if _re567.match(r'^(?:line\s+\d+|L\d+|第\d+行)\s*[:：]', s, _re567.IGNORECASE):
+        return False
+    # V5 (iter567 新增) 纯指标快照行：以 | 开头的 markdown 表格残留
+    # 模式：数字+箭头+数字 且无决策动词 = point-in-time 指标报告
+    if _re567.match(r'^[\d.]+%?\s*[→→]\s*[\d.]+', s):
+        return False
+    return True
+
+
 def oom_score_adj_rebalance(conn: sqlite3.Connection, project: str) -> dict:
     """
     iter564: 基于运行时指标重新校准 oom_adj。
@@ -10174,7 +10207,8 @@ def oom_score_adj_rebalance(conn: sqlite3.Connection, project: str) -> dict:
     enabled = _cfg("oom_rebalance.enabled")
     if not enabled:
         return {"adjusted": 0, "r1_demoted": 0, "r2_promoted": 0,
-                "r3_protected": 0, "scanned": 0, "duration_ms": 0.0}
+                "r3_protected": 0, "r4_invalidated": 0,
+                "scanned": 0, "duration_ms": 0.0}
 
     max_adj = int(_cfg("oom_rebalance.max_adjustments"))
     r2_min_age_days = float(_cfg("oom_rebalance.dead_min_age_days"))
@@ -10206,6 +10240,7 @@ def oom_score_adj_rebalance(conn: sqlite3.Connection, project: str) -> dict:
     r1_demoted = 0
     r2_promoted = 0
     r3_protected = 0
+    _r123_processed_ids = set()  # iter567: 追踪已被 R1/R2/R3 处理的 IDs，避免 R4 二次处理
 
     for row in rows:
         if adjusted >= max_adj:
@@ -10230,6 +10265,7 @@ def oom_score_adj_rebalance(conn: sqlite3.Connection, project: str) -> dict:
                 "UPDATE memory_chunks SET oom_adj = 0 WHERE id = ?", (cid,))
             r1_demoted += 1
             adjusted += 1
+            _r123_processed_ids.add(cid)
             continue
 
         # R3: protect_hot (优先于 R2 检查)
@@ -10239,6 +10275,7 @@ def oom_score_adj_rebalance(conn: sqlite3.Connection, project: str) -> dict:
                 "UPDATE memory_chunks SET oom_adj = -200 WHERE id = ?", (cid,))
             r3_protected += 1
             adjusted += 1
+            _r123_processed_ids.add(cid)
             continue
 
         # R2: promote_dead_low_oom
@@ -10257,9 +10294,66 @@ def oom_score_adj_rebalance(conn: sqlite3.Connection, project: str) -> dict:
                     (cid,))
                 r2_promoted += 1
                 adjusted += 1
+                _r123_processed_ids.add(cid)
                 continue
 
     if adjusted > 0:
+        try:
+            conn.commit()
+        except Exception:
+            pass
+
+    # ── iter567: R4 retrospective_vma_validate — 回溯应用最新写入质量门控 ──
+    # OS 类比：Linux ksm_scan (KSM, Red Hat 2009) — 后台定期扫描已映射页面，
+    #   对内容做回溯检查（hash 比对），已被识别为可合并/无效的页面做标记处理。
+    #   当 _vma_validate() 升级后，旧版漏入的碎片需要回溯扫描应用新规则。
+    # 根因：生产 DB 中存在 imp=0.800 的表格行碎片（| xxx | yyy |），它们是
+    #   在 iter562 (_vma_validate) 添加 pipe 检查之前写入的。R2 要求 imp<0.3
+    #   才降级，所以这些高 importance 碎片永远不会被自动回收。
+    # 规则：access_count=0 + age>=1d + _vma_validate(summary)=False → oom_adj=1000
+    r4_invalidated = 0
+    if adjusted < max_adj:
+        _r4_min_age_days = float(_cfg("oom_rebalance.r4_min_age_days") or 1.0)
+        for row in rows:
+            if adjusted >= max_adj:
+                break
+            cid, ctype, imp, acc, oom, created_at, last_acc = row
+            if cid in _r123_processed_ids:
+                continue  # 已被 R1/R2/R3 处理，跳过
+            if cid in pinned_ids:
+                continue
+            if ctype == "task_state":
+                continue
+            if oom <= -500:
+                continue
+            # 只检查零访问 + 已超过最小年龄的 chunks
+            if acc != 0:
+                continue
+            if oom >= 1000:
+                continue  # 已经是最高回收优先级
+            try:
+                cr_dt = datetime.fromisoformat(
+                    created_at.replace("Z", "+00:00") if created_at else "")
+                age_days = (now - cr_dt).total_seconds() / 86400
+            except Exception:
+                age_days = 0
+            if age_days < _r4_min_age_days:
+                continue
+            # 获取 summary 并用最新 _vma_validate 检查
+            try:
+                s_row = conn.execute(
+                    "SELECT summary FROM memory_chunks WHERE id=?", (cid,)
+                ).fetchone()
+                if s_row and not _retrospective_vma_validate(s_row[0]):
+                    conn.execute(
+                        "UPDATE memory_chunks SET oom_adj = 1000 WHERE id = ?",
+                        (cid,))
+                    r4_invalidated += 1
+                    adjusted += 1
+            except Exception:
+                pass
+
+    if r4_invalidated > 0:
         try:
             conn.commit()
         except Exception:
@@ -10270,6 +10364,7 @@ def oom_score_adj_rebalance(conn: sqlite3.Connection, project: str) -> dict:
         "r1_demoted": r1_demoted,
         "r2_promoted": r2_promoted,
         "r3_protected": r3_protected,
+        "r4_invalidated": r4_invalidated,
         "scanned": scanned,
         "duration_ms": round((_time.time() - t0) * 1000, 2),
     }

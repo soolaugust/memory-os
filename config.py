@@ -3269,6 +3269,8 @@ _REGISTRY: dict = {
         "R2 规则：零访问 chunk 必须超过此天数才升级 oom_adj（宽限期）"),
     "oom_rebalance.hot_min_access": (10, int, 3, 50, None,
         "R3 规则：access_count 达到此值才视为热 chunk 获 OOM 保护"),
+    "oom_rebalance.r4_min_age_days": (1.0, float, 0.5, 30.0, None,
+        "iter567 R4 规则：chunk 创建超过此天数 + 零访问 + _vma_validate 失败 → oom_adj=1000"),
 
     # ── iter549: vacuum — Database File Compaction ──
     "vacuum.enabled": (True, bool, None, None, None,
