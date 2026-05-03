@@ -378,6 +378,12 @@ def _run_extraction_pipeline(payload: dict) -> dict:
             for t in texts:
                 if not t or not t.strip():
                     continue
+                # iter645: min_content_length_gate — 拒绝碎片 chunk 写入
+                # 根因：content<50字节的 chunk 检索命中后无法提供足够上下文，
+                #   summary 已包含全部信息，raw content 无增量价值。
+                #   实测：5 个 len<50 的 chunk 全部 access_count=0。
+                if len(t.strip()) < 50:
+                    continue
                 # ── iter525: memfd_seal — Write Gate Integrity Seal ──
                 # OS 类比：Linux memfd_seal(F_SEAL_WRITE) (Jeff Xu, 2024) —
                 # sealed memory region 拒绝写入损坏数据，在 write 入口强制校验
