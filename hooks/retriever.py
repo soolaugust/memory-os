@@ -2448,6 +2448,9 @@ def main():
                             activation_bonus = _sa_result.get(c["id"], 0.0)
                             # spreading activation 用较低基础 relevance，主要靠 activation_bonus
                             base_score = _score_chunk(c, relevance=0.2)
+                            # iter639: hard_suppress → base_score=0.0，bonus 不得绕过
+                            if base_score <= 0:
+                                continue
                             final.append((base_score + activation_bonus, c))
                             fts_ids.add(c["id"])
                         candidates_count += len(_sa_rows)
@@ -2482,6 +2485,9 @@ def main():
                             c = dict(zip(_sh_col, row))
                             shmem_bonus = _shmem_result.get(c["id"], 0.0)
                             base_score = _score_chunk(c, relevance=0.15)
+                            # iter639: hard_suppress → base_score=0.0，bonus 不得绕过
+                            if base_score <= 0:
+                                continue
                             final.append((base_score + shmem_bonus, c))
                             fts_ids.add(c["id"])
                         candidates_count += len(_sh_rows)
@@ -2519,6 +2525,9 @@ def main():
                             c = dict(zip(_schema_col, row))
                             activation_bonus = _schema_result.get(c["id"], 0.0)
                             base_score = _score_chunk(c, relevance=0.15)
+                            # iter639: hard_suppress → base_score=0.0，bonus 不得绕过
+                            if base_score <= 0:
+                                continue
                             final.append((base_score + activation_bonus, c))
                             fts_ids.add(c["id"])
                         candidates_count += len(_schema_rows)
@@ -2696,6 +2705,9 @@ def main():
                             c.setdefault("encoding_context", {})
                             activation_bonus = _tot_result.get(c["id"], 0.0)
                             base = _score_chunk(c, relevance=0.2)
+                            # iter639: hard_suppress → base=0.0，bonus 不得绕过
+                            if base <= 0:
+                                continue
                             _tot_final.append((base + activation_bonus, c))
                             _tot_fts_ids.add(c["id"])
                         if _tot_final:
@@ -3056,6 +3068,9 @@ def main():
                                     chunk_project=chunk_dict.get("project", ""),  # 迭代111
                                     current_project=project,
                                 )
+                                # iter639: hard_suppress → base_score=0.0，bonus 不得绕过
+                                if base_score <= 0:
+                                    continue
                                 final.append((base_score + prefetch_bonus, chunk_dict))
                                 existing_ids.add(chunk_dict["id"])
                                 readahead_prefetched += 1
