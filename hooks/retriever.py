@@ -2775,8 +2775,9 @@ def main():
                     if _shadow_data and _shadow_data.get("session_id") == session_id:
                         _primed_ids = set(_shadow_data.get("top_k_ids") or [])
                         if _primed_ids:
+                            # iter623: priming 只应用于 s>0 的 chunk，防止 suppress 后被抬升
                             final = [
-                                (s + _priming_boost if c.get("id") in _primed_ids else s, c)
+                                (s + _priming_boost if s > 0 and c.get("id") in _primed_ids else s, c)
                                 for s, c in final
                             ]
             except Exception:
@@ -3158,8 +3159,9 @@ def main():
                 if _shadow_data and _shadow_data.get("session_id") == session_id:
                     _primed_ids = set(_shadow_data.get("top_k_ids") or [])
                     if _primed_ids:
+                        # iter623: priming 只应用于 s>0 的 chunk，防止 suppress 后被抬升
                         final = [
-                            (s + _priming_boost if c.get("id") in _primed_ids else s, c)
+                            (s + _priming_boost if s > 0 and c.get("id") in _primed_ids else s, c)
                             for s, c in final
                         ]
         except Exception:
