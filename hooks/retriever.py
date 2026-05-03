@@ -3785,9 +3785,12 @@ def main():
             #   垄断由上游 _score_chunk suppress + final_gate 控制，fallback 不需二次拦截。
             if not top_k:
                 try:
+                    # iter690: global_constraint_fallback — 同时查项目+global constraint
+                    # 根因：4 个零访问 chunk 中 2 个 imp=0.9 global constraint 从未被注入，
+                    #   因为 project=? 只匹配当前项目，global 约束永远被跳过。
                     _cef_rows = conn.execute(
                         "SELECT * FROM memory_chunks WHERE chunk_state='ACTIVE' "
-                        "AND project=? AND chunk_type='design_constraint' "
+                        "AND project IN (?, 'global') AND chunk_type='design_constraint' "
                         "ORDER BY importance DESC LIMIT 2", (project,)
                     ).fetchall()
                     if _cef_rows:
@@ -3798,9 +3801,9 @@ def main():
                             _cef_best = _cef_chunks[0]
                             top_k = [(0.99, _cef_best)]
                             _deferred.log(DMESG_INFO, "retriever",
-                                          f"iter673_constraint_empty_fallback: "
+                                          f"iter690_global_constraint_fallback: "
                                           f"injected {_cef_best['id'][:12]} "
-                                          f"(positive=0, project has constraint)",
+                                          f"(positive=0, src={_cef_best.get('project','')})",
                                           session_id=session_id, project=project)
                 except Exception:
                     pass
