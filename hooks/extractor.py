@@ -1787,8 +1787,16 @@ def _vma_validate(summary: str) -> bool:
         '去垄断', 'chunk 零', 'recall_trace', 'inject_hard_cap',
         'access_count', 'ephemeral_type', 'monopoly_gate',
         '迭代器自身', '迭代器噪声',
+        # iter605: 补充遗漏的 memory-os 内部关键词
+        'hard_cap', 'hard_gate', 'bandwidth_throttle', 'bw_window',
+        'effective_bw_window', 'recall_count', 'soft throttle',
+        'refault_distance', 'constraint_min_relevance',
+        'feedback_loop_break', 'rc_cap', 'rc=',
     )
     if any(m in s for m in _MEMORYOS_META):
+        return False
+    # iter605: 拦截引用具体 chunk ID 的实现笔记（如 "b50e0b54 被注入 87%"）
+    if re.search(r'[0-9a-f]{8}.*(?:被注入|注入|injected|rc=|trace)', s):
         return False
     return True
 
