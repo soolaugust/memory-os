@@ -3143,11 +3143,13 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     ("24h", 24, _recent_24h_counts),
                     ("7d", 168, _recent_7d_counts),
                 ]:
+                    # iter637: 移除 project 过滤 — global chunk 跨 project 注入
+                    #   导致 project=? 匹配不到 trace，suppress 全失效
                     _rw_cur = _rc_conn.execute(
                         "SELECT top_k_json FROM recall_traces "
-                        "WHERE project=? AND injected=1 "
+                        "WHERE injected=1 "
                         "AND timestamp > datetime('now', ?)",
-                        (project, f'-{_rw_hours} hours')
+                        (f'-{_rw_hours} hours',)
                     )
                     for (_rw_json,) in _rw_cur.fetchall():
                         try:

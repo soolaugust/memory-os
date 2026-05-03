@@ -1708,11 +1708,12 @@ def main():
             #   时间窗口不受 trace 数量稀释，对突发垄断反应灵敏。
             _recent_24h_counts = {}
             try:
+                # iter637: 移除 project 过滤 — global chunk 跨 project 注入导致
+                #   project=? 永远匹配不到 global chunk 的 trace，suppress 全失效
                 _r24_cur = _rc_conn.execute(
                     "SELECT top_k_json FROM recall_traces "
-                    "WHERE project=? AND injected=1 "
-                    "AND timestamp > datetime('now', '-24 hours')",
-                    (project,)
+                    "WHERE injected=1 "
+                    "AND timestamp > datetime('now', '-24 hours')"
                 )
                 for (_r24_json,) in _r24_cur.fetchall():
                     try:
@@ -1736,11 +1737,11 @@ def main():
             # iter619: 阈值从 8 降至 5（数据驱动：top2 chunk 7d=15/12，占 62.8% slot）。
             _recent_7d_counts = {}
             try:
+                # iter637: 同上 — 移除 project 过滤
                 _r7d_cur = _rc_conn.execute(
                     "SELECT top_k_json FROM recall_traces "
-                    "WHERE project=? AND injected=1 "
-                    "AND timestamp > datetime('now', '-7 days')",
-                    (project,)
+                    "WHERE injected=1 "
+                    "AND timestamp > datetime('now', '-7 days')"
                 )
                 for (_r7d_json,) in _r7d_cur.fetchall():
                     try:
