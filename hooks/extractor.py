@@ -1241,6 +1241,18 @@ def _is_quality_chunk(summary: str) -> bool:
         return False
     if re.match(r'^量化[：:改]', s):
         return False
+    # ── iter636: iterator_diagnostic_noise — 迭代器诊断结论拦截 ──
+    # 根因（数据驱动）：13bed2d8 "问题：top2 垄断 chunk（feishu CLI ac=46...）占总注入的 62.8%"
+    #   通过了 quality gate（含数字锚点），但这是迭代器自身对 memory-os 内部状态的诊断，
+    #   对用户无检索价值（ac=0）。特征：含 memory-os 内部指标术语 + 无决策动词。
+    _ITERATOR_DIAG_KW = re.compile(
+        r'(?:垄断\s*chunk|注入的?\s*\d|access.count|recall.count|zero.access|'
+        r'top_k|anti.monopoly|bandwidth.throttle|hard.cap|suppress)',
+        re.I
+    )
+    if _ITERATOR_DIAG_KW.search(s):
+        if not re.search(r'(?:选择|决定|采用|替代|改用|放弃|因为|根因|阈值.*设为|设.*阈值)', s):
+            return False
     # ── 迭代116：ftrace/调试计数器行过滤 ──
     # OS 类比：ftrace ring buffer 中的 event 数据，只在 debug session 有意义
     # 模式：word_cnt=N word_cnt=N ... — 多个 word=数字 键值对，是内核调试输出
