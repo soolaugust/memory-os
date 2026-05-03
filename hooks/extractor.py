@@ -1235,6 +1235,12 @@ def _is_quality_chunk(summary: str) -> bool:
         )
         if not has_anchor:
             return False
+    # ── iter631: iterator_quantitative_selfeval — 迭代器量化自评拦截 ──
+    # 根因：迭代 agent 写入自身度量（"X→Y", "PA 10/10", "chunks N→M"），100% 零访问。
+    if '→' in s and re.search(r'(?:PA\s*\d+/\d+|chunks?\s*\d+|zero_access|test.*pass)', s, re.I):
+        return False
+    if re.match(r'^量化[：:改]', s):
+        return False
     # ── 迭代116：ftrace/调试计数器行过滤 ──
     # OS 类比：ftrace ring buffer 中的 event 数据，只在 debug session 有意义
     # 模式：word_cnt=N word_cnt=N ... — 多个 word=数字 键值对，是内核调试输出

@@ -149,6 +149,15 @@ def _seal_check_reject(text: str) -> bool:
                 '垄断现象', '垄断 chunk')
     if any(m in text for m in _META_CN):
         return True
+    # iter631: iterator_quantitative_selfeval — 迭代器量化自评模式拦截
+    # 根因：迭代 agent 写入自身度量变化（"X → Y", "PA 10/10", "chunks N→M"），
+    #   这些是 point-in-time 运行日志，不是可复用领域知识。零访问率 100%。
+    # 特征：含 "→" + 量化指标词 + 无用户领域锚点
+    if '→' in text and _re.search(r'(?:PA\s*\d+/\d+|chunks?\s*\d+|zero_access|test.*pass)', _tl):
+        return True
+    # "量化改善" / "量化:" 开头 — 迭代器自评总结
+    if _re.match(r'^量化[：:改]', text):
+        return True
     return False
 
 
@@ -356,7 +365,15 @@ def _run_extraction_pipeline(payload: dict) -> dict:
         importance_factor = throttle.get("importance_factor", 1.0)
         oom_adj_delta     = throttle.get("oom_adj_delta", 0)
 
+        # iter631: ephemeral_type_gate — 与 extractor.py iter596 同步
+        # 根因：extractor_pool._write_chunks 缺少 chunk_type 级过滤，
+        #   conversation_summary/prompt_context 绕过 extractor.py 的 gate 写入 DB，
+        #   实测 4 条 conversation_summary + 2 条 prompt_context 零访问。
+        _EPHEMERAL_TYPES = {"prompt_context", "conversation_summary"}
+
         def _write_chunks(texts, chunk_type, base_importance):
+            if chunk_type in _EPHEMERAL_TYPES:
+                return 0
             written = 0
             for t in texts:
                 if not t or not t.strip():
