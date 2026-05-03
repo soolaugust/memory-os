@@ -4370,12 +4370,13 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 ensure_schema(_wconn)
                 update_accessed(_wconn, _accessed_ids)
                 mglru_promote(_wconn, _accessed_ids)
-                # iter668: top_k_data fallback — 闭包捕获的 _top_k_data 可能为空
-                # （默认参数绑定时 top_k_data list 已被构建但内容被 GC 回收或竞态清空）。
-                # _accessed_ids（同样通过默认参数绑定）始终可靠，用它构建 minimal fallback，
-                # 确保 chunk_recall_counts 能正确统计注入频率。
+                # iter668+678: top_k_data fallback — 闭包捕获的 _top_k_data 可能为空
+                # 数据驱动（2026-05-04）：59% 的 injected=1 trace 的 top_k_json='[]'，
+                #   但 dmesg 确认 daemon 成功注入了 1-2 个 chunk（_top_k_len>0）。
+                #   根因未完全确定（默认参数绑定应可靠），但 _accessed_ids 始终正确。
+                # 修复：增加 _top_k_len 不变性检查，空时用 _accessed_ids 重建。
                 _effective_top_k = _top_k_data
-                if not _effective_top_k and _accessed_ids:
+                if (not _effective_top_k or len(_effective_top_k) != _top_k_len) and _accessed_ids:
                     _effective_top_k = [{"id": cid} for cid in _accessed_ids]
                 store_insert_trace(_wconn, {
                     "id": str(uuid_mod.uuid4()),

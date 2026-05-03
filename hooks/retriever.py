@@ -2973,6 +2973,19 @@ def main():
                               f"iter670_suppress_fallback_hd: all {len(_pre_suppress_top_k_hd)} "
                               f"suppressed, fallback to best={_fb_hd[1].get('id','')[:12]}",
                               session_id=session_id, project=project)
+            # ── iter677: positive_empty_best_fallback (hard_deadline) ──
+            if not top_k and final:
+                _pebf_best_hd = final[0]
+                _pebf_score_hd = _pebf_best_hd[0]
+                _pebf_id_hd = _pebf_best_hd[1].get("id", "")
+                if (_pebf_score_hd >= 0.20
+                        and _recent_24h_counts.get(_pebf_id_hd, 0) < 2
+                        and _recent_7d_counts.get(_pebf_id_hd, 0) < 3):
+                    top_k = [_pebf_best_hd]
+                    _deferred.log(DMESG_INFO, "retriever",
+                                  f"iter677_positive_empty_best_fallback_hd: "
+                                  f"score={_pebf_score_hd:.3f} id={_pebf_id_hd[:12]}",
+                                  session_id=session_id, project=project)
             if top_k:
                 # 快速路径：直接组装输出
                 top_k_ids = sorted([c["id"] for _, c in top_k])
@@ -3790,6 +3803,27 @@ def main():
                 except Exception:
                     pass
 
+            # ── iter677: positive_empty_best_fallback — FTS 最高分兜底 ──────
+            # 根因（数据驱动，2026-05-04）：FULL 路径 65% trace top_k=0。
+            #   positive=[] 因 candidates 的 score 全部 < min_thresh(0.30)。
+            #   constraint_fallback 只看 design_constraint 且受 7d suppress 限制。
+            #   实测：score 0.25~0.29 的候选有 FTS5 词匹配、有一定相关性，
+            #   全部丢弃导致用户从不看到记忆。
+            # 修复：从 final 取最高分候选，score >= 0.20 即注入 1 条。
+            #   受 24h/7d suppress 保护，不会垄断。
+            if not top_k and final:
+                _pebf_best = final[0]  # final 已按 score desc 排序
+                _pebf_score = _pebf_best[0]
+                _pebf_id = _pebf_best[1].get("id", "")
+                if (_pebf_score >= 0.20
+                        and _recent_24h_counts.get(_pebf_id, 0) < 2
+                        and _recent_7d_counts.get(_pebf_id, 0) < 3):
+                    top_k = [_pebf_best]
+                    _deferred.log(DMESG_INFO, "retriever",
+                                  f"iter677_positive_empty_best_fallback: "
+                                  f"score={_pebf_score:.3f} id={_pebf_id[:12]}",
+                                  session_id=session_id, project=project)
+
             if not top_k:
                 # 迭代84：关闭只读连接，flush deferred logs
                 conn.close()
@@ -4545,8 +4579,9 @@ def main():
             except Exception:
                 pass  # reconsolidate 失败不影响主流程
 
-            # iter668: top_k_data fallback — 防御空 top_k_data 导致 recall_counts 失准
-            _effective_top_k = top_k_data if top_k_data else [{"id": cid} for cid in accessed_ids]
+            # iter668+678: top_k_data fallback — 防御空 top_k_data 导致 recall_counts 失准
+            # 数据驱动（2026-05-04）：len(top_k_data) 与 len(accessed_ids) 不一致时重建
+            _effective_top_k = top_k_data if (top_k_data and len(top_k_data) == len(accessed_ids)) else [{"id": cid} for cid in accessed_ids]
             _write_trace(session_id, project, prompt_hash,
                          candidates_count, _effective_top_k, 1, reason,
                          duration_ms, conn=wconn)
