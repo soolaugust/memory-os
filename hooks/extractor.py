@@ -1253,6 +1253,22 @@ def _is_quality_chunk(summary: str) -> bool:
     if _ITERATOR_DIAG_KW.search(s):
         if not re.search(r'(?:选择|决定|采用|替代|改用|放弃|因为|根因|阈值.*设为|设.*阈值)', s):
             return False
+    # ── iter640: iterator_ops_report — 迭代器操作结果/度量变化报告拦截 ──
+    # 根因（数据驱动）："零访问率: 27.4% → 23.3% (-4.1pp)"、"删除 5 个明确噪声 chunk"
+    #   通过了 quality gate（含数字锚点），但这是迭代器自身的操作汇报，
+    #   对用户无检索价值（100% ac=0）。特征：
+    #   A. 内部度量变化格式：X率/X比/X数 + 百分比/数字 + → + 百分比/数字
+    #   B. 操作动词 + memory-os 内部对象（chunk/trace/FTS/噪声）
+    _ITER_METRIC_CHANGE = re.compile(
+        r'(?:访问率|零访问|噪声比|命中率|skip.rate|注入率)\s*[：:]\s*[\d.]+%?\s*→',
+        re.I
+    )
+    _ITER_OPS_REPORT = re.compile(
+        r'^(?:删除|清理|移除|GC)\s*\d+\s*(?:个|条)?\s*\S{0,6}(?:噪声|chunk|trace|碎片)',
+        re.I
+    )
+    if _ITER_METRIC_CHANGE.search(s) or _ITER_OPS_REPORT.search(s):
+        return False
     # ── iter638: wiki_section_heading_fragment — 碎片式 wiki 标题拦截 ──
     # 根因（数据驱动）：/migrate-memory 批量导入切分 wiki 时产出纯索引碎片，
     #   如 "[topic] xxx > 参考链接"、"[topic] xxx > 相关文件"、"[topic] xxx > 影响范围"。
