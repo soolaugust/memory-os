@@ -1267,7 +1267,17 @@ def _is_quality_chunk(summary: str) -> bool:
         r'^(?:删除|清理|移除|GC)\s*\d+\s*(?:个|条)?\s*\S{0,6}(?:噪声|chunk|trace|碎片)',
         re.I
     )
-    if _ITER_METRIC_CHANGE.search(s) or _ITER_OPS_REPORT.search(s):
+    # iter643: iterator_confirm_gate — 迭代器操作确认消息拦截
+    # 根因（数据驱动）："memory-os.md：✅ 已追加 iter552 条目" (ac=0,inject=2)
+    #   通过了 self-ref gate（只含 1 个 iter\d+ 匹配），但本质是迭代器操作日志。
+    # 特征：✅/✓ + 操作动词（已追加/已完成/已修复/已清理/已更新）
+    #   或 iter\d+ + 操作动词 — 均为迭代器自动确认消息，对用户无检索价值。
+    _ITER_CONFIRM = re.compile(
+        r'(?:✅|✓|☑)\s*已(?:追加|完成|修复|清理|更新|执行|删除|写入)|'
+        r'iter\d{2,}\s*(?:条目|记录|完成|已)',
+        re.I
+    )
+    if _ITER_METRIC_CHANGE.search(s) or _ITER_OPS_REPORT.search(s) or _ITER_CONFIRM.search(s):
         return False
     # ── iter638: wiki_section_heading_fragment — 碎片式 wiki 标题拦截 ──
     # 根因（数据驱动）：/migrate-memory 批量导入切分 wiki 时产出纯索引碎片，
