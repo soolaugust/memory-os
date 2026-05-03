@@ -3926,8 +3926,14 @@ def main():
         if _sysctl("retriever.inject_sort_enabled") and len(top_k) >= 2:
             try:
                 import math as _math
+                # iter644: constraint_inject_floor — design_constraint 也必须过绝对 score 门槛
+                # 根因（数据驱动，2026-05-03）：b50e0b54 被各种 suppress 压到 score=0.0003，
+                #   但 _inj_constraints 无条件收录 → 仍被注入。score<0.001 的 constraint
+                #   已被 suppress 判定为当前无价值，不应占用 token 预算。
+                _constraint_floor = 0.001
                 _inj_constraints = [(s, c) for s, c in top_k
-                                    if c.get("chunk_type") == "design_constraint"]
+                                    if c.get("chunk_type") == "design_constraint"
+                                    and s >= _constraint_floor]
                 _inj_normal = [(s, c) for s, c in top_k
                                if c.get("chunk_type") != "design_constraint"]
                 if len(_inj_normal) >= 2:
