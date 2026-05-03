@@ -1660,8 +1660,17 @@ def main():
             # 修复：用 min(30, actual_trace_count) 作为有效窗口。
             try:
                 # iter604: 与 chunk_recall_counts 对齐，只统计 injected=1 的 trace
+                # iter669: bw_window_nonempty — 只统计 top_k_json 非空的 trace
+                # 根因：60% injected trace 的 top_k_json 为 []（无 chunk 达到阈值），
+                #   这些空 trace 膨胀了 _effective_bw_window 分母，导致 bandwidth
+                #   utilization (_rc / _local_bw_window) 被严重低估。
+                #   例：chunk 在 7 条有效 trace 中出现 4 次 = 57%，但分母被空 trace
+                #   撑到 23 → 4/23=17%，远低于 hard_cap=30%，垄断逃逸。
+                # 修复：分母只计算有实际 chunk 注入的 trace，与 chunk_recall_counts
+                #   的分子（遍历 top_k_json 中的 chunk ID）语义对齐。
                 _atc = _rc_conn.execute(
-                    "SELECT COUNT(*) FROM recall_traces WHERE project=? AND injected=1", (project,)
+                    "SELECT COUNT(*) FROM recall_traces WHERE project=? AND injected=1"
+                    " AND top_k_json IS NOT NULL AND top_k_json != '[]'", (project,)
                 ).fetchone()[0]
                 _effective_bw_window = min(30, max(1, _atc))
             except Exception:

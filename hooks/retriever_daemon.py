@@ -3092,8 +3092,11 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     _psi_gov_rc_put(project, _psi_result_fresh, _gov_result_fresh, _rc_fresh)
                 # iter602: effective_bw_window 用标准连接查（两条路径都需要）
                 # iter604: 与 chunk_recall_counts 对齐，只统计 injected=1 的 trace
+                # iter669: bw_window_nonempty — 只统计 top_k_json 非空的 trace
+                # 根因同 retriever.py iter669：空 trace 膨胀分母导致垄断逃逸。
                 _atc = _rc_conn.execute(
-                    "SELECT COUNT(*) FROM recall_traces WHERE project=? AND injected=1", (project,)
+                    "SELECT COUNT(*) FROM recall_traces WHERE project=? AND injected=1"
+                    " AND top_k_json IS NOT NULL AND top_k_json != '[]'", (project,)
                 ).fetchone()[0]
                 _effective_bw_window = min(30, max(1, _atc))
                 # iter610: hard_cap_local_window — memcg inflate 前的 per-project window

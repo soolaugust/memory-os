@@ -358,14 +358,13 @@ def chunk_recall_counts(conn: 'sqlite3.Connection', project: str,
     """
     try:
         # iter604: feedback_loop_break — 只统计 injected=1 的 trace。
-        # iter580 改为统计所有 trace（含 skipped_same_hash/injected=0），目的是更快
-        # 触发 hard_cap。但这造成正反馈死锁：被拦截 → 仍出现在 top_k_json →
-        # rc 永不衰减 → 永远被拦截。iter596-601 已在 scoring+constraint 两路径加
-        # hard_gate，不再需要靠膨胀 rc 来触发拦截。回退为只统计真正注入的 trace，
-        # 让被拦截的 chunk 自然衰减、重获注入资格。
+        # iter669: bw_window_nonempty — 额外过滤 top_k_json='[]' 的空 trace。
+        # 根因：60% injected trace 的 top_k_json 为空数组（无 chunk 达到注入阈值），
+        #   空 trace 占据 LIMIT 窗口但不贡献任何 chunk 计数，导致有效窗口缩水。
+        #   例：LIMIT 30 中只有 12 条非空 → 分子最大只能到 12，分母却是 30。
         cur = conn.execute(
             "SELECT top_k_json FROM recall_traces "
-            "WHERE project=? AND top_k_json IS NOT NULL AND injected=1 "
+            "WHERE project=? AND top_k_json IS NOT NULL AND top_k_json != '[]' AND injected=1 "
             "ORDER BY rowid DESC LIMIT ?",
             (project, window)
         )
@@ -422,11 +421,10 @@ def chunk_recall_counts_memcg(conn: 'sqlite3.Connection', project: str,
     try:
         # 查询所有项目的最近 traces（排除当前项目，当前项目已由 chunk_recall_counts 覆盖）
         # iter606: 与 chunk_recall_counts 对齐，只统计 injected=1 的 trace。
-        # iter604 修复了 per-project 路径但遗漏了 memcg 路径，导致 skipped_same_hash
-        # trace 中的 chunk 仍然累计跨项目 rc → 正反馈死锁未完全打破。
+        # iter669: bw_window_nonempty — 过滤空 top_k_json，与 per-project 对齐。
         cur = conn.execute(
             "SELECT top_k_json FROM recall_traces "
-            "WHERE project != ? AND top_k_json IS NOT NULL AND injected=1 "
+            "WHERE project != ? AND top_k_json IS NOT NULL AND top_k_json != '[]' AND injected=1 "
             "ORDER BY rowid DESC LIMIT ?",
             (project, window)
         )
