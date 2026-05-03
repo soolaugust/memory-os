@@ -3084,6 +3084,7 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
         # 修复：用独立标准连接加载 recall_counts，确保看到最新 traces。
         _recall_counts = {}
         _effective_bw_window = 30
+        _local_bw_window = 30  # iter610: fallback
         try:
             # iter602: 用标准连接（非 immutable）读取 recall_traces
             import sqlite3 as _rc_sql
@@ -3101,6 +3102,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     "SELECT COUNT(*) FROM recall_traces WHERE project=? AND injected=1", (project,)
                 ).fetchone()[0]
                 _effective_bw_window = min(30, max(1, _atc))
+                # iter610: hard_cap_local_window — memcg inflate 前的 per-project window
+                _local_bw_window = _effective_bw_window
                 # iter603+606: memcg_stat — cross-project recall 计数 + bw_window parity
                 try:
                     from store_criu import chunk_recall_counts_memcg
@@ -3468,10 +3471,11 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             # iter601: soft throttle(×0.15) 不足以拦截候选池不足时的垄断 chunk，
             #   超过 hard_cap 时 score=0（与 constraint _ac_gated 路径一致）。
             if _rc > 0:
-                _eff_util_sc = _rc / _effective_bw_window
-                if _eff_util_sc > _inject_hard_cap:
+                # iter610: hard_cap 用 _local_bw_window 防止 memcg inflate 稀释
+                _hard_util_sc = _rc / _local_bw_window
+                if _hard_util_sc > _inject_hard_cap:
                     score = 0.0
-                elif _eff_util_sc > _bw_max_pct:
+                elif (_rc / _effective_bw_window) > _bw_max_pct:
                     score *= 0.15
             return score
 
@@ -3527,10 +3531,11 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 score *= _bw_factor * (_bw_decay ** (_rc - _bw_quota))
             # iter600+601: bandwidth throttle — hard gate 升级（同 _score_chunk）
             if _rc > 0:
-                _eff_util_sd = _rc / _effective_bw_window
-                if _eff_util_sd > _inject_hard_cap:
+                # iter610: hard_cap 用 _local_bw_window
+                _hard_util_sd = _rc / _local_bw_window
+                if _hard_util_sd > _inject_hard_cap:
                     score = 0.0
-                elif _eff_util_sd > _bw_max_pct:
+                elif (_rc / _effective_bw_window) > _bw_max_pct:
                     score *= 0.15
             return score
 
@@ -3839,7 +3844,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     return False
                 _rc = _recall_counts.get(_cid, 0)
                 # iter596: hard cap — 注入频率超阈值无条件 suppress
-                if _rc / max(_effective_bw_window, 1) > _inject_hard_cap:
+                # iter610: 用 _local_bw_window 防止 memcg inflate 稀释
+                if _rc / max(_local_bw_window, 1) > _inject_hard_cap:
                     return False
                 _rel = _constraint_relevance(c)
                 # iter598: zero relevance gate — 与 query 零词重叠的 constraint 无条件拦截

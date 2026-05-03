@@ -1624,6 +1624,7 @@ def main():
         #   immutable=1 等价于缺失 read barrier 的 RCU reader。
         # 修复：用独立的标准 WAL 连接加载 recall_counts，确保看到最新 traces。
         _recall_counts = {}
+        _local_bw_window = 30  # iter610: fallback if outer try fails
         try:
             import sqlite3 as _rc_sql
             _rc_conn = _rc_sql.connect(str(STORE_DB))
@@ -1640,6 +1641,12 @@ def main():
                 _effective_bw_window = min(30, max(1, _atc))
             except Exception:
                 _effective_bw_window = 30
+            # iter610: hard_cap_local_window — memcg inflate 前的 per-project window
+            # 根因：iter606 memcg inflate 将 _effective_bw_window 从 19→39，
+            #   导致 per-project 垄断 chunk (rc=12/39=0.31) 刚好逃脱 hard_cap=0.30。
+            #   inflate 的目的是防止 soft throttle 误杀有价值的 global chunk，
+            #   但 hard_cap 应使用严格的 per-project window 确保垄断不逃逸。
+            _local_bw_window = _effective_bw_window
             # ── iter566: memcg_stat — Cross-Project Recall Accounting ──
             # OS 类比：cgroup v2 memory.stat hierarchical aggregation — 共享页面的
             # 跨 cgroup 访问计数聚合，反映真实系统级资源压力。
@@ -1943,7 +1950,7 @@ def main():
                 # 绕过后续 throttle 以 importance*0.1 持续进入 top_k（根因：feishu CLI
                 # rc=26/30=87%，score=0.000092 仍入选因为候选池不足）
                 _rc_ee = _recall_counts.get(chunk.get("id", ""), 0)
-                if _rc_ee > 0 and _rc_ee / _effective_bw_window > (_sysctl("retriever.constraint_inject_hard_cap") or 0.30):
+                if _rc_ee > 0 and _rc_ee / _local_bw_window > (_sysctl("retriever.constraint_inject_hard_cap") or 0.30):
                     return 0.0
                 return float(chunk.get("importance", 0.5)) * 0.1  # 极低相关性：快速降权
             # 迭代322: Query-Conditioned Importance — 动态 α
@@ -2027,10 +2034,12 @@ def main():
             #   升级为 hard gate：超过 constraint_inject_hard_cap 时 score=0。
             _rc = _recall_counts.get(chunk.get("id", ""), 0)
             if _rc > 0:
-                _eff_util = _rc / _effective_bw_window
-                if _eff_util > (_sysctl("retriever.constraint_inject_hard_cap") or 0.30):
+                # iter610: hard_cap 用 _local_bw_window（不受 memcg inflate），
+                #   soft throttle 保留 _effective_bw_window 防误杀
+                _hard_util = _rc / _local_bw_window
+                if _hard_util > (_sysctl("retriever.constraint_inject_hard_cap") or 0.30):
                     score = 0.0  # iter601: hard gate — 与 constraint 路径一致
-                elif _eff_util > (_sysctl("scorer.bw_max_pct") or 0.30):
+                elif (_rc / _effective_bw_window) > (_sysctl("scorer.bw_max_pct") or 0.30):
                     score *= 0.15
             # ── iter368: Attention Focus Bonus ─────────────────────────────
             # OS 类比：寄存器中的变量零访问延迟 bonus（vs 内存访问 200 cycles）
@@ -3243,7 +3252,8 @@ def main():
                     return False
                 _rc = _recall_counts.get(_cid, 0)
                 # hard cap: 注入频率超阈值直接 suppress，不论 relevance
-                if _rc / max(_effective_bw_window, 1) > _inject_hard_cap:
+                # iter610: 用 _local_bw_window 防止 memcg inflate 稀释垄断检测
+                if _rc / max(_local_bw_window, 1) > _inject_hard_cap:
                     return False
                 _rel = _constraint_relevance(c)
                 # iter598: zero relevance gate — 与 query 零词重叠的 constraint 无条件拦截
