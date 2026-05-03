@@ -2986,6 +2986,24 @@ def main():
                         pass  # write-back 失败不影响已输出的结果
                     # 迭代85：Shadow Trace
                     _write_shadow_trace(project, accessed_ids, session_id)
+                    # ── iter648: injection timeline write-back (hard_deadline path) ──
+                    try:
+                        from datetime import timedelta as _td648hd
+                        _now648hd = __import__('datetime').datetime.now(__import__('datetime').timezone.utc)
+                        _cut_7d = (_now648hd - _td648hd(days=7)).isoformat()
+                        _itl_hd = {}
+                        if os.path.exists(_INJECTION_TIMELINE_FILE):
+                            with open(_INJECTION_TIMELINE_FILE, encoding="utf-8") as _itf_hd:
+                                _itl_hd = json.loads(_itf_hd.read())
+                        _itl_hd = {k: [t for t in v if t > _cut_7d] for k, v in _itl_hd.items()}
+                        _itl_hd = {k: v for k, v in _itl_hd.items() if v}
+                        _now_iso = _now648hd.isoformat()
+                        for _aid in accessed_ids:
+                            _itl_hd.setdefault(_aid, []).append(_now_iso)
+                        with open(_INJECTION_TIMELINE_FILE, 'w', encoding="utf-8") as _itf_hw:
+                            _itf_hw.write(json.dumps(_itl_hd, ensure_ascii=False))
+                    except Exception:
+                        pass
                     # iter391: IOR — hard deadline 路径也更新返回抑制状态
                     _update_ior_state(accessed_ids, session_id,
                                       exempt_types=set((_sysctl("retriever.ior_exempt_types") or "").split(",")),

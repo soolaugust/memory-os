@@ -3162,6 +3162,29 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                             continue
             except Exception:
                 pass
+            # ── iter648: WAL-immune injection timeline (daemon sync) ──────────
+            # 根因：daemon 写入 trace 后 WAL 未 checkpoint → 同一连接的 SELECT 可能
+            #   漏掉刚写入的 trace → _recent_24h/7d_counts 低估 → suppress 失效。
+            # 修复：从 .injection_timeline.json 补充计数（与 retriever.py iter647 共享文件）。
+            _INJECTION_TIMELINE_FILE = os.path.join(MEMORY_OS_DIR, ".injection_timeline.json")
+            try:
+                if os.path.exists(_INJECTION_TIMELINE_FILE):
+                    import json as _itl_json
+                    from datetime import datetime as _dt648, timezone as _tz648, timedelta as _td648
+                    with open(_INJECTION_TIMELINE_FILE, encoding="utf-8") as _itf_r:
+                        _itl_data = _itl_json.loads(_itf_r.read())
+                    _now648 = _dt648.now(_tz648.utc)
+                    _cutoff_24h = (_now648 - _td648(hours=24)).isoformat()
+                    _cutoff_7d = (_now648 - _td648(days=7)).isoformat()
+                    for _cid648, _ts_list in _itl_data.items():
+                        _cnt_7d = sum(1 for t in _ts_list if t > _cutoff_7d)
+                        _cnt_24h = sum(1 for t in _ts_list if t > _cutoff_24h)
+                        if _cnt_24h > _recent_24h_counts.get(_cid648, 0):
+                            _recent_24h_counts[_cid648] = _cnt_24h
+                        if _cnt_7d > _recent_7d_counts.get(_cid648, 0):
+                            _recent_7d_counts[_cid648] = _cnt_7d
+            except Exception:
+                pass
             finally:
                 _rc_conn.close()
         except Exception:
@@ -3817,6 +3840,25 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                         # _get_persistent_ro_conn() handles extractor writes.
                     except Exception:
                         pass
+                    # ── iter648: injection timeline write-back (hard_deadline path) ──
+                    try:
+                        _itl_path_hd = os.path.join(MEMORY_OS_DIR, ".injection_timeline.json")
+                        _itl_ex_hd = {}
+                        if os.path.exists(_itl_path_hd):
+                            with open(_itl_path_hd, encoding="utf-8") as _itf_hd:
+                                _itl_ex_hd = json.loads(_itf_hd.read())
+                        from datetime import timedelta as _td648hd
+                        _now_hd = datetime.now(timezone.utc)
+                        _cut_7d_hd = (_now_hd - _td648hd(days=7)).isoformat()
+                        _itl_p_hd = {k: [t for t in v if t > _cut_7d_hd] for k, v in _itl_ex_hd.items()}
+                        _itl_p_hd = {k: v for k, v in _itl_p_hd.items() if v}
+                        _now_iso_hd = _now_hd.isoformat()
+                        for _aid_hd in accessed_ids:
+                            _itl_p_hd.setdefault(_aid_hd, []).append(_now_iso_hd)
+                        with open(_itl_path_hd, 'w', encoding="utf-8") as _itf_hw:
+                            _itf_hw.write(json.dumps(_itl_p_hd, ensure_ascii=False))
+                    except Exception:
+                        pass
                     _write_shadow_trace(project, accessed_ids, session_id)
             return
 
@@ -4211,6 +4253,29 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 # FTS5-relevant fields (summary/content). Persistent ro conn stays valid.
                 # Only swap_in (new rows in memory_chunks) and extractor (bumps chunk_version)
                 # require invalidation; those paths handle it explicitly.
+            except Exception:
+                pass
+            # ── iter648: injection timeline write-back (daemon sync) ──
+            try:
+                _itl_path = os.path.join(MEMORY_OS_DIR, ".injection_timeline.json")
+                _itl_existing = {}
+                if os.path.exists(_itl_path):
+                    with open(_itl_path, encoding="utf-8") as _itf:
+                        _itl_existing = json.loads(_itf.read())
+                from datetime import timedelta as _td648w
+                _now_ts = datetime.now(timezone.utc).isoformat()
+                _cutoff_7d = (datetime.now(timezone.utc) - _td648w(days=7)).isoformat()
+                _itl_pruned = {}
+                for _k, _v in _itl_existing.items():
+                    _kept = [t for t in _v if t > _cutoff_7d]
+                    if _kept:
+                        _itl_pruned[_k] = _kept
+                for _inj_id in _accessed_ids:
+                    if _inj_id not in _itl_pruned:
+                        _itl_pruned[_inj_id] = []
+                    _itl_pruned[_inj_id].append(_now_ts)
+                with open(_itl_path, 'w', encoding="utf-8") as _itf_w:
+                    _itf_w.write(json.dumps(_itl_pruned, ensure_ascii=False))
             except Exception:
                 pass
             _write_shadow_trace(_project, _shadow_ids, _session_id)
