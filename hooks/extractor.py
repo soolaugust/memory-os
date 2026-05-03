@@ -1200,7 +1200,7 @@ def _is_quality_chunk(summary: str) -> bool:
                 "PA 10/10", "PA 9/10", "PA 8/10", "注入垄断", "injection_timeline",
                 "零访问率", "e2e 测试通过", "production assertions",
                 # iter673: 迭代器工作汇报模式 — "+N/-M 行"改动量报告
-                "改动 +",
+                "改动 +", "改动 -",
                 # iter656: 对话诊断/审计输出碎片 — AI 分析 AIOS 时产出的数据行
                 "边际收益在递减", "存量清理：swap_out", "Active chunks"]
     if any(kw in s for kw in noise_kw):
@@ -1417,7 +1417,10 @@ def _is_quality_chunk(summary: str) -> bool:
         r'daemon|priming|refault|thrash|'
         # iter665: meta_reflection — 迭代器元反思语言
         r'HOT.Tier|MEMORY\.md|memory\.md|Skill.Listing|'
-        r'规则.*有效|复盘|迭代器.*元|元思考|self-improving)',
+        r'规则.*有效|复盘|迭代器.*元|元思考|self-improving|'
+        # iter682: threshold_fix_gate — 迭代器修复阈值/suppress 参数的记录
+        # 根因：'修复：同步两处阈值 24h<2, 7d<3' (ac=1) 逃逸，suppress/阈值各只匹配 0 次
+        r'阈值|24h.{0,6}7d|7d.{0,6}24h)',
         s, re.I
     )
     if len(_SELF_REF_TERMS) >= 2:
