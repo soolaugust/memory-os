@@ -215,9 +215,18 @@ def extract_project_decisions():
     if not proj_dir.exists():
         return chunks
 
+    # iter656: import_iter_self_gate — memory-os 项目自身的迭代记录不导入
+    # 根因（数据驱动，2026-05-04）：13 个 [memory-os/iterXX] chunk 全部 ac=0，
+    #   这些是系统自身实现日志（非用户知识），仅增加 FTS 噪声。
+    _SELF_ITER_PROJECTS = {"memory-os"}
+
     for md_file in sorted(proj_dir.glob("*.md")):
         text = md_file.read_text(encoding="utf-8")
         proj_name = md_file.stem
+
+        # iter656: 跳过 memory-os 自身的迭代记录
+        if proj_name in _SELF_ITER_PROJECTS:
+            continue
 
         # Pattern 1: ### 迭代 N: Title（标题级）
         iter_pattern = re.compile(r'###\s+迭代\s*(\d+)[^:：]*[:：]\s*(.+?)(?:\n|$)')
