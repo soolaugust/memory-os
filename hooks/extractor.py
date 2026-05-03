@@ -1320,6 +1320,19 @@ def _is_quality_chunk(summary: str) -> bool:
         re.search(r'(?:迭代|配置|数据库|索引|缓存|线程|进程|部署|编译|调试|接口|模块|组件|框架|架构|算法|延迟|吞吐|并发|性能|内存|磁盘|网络|协议)', s),
     )
     has_tech = any(_TECH_SIGNALS)
+    # ── iter615: self-referential noise gate — 拒绝 memory-os 自身迭代实现细节 ──
+    # 根因：迭代器在分析/修复注入垄断时生成的 decision/causal_chain（如 "score 降 95%"、
+    # "session_density_gate 按 session 重置"）被写入 store，永远不会被用户检索。
+    # 特征：同时含 ≥2 个 memory-os 内部术语 → 属于自引用噪声。
+    _SELF_REF_TERMS = re.findall(
+        r'(?:inject[_\s]|suppress|score\s*[×*降=]|bandwidth.penalty|session.density|'
+        r'temporal.burst|recall.count|Jaccard|注入门槛|注入量|注入垄断|次注入|'
+        r'access.count|chunk.{0,6}注入|min_rel|retriever|extractor.pool|'
+        r'score.{0,3}0|hard.?cap|hard.?gate|oom_adj)',
+        s, re.I
+    )
+    if len(_SELF_REF_TERMS) >= 2:
+        return False
     if not has_tech:
         # 检测生活域信号
         _LIFE_KEYWORDS = re.search(

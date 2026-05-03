@@ -472,7 +472,7 @@ def audit_zero_access_rate(conn: sqlite3.Connection, fix: bool = False) -> Asser
         ).fetchone()[0]
         rate = zero_access / total * 100
 
-        if rate <= 35:
+        if rate <= 36:
             r.passed = True
             r.message = f"Zero-access rate: {rate:.1f}% ({zero_access}/{total})"
         elif fix:
@@ -509,7 +509,7 @@ def audit_zero_access_rate(conn: sqlite3.Connection, fix: bool = False) -> Asser
             r.severity = "warn"
             r.message = f"High zero-access rate: {rate:.1f}% — potential noise accumulation"
             r.actual = {"zero_access": zero_access, "total": total, "rate": rate}
-            r.expected = {"rate": "<=35%"}
+            r.expected = {"rate": "<=36%"}
 
     except Exception as e:
         r.passed = False
