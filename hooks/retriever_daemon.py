@@ -3611,9 +3611,12 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                         score *= _bw_penalty
             # iter618: 24h + 7d burst suppress（daemon 此前完全缺失）
             # iter619: 阈值收紧 24h:3→2, 7d:8→5
-            if _recent_24h_counts.get(_cid, 0) >= 2:
+            # iter672: relevance_exempt — 高分 chunk 放宽阈值，防 suppress 过杀
+            _s672_24h_t = 3 if score >= 0.5 else 2
+            _s672_7d_t = 5 if score >= 0.5 else 3
+            if _recent_24h_counts.get(_cid, 0) >= _s672_24h_t:
                 score = 0.0
-            elif _recent_7d_counts.get(_cid, 0) >= 3:
+            elif _recent_7d_counts.get(_cid, 0) >= _s672_7d_t:
                 score = 0.0
             # iter622: saturation_absolute_suppress — access_count >= 30 永久 suppress
             elif (chunk[_CI_AC] or 0) >= 30:
@@ -3682,9 +3685,12 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                         score *= _bw_pen_d
             # iter618: 24h + 7d burst suppress（daemon 此前完全缺失）
             # iter619: 阈值收紧 24h:3→2, 7d:8→5
-            if _recent_24h_counts.get(_cid, 0) >= 2:
+            # iter672: relevance_exempt — 高分 chunk 放宽阈值，防 suppress 过杀
+            _s672d_24h_t = 3 if score >= 0.5 else 2
+            _s672d_7d_t = 5 if score >= 0.5 else 3
+            if _recent_24h_counts.get(_cid, 0) >= _s672d_24h_t:
                 score = 0.0
-            elif _recent_7d_counts.get(_cid, 0) >= 3:
+            elif _recent_7d_counts.get(_cid, 0) >= _s672d_7d_t:
                 score = 0.0
             # iter622: saturation_absolute_suppress — access_count >= 30 永久 suppress
             elif (chunk.get("access_count", 0) or 0) >= 30:
@@ -4173,9 +4179,10 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                         continue
                 _sf663d_conn.close()
                 _pre663d = len(top_k)
+                # iter672: relevance_exempt — 高分 chunk 放宽 suppress 阈值
                 top_k = [(s, c) for s, c in top_k
-                         if _rt663d_24h.get(c[_CI_ID], 0) < 2
-                         and _rt663d_7d.get(c[_CI_ID], 0) < 3]
+                         if _rt663d_24h.get(c[_CI_ID], 0) < (3 if s >= 0.5 else 2)
+                         and _rt663d_7d.get(c[_CI_ID], 0) < (5 if s >= 0.5 else 3)]
                 if len(top_k) < _pre663d:
                     _deferred.log(DMESG_WARN, "retriever_daemon",
                                   f"iter663_suppress_final_gate: filtered "

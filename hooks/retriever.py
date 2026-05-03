@@ -2231,15 +2231,20 @@ def main():
             # ── iter614: temporal_burst_suppression — 24h 注入频率 cap ─────────
             # 同一 chunk 在 24h 内注入 >=2 次 → suppress（score=0）
             # iter619: 阈值 3→2，同日看 2 次已足够，第 3 次起 suppress
+            # iter672: relevance_exempt — 高相关性 chunk 放宽阈值，防止 suppress 过杀
+            #   数据驱动：60% trace 输出 0 chunks，高分有价值 chunk 被过早 suppress
             _r24_cnt = _recent_24h_counts.get(chunk.get("id", ""), 0)
-            if _r24_cnt >= 2:
+            _suppress_24h_thresh = 3 if score >= 0.5 else 2  # iter672
+            if _r24_cnt >= _suppress_24h_thresh:
                 score = 0.0
                 _hard_suppressed = True  # iter616
             # ── iter618: 7d_rolling_suppress — 长期慢性垄断 suppress ────────
             # 同一 chunk 在 7 天内注入 >=3 次 → suppress（score=0）
             # iter619: 8→5; iter659: 5→4; iter664: 4→3，数据驱动：7d=4 仍有 2 chunk 垄断
+            # iter672: 高分 chunk 阈值 3→5，低分不变
             _r7d_cnt = _recent_7d_counts.get(chunk.get("id", ""), 0)
-            if _r7d_cnt >= 3:
+            _suppress_7d_thresh = 5 if score >= 0.5 else 3  # iter672
+            if _r7d_cnt >= _suppress_7d_thresh:
                 score = 0.0
                 _hard_suppressed = True
             # ── iter368: Attention Focus Bonus ─────────────────────────────
@@ -2951,9 +2956,10 @@ def main():
             #   实测：import-6cc32f2ff 24h 注入 4 次（应在第 3 次被拦截）。
             # 修复：hard_deadline 路径用闭包变量做零成本兜底。
             if top_k:
+                # iter672: relevance_exempt — 高分 chunk 放宽 suppress 阈值
                 top_k = [(s, c) for s, c in top_k
-                         if _recent_24h_counts.get(c["id"], 0) < 2
-                         and _recent_7d_counts.get(c["id"], 0) < 3]
+                         if _recent_24h_counts.get(c["id"], 0) < (3 if s >= 0.5 else 2)
+                         and _recent_7d_counts.get(c["id"], 0) < (5 if s >= 0.5 else 3)]
             # ── iter670: suppress_fallback — hard_deadline suppress 全灭降级 ──
             if not top_k and _pre_suppress_top_k_hd:
                 _fb_hd = max(_pre_suppress_top_k_hd, key=lambda x: x[0])
@@ -3919,9 +3925,10 @@ def main():
                         continue
                 _sf663_conn.close()
                 _pre663 = len(top_k)
+                # iter672: relevance_exempt — 高分 chunk 放宽 suppress 阈值
                 top_k = [(s, c) for s, c in top_k
-                         if _rt663_24h.get(c["id"], 0) < 2
-                         and _rt663_7d.get(c["id"], 0) < 3]
+                         if _rt663_24h.get(c["id"], 0) < (3 if s >= 0.5 else 2)
+                         and _rt663_7d.get(c["id"], 0) < (5 if s >= 0.5 else 3)]
                 if len(top_k) < _pre663:
                     _deferred.log(DMESG_WARN, "retriever",
                                   f"iter663_suppress_final_gate: filtered "
