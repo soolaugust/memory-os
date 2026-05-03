@@ -1931,6 +1931,12 @@ def _vma_validate(summary: str) -> bool:
         'Skill Listing Budget', 'Adaptive Complexity',
         'Query Expansion 语义', '规则看起来是',
         '触发条件：(a)', '决策值得复盘',
+        # iter683: content_leak_gate — 补充 3 类逃逸的迭代器内部术语
+        # 根因：f53fb4fa("extractor 写入质量加强")、c77ba0d2("suppress/阈值")
+        #   逃过 V5(_code_idents 要求 'extractor.' 带点) 和 V7(无 suppress/阈值)。
+        'suppress', '阈值同步', 'extractor 写入', 'suppress_fallback',
+        '写入质量', '写入拦截', 'final_gate', 'suppress_final',
+        '被成功检索并注入', 'score=0.', 'threshold 0.',
     )
     if any(m in s for m in _MEMORYOS_META):
         return False
