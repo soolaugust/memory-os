@@ -1947,8 +1947,15 @@ def _vma_validate(summary: str) -> bool:
         'suppress', '阈值同步', 'extractor 写入', 'suppress_fallback',
         '写入质量', '写入拦截', 'final_gate', 'suppress_final',
         '被成功检索并注入', 'score=0.', 'threshold 0.',
+        # iter685: chunk_ops_gate — 拦截迭代器 chunk 数量管理报告
+        # 根因：'chunk 数量精简 5%（42→40）' (ac=0) 逃逸，因不含任何已有术语
+        'chunk 数量', 'chunk数量', '精简 ', '清理 chunk',
     )
     if any(m in s for m in _MEMORYOS_META):
+        return False
+    # iter685: chunk_ops_report_gate — 拦截 "N→M" 格式的数量变化报告
+    # 根因：迭代器产出 "42→40" 类量化操作日志，不含已有术语但有明确格式特征
+    if re.search(r'\d+\s*[→→]\s*\d+', s) and re.search(r'chunk|精简|清理|删除|移除', s, re.I):
         return False
     # iter605: 拦截引用具体 chunk ID 的实现笔记（如 "b50e0b54 被注入 87%"）
     if re.search(r'[0-9a-f]{8}.*(?:被注入|注入|injected|rc=|trace)', s):
