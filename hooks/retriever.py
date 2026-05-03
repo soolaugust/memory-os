@@ -2974,13 +2974,12 @@ def main():
                               f"suppressed, fallback to best={_fb_hd[1].get('id','')[:12]}",
                               session_id=session_id, project=project)
             # ── iter677: positive_empty_best_fallback (hard_deadline) ──
+            # iter681: 移除 24h/7d suppress 检查 — 最后防线不应被 suppress 过杀
             if not top_k and final:
                 _pebf_best_hd = final[0]
                 _pebf_score_hd = _pebf_best_hd[0]
                 _pebf_id_hd = _pebf_best_hd[1].get("id", "")
-                if (_pebf_score_hd >= 0.20
-                        and _recent_24h_counts.get(_pebf_id_hd, 0) < 2
-                        and _recent_7d_counts.get(_pebf_id_hd, 0) < 3):
+                if _pebf_score_hd >= 0.20:
                     top_k = [_pebf_best_hd]
                     _deferred.log(DMESG_INFO, "retriever",
                                   f"iter677_positive_empty_best_fallback_hd: "
@@ -3776,7 +3775,9 @@ def main():
             #   安全约束），但当 FTS5 score 全部 < min_thresh 时，constraint 和其他
             #   chunk 一起被淘汰 → 项目约束从未被注入。
             # 修复：positive=[] 时，直接从 DB 取项目 constraint 注入最重要的 1 条。
-            #   受 24h/7d suppress 保护（复用 suppress_final_gate 逻辑），不会垄断。
+            # iter681: 移除 24h/7d suppress 检查 — 此 fallback 是空召回最后防线，
+            #   suppress 过杀导致 67% 空召回（54/80 trace）。空召回 = 系统无价值。
+            #   垄断由上游 _score_chunk suppress + final_gate 控制，fallback 不需二次拦截。
             if not top_k:
                 try:
                     _cef_rows = conn.execute(
@@ -3788,10 +3789,6 @@ def main():
                         _cef_cols = [d[0] for d in conn.execute(
                             "SELECT * FROM memory_chunks LIMIT 0").description]
                         _cef_chunks = [dict(zip(_cef_cols, r)) for r in _cef_rows]
-                        # 过滤已被 24h/7d suppress 的
-                        _cef_chunks = [c for c in _cef_chunks
-                                       if _recent_24h_counts.get(c["id"], 0) < 2
-                                       and _recent_7d_counts.get(c["id"], 0) < 3]
                         if _cef_chunks:
                             _cef_best = _cef_chunks[0]
                             top_k = [(0.99, _cef_best)]
@@ -3810,14 +3807,13 @@ def main():
             #   实测：score 0.25~0.29 的候选有 FTS5 词匹配、有一定相关性，
             #   全部丢弃导致用户从不看到记忆。
             # 修复：从 final 取最高分候选，score >= 0.20 即注入 1 条。
-            #   受 24h/7d suppress 保护，不会垄断。
+            # iter681: 移除 24h/7d suppress 检查 — 与 constraint_fallback 同理，
+            #   此为最后防线。suppress 过杀是 67% 空召回的根因。
             if not top_k and final:
                 _pebf_best = final[0]  # final 已按 score desc 排序
                 _pebf_score = _pebf_best[0]
                 _pebf_id = _pebf_best[1].get("id", "")
-                if (_pebf_score >= 0.20
-                        and _recent_24h_counts.get(_pebf_id, 0) < 2
-                        and _recent_7d_counts.get(_pebf_id, 0) < 3):
+                if _pebf_score >= 0.20:
                     top_k = [_pebf_best]
                     _deferred.log(DMESG_INFO, "retriever",
                                   f"iter677_positive_empty_best_fallback: "
