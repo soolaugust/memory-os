@@ -3084,6 +3084,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
         #   retriever.py 在 iter565 已用独立标准连接修复；daemon 路径遗漏。
         # 修复：用独立标准连接加载 recall_counts，确保看到最新 traces。
         _recall_counts = {}
+        _recent_24h_counts = {}  # iter630: hoist defaults outside try — NameError if connect() fails
+        _recent_7d_counts = {}   # iter630: same — suppress must degrade to no-op, not crash
         _effective_bw_window = 30
         _local_bw_window = 30  # iter610: fallback
         try:
@@ -4002,6 +4004,15 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                         pass
                 return
 
+        # ── iter630: monopoly_post_filter — 不可绕过的最终门禁 ──────────────
+        # 根因：评分阶段的 suppress（24h/7d/AC>=30）可能因查询失败、缓存、
+        #   或 forced_constraint 路径逃逸。此 post-filter 直接读 chunk 字段，
+        #   不依赖外部查询，是所有路径的最终汇聚点。
+        # 条件：access_count >= 30 的 chunk 不得出现在最终注入列表中。
+        _pre_postfilter = len(top_k)
+        top_k = [(s, c) for s, c in top_k if (c[_CI_AC] or 0) < 30]
+        if not top_k:
+            return
         top_k_ids = sorted([c[_CI_ID] for _, c in top_k])  # iter235
         # iter217: crc32 faster than md5 (~0.712us vs ~1.107us, same 8-char hex format)
         current_hash = '%08x' % zlib.crc32("|".join(top_k_ids).encode())

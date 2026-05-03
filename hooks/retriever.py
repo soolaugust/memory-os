@@ -1625,6 +1625,7 @@ def main():
         # 修复：用独立的标准 WAL 连接加载 recall_counts，确保看到最新 traces。
         _recall_counts = {}
         _recent_24h_counts = {}  # iter614: temporal_burst_suppression
+        _recent_7d_counts = {}   # iter630: hoist default outside try — prevent NameError on connect failure
         _local_bw_window = 30  # iter610: fallback if outer try fails
         try:
             import sqlite3 as _rc_sql
@@ -2831,6 +2832,8 @@ def main():
             if _sysctl("retriever.mmr_enabled") and len(top_k) > 1:
                 top_k = _mmr_rerank(top_k, effective_top_k,
                                     lambda_mmr=_sysctl("retriever.mmr_lambda"))
+            # ── iter630: monopoly_post_filter — hard_deadline 路径最终门禁 ──
+            top_k = [(s, c) for s, c in top_k if (c.get("access_count", 0) or 0) < 30]
             if top_k:
                 # 快速路径：直接组装输出
                 top_k_ids = sorted([c["id"] for _, c in top_k])
@@ -3718,6 +3721,10 @@ def main():
             except Exception:
                 pass  # scan_unevictable 失败不阻塞主流程
 
+        # ── iter630: monopoly_post_filter — FULL 路径最终门禁 ──
+        top_k = [(s, c) for s, c in top_k if (c.get("access_count", 0) or 0) < 30]
+        if not top_k:
+            return
         top_k_ids = sorted([c["id"] for _, c in top_k])
         current_hash = hashlib.md5("|".join(top_k_ids).encode()).hexdigest()[:8]
 
