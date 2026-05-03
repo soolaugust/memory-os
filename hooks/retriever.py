@@ -4023,6 +4023,16 @@ def main():
                     _dedup_top_k.append((_score, _chunk))
             if _iter359_dedup_count > 0:
                 top_k = _dedup_top_k
+        # ── iter671: dedup_empty_guard — dedup 后 top_k 为空时 early exit ──
+        # 根因（数据驱动，2026-05-04）：suppress_fallback 给出 1 条 chunk，
+        #   但该 chunk 在同 session 已被注入 >= threshold 次 → dedup 移除 → top_k=[]
+        #   → 后续无条件 print(output) 注入只有 header 没有知识的空内容
+        #   → _write_trace injected=1 但 top_k=[] → 污染 recall_traces 统计。
+        #   实测：37/60 (62%) injected=1 trace 实际注入 0 条 chunk。
+        # 修复：dedup 后 top_k 为空 → 视为"无有效知识"，不注入、不记录。
+        if not top_k:
+            conn.close()
+            return
         # ─────────────────────────────────────────────────────────────────────
 
         # 迭代100：置信度标识（OS 类比：ECC status bit per cache line）
