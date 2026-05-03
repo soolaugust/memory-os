@@ -460,7 +460,10 @@ def audit_zero_access_rate(conn: sqlite3.Connection, fix: bool = False) -> Asser
     t0 = time.time()
 
     try:
-        total = conn.execute("SELECT COUNT(*) FROM memory_chunks").fetchone()[0]
+        # iter628: 只统计 ACTIVE chunk，suppress 的已被排除不参与检索
+        total = conn.execute(
+            "SELECT COUNT(*) FROM memory_chunks WHERE chunk_state='ACTIVE'"
+        ).fetchone()[0]
         if total == 0:
             r.passed = True
             r.message = "Empty DB"
@@ -468,7 +471,7 @@ def audit_zero_access_rate(conn: sqlite3.Connection, fix: bool = False) -> Asser
             return r
 
         zero_access = conn.execute(
-            "SELECT COUNT(*) FROM memory_chunks WHERE access_count=0"
+            "SELECT COUNT(*) FROM memory_chunks WHERE access_count=0 AND chunk_state='ACTIVE'"
         ).fetchone()[0]
         rate = zero_access / total * 100
 
