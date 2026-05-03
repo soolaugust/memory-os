@@ -563,39 +563,12 @@ def main():
             pass  # per-turn citation 失败不影响主流程
         # 迭代91: 检测长期目标表达并持久化
         _detect_and_persist_goal(prompt, project, session_id)
-        topic = _extract_prompt_topic(prompt)
-        if topic:
-            # 迭代58 KSM dedup：exact match → skip, similar → merge, else → insert
-            conn = open_db()
-            try:
-                ensure_schema(conn)
-                if already_exists(conn, topic, chunk_type="prompt_context"):
-                    dmesg_log(conn, DMESG_DEBUG, "writer",
-                              f"ksm_skip: prompt_context exact dup '{topic[:40]}'",
-                              session_id=session_id, project=project)
-                    conn.commit()
-                elif merge_similar(conn, topic, "prompt_context", 0.5):
-                    dmesg_log(conn, DMESG_DEBUG, "writer",
-                              f"ksm_merge: prompt_context similar '{topic[:40]}'",
-                              session_id=session_id, project=project)
-                    conn.commit()
-                else:
-                    conn.close()
-                    conn = None
-                    ctx_chunk = MemoryChunk(
-                        project=project,
-                        source_session=session_id,
-                        chunk_type="prompt_context",
-                        content=f"用户话题：{topic}",
-                        summary=topic,
-                        tags=["prompt_context", project],
-                        importance=0.5,
-                        retrievability=0.15,
-                    )
-                    _write_sqlite(ctx_chunk)
-            finally:
-                if conn:
-                    conn.close()
+        # iter646: suppress_prompt_context_write — 停止写入 prompt_context chunk
+        # 数据驱动（2026-05-03）：全部 2 个 prompt_context chunk 零访问。
+        # 原因：prompt 话题过于碎片化（"继续看rethinking"/"迭代agent"），
+        #   不含可复用领域知识，FTS5 检索时仅增加噪声候选。
+        # extractor_pool._EPHEMERAL_TYPES 已拦截该类型，但 writer.py 有独立写入路径。
+        # 修复：直接跳过，不再写入。topic 信息已存在于 session_intents 表。
 
     # ── 迭代109: 输出 additionalContext（压力通知）──────────────────────
     if pressure_notice:
