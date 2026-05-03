@@ -1960,6 +1960,14 @@ def _vma_validate(summary: str) -> bool:
     # iter605: 拦截引用具体 chunk ID 的实现笔记（如 "b50e0b54 被注入 87%"）
     if re.search(r'[0-9a-f]{8}.*(?:被注入|注入|injected|rc=|trace)', s):
         return False
+    # iter687: truncated_fragment_gate — 截断碎片拦截
+    # 根因（数据驱动，2026-05-04）：'daemon 工作 → 没人发现）'（17 chars）逃逸所有 gate。
+    # 特征：不完整括号结尾 / 箭头结尾 + 短句（<60 chars）= 从长文中误截取的碎片。
+    if len(s) < 60:
+        if re.search(r'[）)】》]$', s) and not re.search(r'[（(【《]', s):
+            return False
+        if s.endswith('→') or s.endswith('->'):
+            return False
     return True
 
 
