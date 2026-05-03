@@ -1981,6 +1981,12 @@ def main():
                 _rc_ee = _recall_counts.get(chunk.get("id", ""), 0)
                 if _rc_ee > 0 and _rc_ee / _local_bw_window > (_sysctl("retriever.constraint_inject_hard_cap") or 0.30):
                     return 0.0
+                # iter617: early exit 也必须检查 24h_burst_suppression
+                # 根因：高 importance chunk (0.9) 走 early exit 返回 0.09，跳过 2084 行的
+                #   24h suppress → feishu CLI 7天12次注入全部逃逸（每次不同 session）。
+                _r24_ee = _recent_24h_counts.get(chunk.get("id", ""), 0)
+                if _r24_ee >= 3:
+                    return 0.0
                 return float(chunk.get("importance", 0.5)) * 0.1  # 极低相关性：快速降权
             # 迭代322: Query-Conditioned Importance — 动态 α
             # OS 类比：CPUFreq P-state — 高负载（高 relevance）降低 importance 依赖；
@@ -3298,6 +3304,9 @@ def main():
             _session_constraint_cap = 2
             def _ac_gated(c):
                 _cid = c.get("id", "")
+                # iter617: 24h burst suppress 也在 constraint 通道生效
+                if _recent_24h_counts.get(_cid, 0) >= 3:
+                    return False
                 # iter608: session-level constraint dedup — 早于全局 cap 拦截
                 _sinj = _session_injection_counts.get(_cid, 0)
                 if _sinj >= _session_constraint_cap:
