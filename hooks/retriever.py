@@ -2961,10 +2961,10 @@ def main():
             #   实测：import-6cc32f2ff 24h 注入 4 次（应在第 3 次被拦截）。
             # 修复：hard_deadline 路径用闭包变量做零成本兜底。
             if top_k:
-                # iter672: relevance_exempt — 高分 chunk 放宽 suppress 阈值
+                # iter676: 统一阈值，不再给高分 chunk 豁免（iter672 relevance_exempt 已 revert）
                 top_k = [(s, c) for s, c in top_k
-                         if _recent_24h_counts.get(c["id"], 0) < (3 if s >= 0.5 else 2)
-                         and _recent_7d_counts.get(c["id"], 0) < (5 if s >= 0.5 else 3)]
+                         if _recent_24h_counts.get(c["id"], 0) < 2
+                         and _recent_7d_counts.get(c["id"], 0) < 3]
             # ── iter670: suppress_fallback — hard_deadline suppress 全灭降级 ──
             if not top_k and _pre_suppress_top_k_hd:
                 _fb_hd = max(_pre_suppress_top_k_hd, key=lambda x: x[0])
@@ -3997,10 +3997,10 @@ def main():
                         continue
                 _sf663_conn.close()
                 _pre663 = len(top_k)
-                # iter672: relevance_exempt — 高分 chunk 放宽 suppress 阈值
+                # iter676: 统一阈值，不再给高分 chunk 豁免（iter672 relevance_exempt 已 revert）
                 top_k = [(s, c) for s, c in top_k
-                         if _rt663_24h.get(c["id"], 0) < (3 if s >= 0.5 else 2)
-                         and _rt663_7d.get(c["id"], 0) < (5 if s >= 0.5 else 3)]
+                         if _rt663_24h.get(c["id"], 0) < 2
+                         and _rt663_7d.get(c["id"], 0) < 3]
                 if len(top_k) < _pre663:
                     _deferred.log(DMESG_WARN, "retriever",
                                   f"iter663_suppress_final_gate: filtered "
