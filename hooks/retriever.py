@@ -3413,12 +3413,23 @@ def main():
             #   同一 constraint 在 session 内被注入 4-10 次才被 dedup 拦截（threshold*2）。
             # 修复：constraint 在当前 session 已注入 ≥ 2 次 → 直接 suppress。
             _session_constraint_cap = 2
+            # iter641: live ac for constraint gate — 绕过 chunk dict WAL 盲区
+            _constraint_live_ac = _live_access_counts(
+                [c.get("id", "") for c in _extra_constraints]
+            ) if _extra_constraints else {}
             def _ac_gated(c):
                 _cid = c.get("id", "")
-                # iter622: access_count >= 30 永久 suppress（constraint 通道同步）
-                # 阈值 50→30，与主路径同步（仅 ac=89/46 两个垄断 chunk 受影响）
-                _ac_abs = c.get("access_count", 0) or 0
-                if _ac_abs >= 30:
+                # iter641: constraint_ac_cap — 强制注入通道更严格的 ac 阈值
+                # 根因（数据驱动，2026-05-03）：b50e0b54 在 5/2 从 ac=4 增长到 ac=46，
+                #   主路径 ac>=30 需要 ~26 次注入才触发。constraint 通道 score=0.99
+                #   绕过主路径打分，只受 _ac_gated 控制。
+                #   24h_burst(>=2) 依赖 recall_traces WAL 可见性，实测 5/2 连续 12 次
+                #   INJECTED 说明 _recent_24h_counts 可能因 WAL/timing 不完整。
+                # 修复：constraint 通道 ac 阈值 30→15（用 live ac 绕过 WAL）。
+                #   数据验证：11 个 design_constraint 中只有 ac=89/46 超 15，
+                #   ac=11 (9a1c5b4f) 仍可通过。
+                _ac_abs = _constraint_live_ac.get(_cid, c.get("access_count", 0) or 0)
+                if _ac_abs >= 15:
                     return False
                 # iter617: 24h burst suppress 也在 constraint 通道生效
                 # iter619: 阈值收紧 24h:3→2, 7d:8→5
@@ -3440,19 +3451,16 @@ def main():
                 # iter598: zero relevance gate — 与 query 零词重叠的 constraint 无条件拦截
                 if _rel == 0:
                     return False
-                _ac = c.get("access_count", 0) or 0
-                # iter611: two_phase_relevance_gate — ac>30 加速衰减防垄断
-                # 根因：iter609 penalty 上限 0.20 太低（ac=89 → 0.175），
-                #   3192147e/b50e0b54 占 28% 注入量仍未被有效抑制。
-                # 修复：ac≤30 保持原逻辑；ac>30 切入更陡斜率，上限 0.40。
-                #   效果：ac=46→thresh=0.42, ac=89→thresh=0.45（近乎精准匹配才注入）
+                _ac = _ac_abs
+                # iter641: two_phase_relevance_gate — 阈值与 constraint_ac_cap 对齐
+                # ac>15 进入陡斜率（constraint 通道比主路径更严格）
                 import math as _m609
                 if _ac <= 10:
                     _ac_penalty = 0.0
-                elif _ac <= 30:
+                elif _ac <= 15:
                     _ac_penalty = min(0.20, _m609.log1p(_ac - 10) * 0.04)
                 else:
-                    _ac_penalty = 0.20 + min(0.20, _m609.log1p(_ac - 30) * 0.06)
+                    _ac_penalty = 0.20 + min(0.20, _m609.log1p(_ac - 15) * 0.06)
                 _eff_min_rel = _constraint_min_rel + _ac_penalty
                 if _rel < _eff_min_rel:
                     return False
