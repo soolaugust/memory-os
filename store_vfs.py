@@ -1826,6 +1826,12 @@ def get_chunks(conn: sqlite3.Connection, project: str,
 # 设计：最小化检查（O(1) regex），只拦截明显碎片，不做语义判断。
 # 语义判断留给上层（extractor/_is_quality_chunk），VFS 层只做"物理完整性"。
 import re as _re_vfs
+_RE_VFS_SELFREF = _re_vfs.compile(
+    r'(?:suppress|inject|score\s*[×*降=]|bandwidth|recall.count|'
+    r'access.count|hard.?cap|hard.?gate|oom_adj|zero.access|'
+    r'垄断|逃逸|burst|saturation|注入|chunk.{0,4}注入)',
+    _re_vfs.IGNORECASE
+)
 
 def _vfs_write_protect(summary: str) -> bool:
     """
@@ -1859,6 +1865,14 @@ def _vfs_write_protect(summary: str) -> bool:
     if s[0] in ('|', ')', ']', '}', '>', '+', '=', '：', '）', '】', '》',
                 ',', '，', '、', ';', '；'):
         return True
+    # iter629: markdown list-item fragment — "- xxx" / "* xxx" / "[ ] xxx"
+    # 根因：extractor._is_quality_chunk 拦截 ^[\[\]\-|]，但 direct/MCP 写入路径
+    #   绕过 extractor 直达 insert_chunk。实测："- 啃食水稻秧苗" (ac=1) 经此逃逸。
+    # 修复：在 VFS 层同步拦截 markdown 列表项开头（与 extractor 对齐）。
+    if s[0] in ('-', '*') and len(s) > 1 and s[1] == ' ':
+        return True
+    if s.startswith('[ ]') or s.startswith('[x]') or s.startswith('[X]'):
+        return True
     # markdown 表格行（>= 2 个管道符）
     if s.count('|') >= 2:
         return True
@@ -1867,6 +1881,12 @@ def _vfs_write_protect(summary: str) -> bool:
         return True
     # 纯数字/符号行
     if _re_vfs.match(r'^[\d\s.,:;/×\-+=%]+$', s):
+        return True
+    # iter629: self-referential noise gate (VFS 层同步, 仅短文本)
+    # 根因：extractor._is_quality_chunk 有 self-ref 检测，但 direct/MCP 写入绕过。
+    # 实测："suppress chunk"(14B)、"量化改善：zero_access rate 36%→29%"(46B) 漏网。
+    # 修复：<80 字符短文本检测 memory-os 内部术语 ≥2 个 → 拒绝。长文本跳过（性能）。
+    if len(s) < 80 and len(_RE_VFS_SELFREF.findall(s)) >= 2:
         return True
     return False
 

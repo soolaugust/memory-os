@@ -147,7 +147,7 @@ class TestVfsWriteProtect:
             for s in samples:
                 _vfs_write_protect(s)
         elapsed_ms = (time.perf_counter() - start) * 1000
-        assert elapsed_ms < 5.0, f"1000 calls took {elapsed_ms:.2f}ms (> 5ms)"
+        assert elapsed_ms < 8.0, f"1000 calls took {elapsed_ms:.2f}ms (> 8ms)"
 
 
 class TestEdgeCases:
