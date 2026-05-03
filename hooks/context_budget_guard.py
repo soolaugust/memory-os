@@ -262,6 +262,39 @@ def _db_vacuum(db_path: Path):
         except Exception:
             pass
 
+        # iter654: iter_chunk_swap_gc — 清理存量 memory-os 迭代记录 chunk
+        # 根因：extractor 的 import_meta_gate（iter651）阻止新写入，但门禁前已导入的
+        #   15 个 [memory-os/iterN] chunk 仍占用主表。这些是迭代器自身实现细节
+        #   （DAMON、KSM Dedup、TLB Flush 等 OS 类比特性），对用户无记忆价值。
+        #   实测：ac<=2（仅导入时自动访问），从未被用户主动检索使用。
+        # 安全性：swap out（非删除），可通过 swap_in 恢复；只清理 ac<=2。
+        try:
+            _iter_ids = [r[0] for r in conn.execute("""
+                SELECT id FROM memory_chunks
+                WHERE summary LIKE '%memory-os/iter%' AND access_count <= 2
+            """).fetchall()]
+            if _iter_ids:
+                from store_swap import swap_out as _swap_out
+                _swap_result = _swap_out(conn, _iter_ids)
+                freed_total += _swap_result.get("swapped_count", 0)
+                # 清理 recall_traces 中指向已 swap out chunk 的 stale refs
+                _swapped_set = set(_iter_ids)
+                _existing_ids = set(r[0] for r in conn.execute(
+                    "SELECT id FROM memory_chunks").fetchall())
+                for (_tid, _tkj) in conn.execute(
+                        "SELECT id, top_k_json FROM recall_traces WHERE top_k_json IS NOT NULL"
+                ).fetchall():
+                    try:
+                        _items = json.loads(_tkj)
+                        _filtered = [i for i in _items if i.get("id") in _existing_ids]
+                        if len(_filtered) < len(_items):
+                            conn.execute("UPDATE recall_traces SET top_k_json=? WHERE id=?",
+                                         (json.dumps(_filtered), _tid))
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
         # B15: FTS orphan cleanup + rowid 对齐检查
         # 问题：FTS5 里存在 rowid_ref 指向已删除 memory_chunks 行的孤立记录（实测 7 条），
         #   导致 FTS JOIN 返回 NULL 行、search 结果异常。
