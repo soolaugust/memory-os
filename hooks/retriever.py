@@ -3195,18 +3195,24 @@ def main():
             _bw_window = _sysctl("scorer.bw_window") or 30
             _pre_gate_count = len(_extra_constraints)
             # iter595: access_count monopoly gate — 高频访问 chunk 提高 relevance 门槛
-            # 根因：recall_counts 依赖 traces 表，traces 少/空时 thrash gate 失效。
-            # access_count 是持久累计值，access=89 的 chunk 被注入 75% 是垄断。
-            # 修复：access_count > 20 时每多 30 次访问，min_relevance 门槛 +0.05
-            # 效果：access=89 → penalty=0.10, 门槛从 0.05 升到 0.15
+            # iter596: inject_hard_cap — 注入频率硬上限
+            # 根因：高 relevance constraint（如 Jaccard > 0.3）绕过 ac_penalty 和 thrash gate，
+            #   同一 chunk 24h 内注入 12/15=80%，挤占其他知识的注入位。
+            # 修复：recall_count/effective_window > hard_cap(0.50) 时无条件 suppress。
+            _inject_hard_cap = _sysctl("retriever.constraint_inject_hard_cap")
             def _ac_gated(c):
+                _cid = c.get("id", "")
+                _rc = _recall_counts.get(_cid, 0)
+                # hard cap: 注入频率超 50% 直接 suppress，不论 relevance
+                if _rc / max(_effective_bw_window, 1) > _inject_hard_cap:
+                    return False
                 _rel = _constraint_relevance(c)
                 _ac = c.get("access_count", 0) or 0
                 _ac_penalty = max(0, (_ac - 20)) / 30.0 * 0.05
                 _eff_min_rel = _constraint_min_rel + _ac_penalty
                 if _rel < _eff_min_rel:
                     return False
-                return (_recall_counts.get(c.get("id", ""), 0) / max(_bw_window, 1)) <= _thrash_max_pct
+                return (_rc / max(_bw_window, 1)) <= _thrash_max_pct
             _extra_constraints = [c for c in _extra_constraints if _ac_gated(c)]
             _gated_count = _pre_gate_count - len(_extra_constraints)
             if _gated_count > 0:
@@ -3579,7 +3585,14 @@ def main():
                 _ctype = _chunk.get("chunk_type", "")
                 _inj_cnt = _session_injection_counts.get(_cid, 0)
                 # iter587: design_constraint 使用宽松阈值（不再无条件豁免）
-                _effective_threshold = _constraint_dedup_threshold if _ctype == "design_constraint" else _iter359_dedup_threshold
+                # iter596: 高频 constraint (ac>30) 降回 1× — 已被用户内化，无需反复注入
+                _ac = _chunk.get("access_count", 0) or 0
+                if _ctype == "design_constraint" and _ac > 30:
+                    _effective_threshold = _iter359_dedup_threshold  # 1× — 同普通 chunk
+                elif _ctype == "design_constraint":
+                    _effective_threshold = _constraint_dedup_threshold  # 2× — 低频约束仍宽松
+                else:
+                    _effective_threshold = _iter359_dedup_threshold
                 if _inj_cnt >= _effective_threshold:
                     _iter359_dedup_count += 1
                     # 迭代29 dmesg 延迟日志

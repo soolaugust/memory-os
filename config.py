@@ -2814,7 +2814,7 @@ _REGISTRY: dict = {
         "TLB entry 最大存活代数（generation gap >= 此值时强制 miss，保证 scan_unevictable 有执行机会）"),
 
     # ── Memory Zones（迭代82）──
-    "retriever.exclude_types": ("prompt_context", str, None, None, None,
+    "retriever.exclude_types": ("prompt_context,conversation_summary", str, None, None, None,
         "逗号分隔的 chunk_type 列表，从检索候选中排除（OS 类比：Linux ZONE_RESERVED）"),
 
     # ── iter427：Serial Position Effect（Murdock 1962）──
@@ -3220,6 +3220,8 @@ _REGISTRY: dict = {
         "design_constraint 强制注入的最低 Jaccard 相关性门槛（iter543：低于此值视为 refault_distance 过远，不注入）"),
     "retriever.constraint_thrash_max_pct": (0.20, float, 0.1, 0.8, None,
         "design_constraint 跨 query 出现率超此比例时触发 thrash dampener，降低注入优先级（iter543; iter587: 0.40→0.20 收紧反垄断）"),
+    "retriever.constraint_inject_hard_cap": (0.50, float, 0.2, 0.9, None,
+        "design_constraint 注入频率硬上限：recall_count/effective_window > 此值时无条件 suppress，不论 relevance 多高（iter596）"),
 
     # ── iter544: trim_shadow_entries — Shadow Entry Expiry & Stale Ref Scrub ──
     # OS 类比：Linux shadow_lru_isolate() (Johannes Weiner, 2013, mm/workingset.c)
