@@ -8087,7 +8087,8 @@ def find_spaced_review_candidates(
         rows = conn.execute(
             """
             SELECT mc.id, mc.summary, mc.chunk_type, mc.importance,
-                   mc.last_accessed, COALESCE(mc.stability, 1.0) AS stability
+                   mc.last_accessed, COALESCE(mc.stability, 1.0) AS stability,
+                   COALESCE(mc.access_count, 0) AS access_count
             FROM memory_chunks mc
             WHERE mc.project = ?
               AND COALESCE(mc.importance, 0) >= ?
@@ -8109,7 +8110,7 @@ def find_spaced_review_candidates(
 
     candidates = []
     for row in rows:
-        cid, summary, ctype, importance, last_accessed, stability = row
+        cid, summary, ctype, importance, last_accessed, stability, access_count = row
         try:
             _la = _dt.datetime.fromisoformat(last_accessed.replace("Z", "+00:00"))
             _now = _dt.datetime.now(_dt.timezone.utc)
@@ -8128,6 +8129,7 @@ def find_spaced_review_candidates(
             "chunk_type": ctype or "",
             "importance": importance or 0.7,
             "last_accessed": last_accessed,
+            "access_count": access_count,
             "stability": stability,
             "urgency": round(urgency, 4),
             "days_overdue": round(days_since - stability, 2),

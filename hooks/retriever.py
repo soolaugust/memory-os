@@ -3095,10 +3095,11 @@ def main():
                 for _sc in _spacing_candidates:
                     if _sc["id"] not in _existing_ids_spacing:
                         # score = 基础评分 + urgency 修正（urgency 越低越迫切，score 取中等值）
+                        _sc_ac = _sc.get("access_count", 0) or 0
                         _sc_score = _unified_retrieval_score(
                             relevance=0.2, importance=_sc["importance"],
                             last_accessed=_sc["last_accessed"],
-                            access_count=0,
+                            access_count=_sc_ac,
                             chunk_id=_sc["id"], query_seed=prompt,
                             chunk_project=project,
                             current_project=project,
@@ -3109,7 +3110,7 @@ def main():
                             "chunk_type": _sc["chunk_type"],
                             "importance": _sc["importance"],
                             "last_accessed": _sc["last_accessed"],
-                            "access_count": 0,
+                            "access_count": _sc_ac,
                             "embedding": "[]", "tags": "[]",
                             "spacing_review": True,
                             "days_overdue": _sc.get("days_overdue", 0),
