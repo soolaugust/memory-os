@@ -3194,15 +3194,24 @@ def main():
             # recall_count/window > thrash_max_pct → 该 constraint 是 cache polluter
             _bw_window = _sysctl("scorer.bw_window") or 30
             _pre_gate_count = len(_extra_constraints)
-            _extra_constraints = [
-                c for c in _extra_constraints
-                if _constraint_relevance(c) >= _constraint_min_rel
-                and (_recall_counts.get(c.get("id", ""), 0) / max(_bw_window, 1)) <= _thrash_max_pct
-            ]
+            # iter595: access_count monopoly gate — 高频访问 chunk 提高 relevance 门槛
+            # 根因：recall_counts 依赖 traces 表，traces 少/空时 thrash gate 失效。
+            # access_count 是持久累计值，access=89 的 chunk 被注入 75% 是垄断。
+            # 修复：access_count > 20 时每多 30 次访问，min_relevance 门槛 +0.05
+            # 效果：access=89 → penalty=0.10, 门槛从 0.05 升到 0.15
+            def _ac_gated(c):
+                _rel = _constraint_relevance(c)
+                _ac = c.get("access_count", 0) or 0
+                _ac_penalty = max(0, (_ac - 20)) / 30.0 * 0.05
+                _eff_min_rel = _constraint_min_rel + _ac_penalty
+                if _rel < _eff_min_rel:
+                    return False
+                return (_recall_counts.get(c.get("id", ""), 0) / max(_bw_window, 1)) <= _thrash_max_pct
+            _extra_constraints = [c for c in _extra_constraints if _ac_gated(c)]
             _gated_count = _pre_gate_count - len(_extra_constraints)
             if _gated_count > 0:
                 _deferred.log(DMESG_DEBUG, "retriever",
-                              f"refault_distance: gated={_gated_count} (min_rel={_constraint_min_rel} thrash_max={_thrash_max_pct})",
+                              f"refault_distance: gated={_gated_count} (min_rel={_constraint_min_rel} thrash_max={_thrash_max_pct} ac_gate=iter595)",
                               session_id=session_id, project=project)
 
             # ── 迭代337：Jaccard 内容重叠过滤 ──

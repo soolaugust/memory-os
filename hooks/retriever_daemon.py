@@ -3776,11 +3776,15 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             _thrash_max_pct = sysctl("retriever.constraint_thrash_max_pct")
             _bw_window = sysctl("scorer.bw_window") or 30
             _pre_gate = len(_extra_constraints)
-            _extra_constraints = [
-                c for c in _extra_constraints
-                if _constraint_relevance(c) >= _constraint_min_rel
-                and (_recall_counts.get(c[_CI_ID], 0) / max(_bw_window, 1)) <= _thrash_max_pct
-            ]
+            # iter595: access_count monopoly gate — 高频访问 chunk 提高 relevance 门槛
+            def _ac_gated_d(c):
+                _rel = _constraint_relevance(c)
+                _ac = c[_CI_AC] or 0
+                _ac_penalty = max(0, (_ac - 20)) / 30.0 * 0.05
+                if _rel < _constraint_min_rel + _ac_penalty:
+                    return False
+                return (_recall_counts.get(c[_CI_ID], 0) / max(_bw_window, 1)) <= _thrash_max_pct
+            _extra_constraints = [c for c in _extra_constraints if _ac_gated_d(c)]
             # ── iter584: Jaccard content dedup — skip constraints redundant with top_k ──
             # OS 类比：KSM (Kernel Samepage Merging) — 内容相同的页面合并为 COW，不重复映射。
             _top_k_token_sets = []
