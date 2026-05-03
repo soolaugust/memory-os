@@ -3820,8 +3820,23 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             _pre_gate = len(_extra_constraints)
             # iter595+596+598: access_count monopoly gate + inject_hard_cap + zero_relevance
             _inject_hard_cap = sysctl("retriever.constraint_inject_hard_cap")
+            # iter608: session_constraint_cap — 从 session injection file 读取计数
+            _d_session_inj_counts = {}
+            _d_session_cap = 2
+            try:
+                _d_sij_path = os.path.join(MEMORY_OS_DIR, ".last_session_injections.json")
+                if os.path.exists(_d_sij_path):
+                    with open(_d_sij_path, encoding="utf-8") as _dsf:
+                        _dsij = json.loads(_dsf.read())
+                        if _dsij.get("session_id") == session_id:
+                            _d_session_inj_counts = _dsij.get("counts", {})
+            except Exception:
+                pass
             def _ac_gated_d(c):
                 _cid = c[_CI_ID]
+                # iter608: session-level constraint dedup
+                if _d_session_inj_counts.get(_cid, 0) >= _d_session_cap:
+                    return False
                 _rc = _recall_counts.get(_cid, 0)
                 # iter596: hard cap — 注入频率超阈值无条件 suppress
                 if _rc / max(_effective_bw_window, 1) > _inject_hard_cap:

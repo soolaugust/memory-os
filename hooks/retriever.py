@@ -3229,8 +3229,18 @@ def main():
             #   1. Jaccard 严格为 0 → 无条件拦截（不依赖 min_relevance 阈值配置）
             #   2. hard_cap 从 0.50 降至 0.30，与 thrash_max_pct(0.20) 更紧密对齐
             _inject_hard_cap = _sysctl("retriever.constraint_inject_hard_cap")
+            # iter608: session_constraint_cap — 同 session 内同一 constraint 注入上限
+            # 根因：_ac_gated 的全局 hard_cap 依赖 recall_count 累积到阈值才生效，
+            #   但单次长 session（如 memory-os 迭代 agent）可连续触发多次 retrieval，
+            #   同一 constraint 在 session 内被注入 4-10 次才被 dedup 拦截（threshold*2）。
+            # 修复：constraint 在当前 session 已注入 ≥ 2 次 → 直接 suppress。
+            _session_constraint_cap = 2
             def _ac_gated(c):
                 _cid = c.get("id", "")
+                # iter608: session-level constraint dedup — 早于全局 cap 拦截
+                _sinj = _session_injection_counts.get(_cid, 0)
+                if _sinj >= _session_constraint_cap:
+                    return False
                 _rc = _recall_counts.get(_cid, 0)
                 # hard cap: 注入频率超阈值直接 suppress，不论 relevance
                 if _rc / max(_effective_bw_window, 1) > _inject_hard_cap:
