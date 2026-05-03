@@ -1193,7 +1193,12 @@ def _is_quality_chunk(summary: str) -> bool:
         return False
     noise_kw = ["← project 字段", "(importance=", "Stop extractor", "路径被重复写入",
                 "【相关历史", "hookSpecificOutput", "additionalContext",
-                "chunk_count", "recall_traces"]
+                "chunk_count", "recall_traces",
+                # iter649: 迭代器自身度量/诊断记录 — 这些是 memory-os 迭代器
+                # 写入的内部诊断信息（suppress 效果、注入统计、PA 通过率），
+                # 对用户零价值且占用 FTS 和 Top-K 槽位
+                "PA 10/10", "PA 9/10", "PA 8/10", "注入垄断", "injection_timeline",
+                "零访问率", "e2e 测试通过"]
     if any(kw in s for kw in noise_kw):
         return False
     placeholders = {"方案 X 是最优解", "extractor 升级", "KnowledgeRouter"}
