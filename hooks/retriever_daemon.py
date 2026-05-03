@@ -3731,6 +3731,12 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             max_rank = fts_results[0][_CI_FR]  # iter235: positional tuple access
             if max_rank <= 0:
                 max_rank = 1.0
+            # iter684: FTS5 raw_relevance_gate — 与 BM25 路径对齐
+            # FTS5 rank 单位不同于 BM25 raw score，但经验阈值：
+            #   真正相关 rank > 5.0（飞书=21, Android=15, sched=8）
+            #   噪声匹配 rank < 4.0（通用bigram重叠=2-3）
+            if max_rank < 5.0:
+                return
             # iter198: list comprehension replaces for loop (6.06us → ~2us, 10 chunks)
             # set comprehension replaces per-iteration set.add() (combined: ~2.09us total)
             # iter235: chunk[_CI_ID]/chunk[_CI_FR] — positional tuple access

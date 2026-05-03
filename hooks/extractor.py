@@ -1420,7 +1420,10 @@ def _is_quality_chunk(summary: str) -> bool:
         r'规则.*有效|复盘|迭代器.*元|元思考|self-improving|'
         # iter682: threshold_fix_gate — 迭代器修复阈值/suppress 参数的记录
         # 根因：'修复：同步两处阈值 24h<2, 7d<3' (ac=1) 逃逸，suppress/阈值各只匹配 0 次
-        r'阈值|24h.{0,6}7d|7d.{0,6}24h)',
+        r'阈值|24h.{0,6}7d|7d.{0,6}24h|'
+        # iter684: inject_verb_gate — 独立"不注入/注入/时注入"匹配
+        # 根因：'raw max score < 6.0 时不注入' 逃逸，因原有模式只匹配"注入门槛"等复合词
+        r'(?:不|时|被|已)注入|score\s*[<>])',
         s, re.I
     )
     if len(_SELF_REF_TERMS) >= 2:
@@ -1578,6 +1581,13 @@ def _is_tool_insight_noise(text: str) -> bool:
     # 根因：f3be0440 "✅ should block blocked=True (diag=True selfref=1)" 逃逸，
     #   因为 tool_insight 路径不走 _should_block 的 self-ref gate。
     if re.search(r'should.block|selfref|_should_block|_ITERATOR_DIAG|chunk_state.*dead|存量噪声', text):
+        return True
+    # iter684: memory_lookup_echo_gate — 拦截 memory_lookup 结果回写
+    # 根因（数据驱动，2026-05-04）：memory_lookup 返回 "N. [chunk_type] [id_prefix] summary"
+    #   格式的结果行，被 _TOOL_INSIGHT_PATTERN 匹配（含百分比/数字）后写为新 chunk，
+    #   产生与已有 chunk 完全重复的 tool_insight（实测 2 条 ac=0 垃圾）。
+    # 特征：以 "数字. [" 开头（memory_lookup 编号格式）
+    if re.match(r'^\d+\.\s*\[', text):
         return True
     return False
 
