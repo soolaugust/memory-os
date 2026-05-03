@@ -1253,6 +1253,13 @@ def _is_quality_chunk(summary: str) -> bool:
     if _ITERATOR_DIAG_KW.search(s):
         if not re.search(r'(?:选择|决定|采用|替代|改用|放弃|因为|根因|阈值.*设为|设.*阈值)', s):
             return False
+    # ── iter638: wiki_section_heading_fragment — 碎片式 wiki 标题拦截 ──
+    # 根因（数据驱动）：/migrate-memory 批量导入切分 wiki 时产出纯索引碎片，
+    #   如 "[topic] xxx > 参考链接"、"[topic] xxx > 相关文件"、"[topic] xxx > 影响范围"。
+    #   这些 summary 是 wiki heading 路径，单独无知识价值（ac=0）。
+    # 检测："> 纯中文标题词" 结尾，且不含技术细节（数字/代码/文件路径）
+    if re.search(r'>\s*(?:[一二三四五六七八九十\d]+[、.]\s*)?(?:参考链接|相关文件|影响范围|引用|附录|索引|目录|链接)\s*$', s):
+        return False
     # ── 迭代116：ftrace/调试计数器行过滤 ──
     # OS 类比：ftrace ring buffer 中的 event 数据，只在 debug session 有意义
     # 模式：word_cnt=N word_cnt=N ... — 多个 word=数字 键值对，是内核调试输出
