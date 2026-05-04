@@ -1495,11 +1495,28 @@ def _is_quality_chunk(summary: str) -> bool:
         r'(?:不|时|被|已)注入|score\s*[<>]|'
         # iter795: arch_desc_gate — memory-os 架构描述/组件列表
         # 根因：42d826ac "AIOS Memory-OS 架构：L4 SQLite...memory_chunks" (ac=1) 逃逸
-        r'memory.chunks|store\.db|recall.traces|chunk.version|SessionStart|UserPromptSubmit)',
+        r'memory.chunks|store\.db|recall.traces|chunk.version|SessionStart|UserPromptSubmit|'
+        # iter802: trace_metric_gate — 迭代器运维指标/DB字段名逃逸
+        # 根因：'空 trace 率 37%→0%'、'recall_counts 统计基础'、'top_k_json=[]' 等逃逸
+        #   原 pattern 缺少 memory-os 内部度量语言（空召回、trace 率、DB 列名）
+        r'空召回|空.?trace|top_k|injected[=]|_accessed_ids|闭包捕获|self.ref|candidates.count)',
         s, re.I
     )
     if len(_SELF_REF_TERMS) >= 2:
         return False
+    # iter802: single_selfref_no_domain — 单 self-ref 词 + 无外部领域锚点 → block
+    # 根因：'空 trace 率 37%→0%'（1 match）逃逸，因为阈值 >=2。
+    #   但这类 summary 纯粹是 memory-os 运维指标，不含任何用户领域知识。
+    #   加固：1 match + 无领域锚点（kernel/sched/feishu/Android/...）→ 仍拦截。
+    if len(_SELF_REF_TERMS) == 1:
+        _has_domain_anchor = re.search(
+            r'(?:kernel|sched|CPU|Android|feishu|飞书|patch|线程|进程|调度|'
+            r'binder|LKMM|scx|qos|migration|MTK|三星|vendor|AOSP|'
+            r'公众号|微信|curl|HTTP|API|REST|gRPC|proto)',
+            s, re.I
+        )
+        if not _has_domain_anchor:
+            return False
     if not has_tech:
         # 检测生活域信号
         _LIFE_KEYWORDS = re.search(
