@@ -1206,7 +1206,12 @@ def _is_quality_chunk(summary: str) -> bool:
                 # iter696: memory-os 迭代器自身实现细节 — retriever/daemon 内部机制
                 # 数据驱动：8 条零访问 chunk 含 retriever.py/suppress/threshold 等自引用
                 "retriever.py", "retriever_daemon.py", "空注入率",
-                "burst suppress", "suppress_fallback", "zero_relevance_gate"]
+                "burst suppress", "suppress_fallback", "zero_relevance_gate",
+                # iter699: extractor_noise_gate_v2 — 漏网的迭代器诊断指标
+                # 数据驱动：id=61cd3637 "空召回率 72.5%" 含 trace/candidates/全灭，
+                #   通过了 iter696 的过滤（只拦 "空注入率" 未拦 "空召回率"）
+                "空召回率", "candidates_rescue", "iter69", "iter70",
+                "hard_deadline", "score_chunk", "top_k_data"]
     if any(kw in s for kw in noise_kw):
         return False
     placeholders = {"方案 X 是最优解", "extractor 升级", "KnowledgeRouter"}
