@@ -3997,6 +3997,14 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             final.sort(key=_SORT_KEY, reverse=True)  # iter218: C-level itemgetter vs lambda
             # iter193: use pre-read locals; iter194: reuse _is_generic_q (computed once above)
             _min_thresh = (_gen_query_thr if _is_generic_q else _min_score_thr)
+            # iter820: daemon_adaptive_floor — 同步 retriever.py iter578 adaptive_floor
+            # 根因（数据驱动，2026-05-05）：daemon 缺 adaptive_floor，大库(30+ cands)
+            #   top1=0.5~0.9 时 top2+ 在 0.18-0.29 全被 0.30 阈值过滤 → 68% 注入仅 1 条。
+            # 修复：top1>=0.5 时 floor=top1×0.25，允许与 top1 相关的次优候选通过。
+            if final and not _is_generic_q:
+                _af_top1 = final[0][0]
+                if _af_top1 >= 0.5:
+                    _min_thresh = min(_min_thresh, max(_af_top1 * 0.25, 0.10))
             # iter620: zero_score_absolute_gate — hard_suppressed chunk 绝对不入选
             positive = [(s, c) for s, c in final if s >= _min_thresh and s > 0]
             # iter695: threshold_degrade — 阈值过高全灭时降级到默认 0.30
@@ -4144,6 +4152,11 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
         final.sort(key=_SORT_KEY, reverse=True)  # iter218: C-level itemgetter vs lambda
         # iter193: use pre-read locals; iter194: reuse _is_generic_q (computed once in classify)
         _min_thresh = (_gen_query_thr if _is_generic_q else _min_score_thr)
+        # iter820: daemon_adaptive_floor (FULL path) — 同 hard_deadline 路径
+        if final and not _is_generic_q:
+            _af_top1 = final[0][0]
+            if _af_top1 >= 0.5:
+                _min_thresh = min(_min_thresh, max(_af_top1 * 0.25, 0.10))
         # iter620: zero_score_absolute_gate (FULL path) — 同 hard_deadline 路径
         positive = [(s, c) for s, c in final if s >= _min_thresh and s > 0]
         # iter695: threshold_degrade — 阈值过高全灭时降级到默认 0.30
