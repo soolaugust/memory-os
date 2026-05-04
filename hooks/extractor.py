@@ -1253,7 +1253,12 @@ def _is_quality_chunk(summary: str) -> bool:
                 # 数据驱动：8c78b2f3 "proxy 已加 client_max_size=0"(ac=0)、
                 #   a24c657a "filesize_guard：只拦截单文件 Read"(ac=0) — 代码里已体现
                 "client_max_size", "filesize_guard", "body size 日志",
-                "下次再触发"]
+                "下次再触发",
+                # iter795: self_arch_noise — memory-os 自身架构/目标/路径描述
+                # 数据驱动：e76579b5 "空召回：27%→预期~0%"(ac=1)、42d826ac "AIOS架构"(ac=1)、
+                #   2876c5bb "项目目录结构"(ac=1) — 系统内部细节，用户不需要
+                "空召回：", "Memory-OS 架构", "memory-os 架构",
+                "项目目录结构", "主工作区", "子项目"]
     if any(kw in s for kw in noise_kw):
         return False
     placeholders = {"方案 X 是最优解", "extractor 升级", "KnowledgeRouter"}
@@ -1302,6 +1307,12 @@ def _is_quality_chunk(summary: str) -> bool:
         return False
     if re.match(r'^量化[：:改]', s):
         return False
+    # ── iter795: goal_declaration_noise — 纯指标目标声明拦截 ──
+    # 根因（数据驱动）：e76579b5 "空召回：27% → 预期 ~0%" (ac=1) — 不是决策是目标宣言
+    # 特征："X：N% → 预期/目标 ~M%"，只声明期望值无执行方案
+    if '→' in s and re.search(r'(?:预期|目标|期望|理想)[：:\s]*~?\d', s):
+        if not re.search(r'(?:选择|决定|采用|因为|方案|通过)', s):
+            return False
     # ── iter636: iterator_diagnostic_noise — 迭代器诊断结论拦截 ──
     # 根因（数据驱动）：13bed2d8 "问题：top2 垄断 chunk（feishu CLI ac=46...）占总注入的 62.8%"
     #   通过了 quality gate（含数字锚点），但这是迭代器自身对 memory-os 内部状态的诊断，
@@ -1481,7 +1492,10 @@ def _is_quality_chunk(summary: str) -> bool:
         r'阈值|24h.{0,6}7d|7d.{0,6}24h|'
         # iter684: inject_verb_gate — 独立"不注入/注入/时注入"匹配
         # 根因：'raw max score < 6.0 时不注入' 逃逸，因原有模式只匹配"注入门槛"等复合词
-        r'(?:不|时|被|已)注入|score\s*[<>])',
+        r'(?:不|时|被|已)注入|score\s*[<>]|'
+        # iter795: arch_desc_gate — memory-os 架构描述/组件列表
+        # 根因：42d826ac "AIOS Memory-OS 架构：L4 SQLite...memory_chunks" (ac=1) 逃逸
+        r'memory.chunks|store\.db|recall.traces|chunk.version|SessionStart|UserPromptSubmit)',
         s, re.I
     )
     if len(_SELF_REF_TERMS) >= 2:
