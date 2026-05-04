@@ -105,6 +105,7 @@ CHUNK_VERSION_FILE = os.path.join(MEMORY_OS_DIR, ".chunk_version")  # 迭代64: 
 TLB_GENERATION_FILE = os.path.join(MEMORY_OS_DIR, ".tlb_generation")  # iter583: TLB generation counter
 PAGE_FAULT_LOG = os.path.join(MEMORY_OS_DIR, "page_fault_log.json")
 SHADOW_TRACE_FILE = os.path.join(MEMORY_OS_DIR, ".shadow_trace.json")  # 迭代85: Shadow Trace
+SESSION_INJECTED_FILE = os.path.join(MEMORY_OS_DIR, ".session_injected")  # iter805: sync session_first_inject_guard
 IOR_FILE = os.path.join(MEMORY_OS_DIR, ".ior_state.json")  # iter391: Inhibition of Return
 
 # ── iter571: mmap_populate — session-level FULL recall counter ──
@@ -428,6 +429,19 @@ def _vdso_fast_exit() -> bool:
         if _vdso_is_skip(prompt) and not _vdso_has_tech(prompt):
             sys.exit(0)
 
+    # iter805: session_first_inject_guard (sync path)
+    # 根因（数据驱动，2026-05-05）：23/86 trace 为 skipped_same_hash，23/23 session 零注入。
+    # TLB/HASH_FILE 跨 session 共享 → 新 session 命中前一 session 的缓存 → 零注入。
+    # 修复：比对 .session_injected 文件中的 session_id，不匹配则跳过 TLB 缓存。
+    _session_id_raw = hook_input.get("session_id", "") or os.environ.get("CLAUDE_SESSION_ID", "")
+    _sid_has_inj = False
+    if _session_id_raw:
+        try:
+            with open(SESSION_INJECTED_FILE, encoding="utf-8") as _f:
+                _sid_has_inj = _session_id_raw in _f.read()
+        except OSError:
+            _sid_has_inj = False
+
     # ── Stage 1：TLB v2 快速路径（只读文件+stat，<3ms）──────────────────────
     # 迭代64：Multi-Slot TLB + chunk_version Selective Invalidation
     # OS 类比：N-Way Set-Associative TLB + NFS Weak Cache Consistency (WKC)
@@ -491,7 +505,8 @@ def _vdso_fast_exit() -> bool:
                 _gen_expired = (_tlb_gen_current - _tlb_entry_gen) >= _tlb_max_gen_age
 
                 # L1: prompt_hash + chunk_version 完全匹配
-                if chunk_ver == tlb_ver and prompt_hash in slots and not _gen_expired:
+                # iter805: 新 session 首次请求不走 TLB 缓存（必须完整检索+注入）
+                if chunk_ver == tlb_ver and prompt_hash in slots and not _gen_expired and _sid_has_inj:
                     # iter780: empty_result_tlb — 空结果缓存避免重复检索空转
                     if slots[prompt_hash].get("injection_hash") == "__empty__":
                         sys.exit(0)  # TLB L1 hit (empty result cached)
@@ -505,7 +520,7 @@ def _vdso_fast_exit() -> bool:
 
                 # L2: chunk_version 匹配（chunk 未变）+ HASH_FILE 匹配任意 slot
                 # 当 prompt 变了但 DB 内容未变时，Top-K 结果仍然有效
-                if chunk_ver == tlb_ver and not _gen_expired:
+                if chunk_ver == tlb_ver and not _gen_expired and _sid_has_inj:
                     try:
                         with open(HASH_FILE, encoding="utf-8") as _f:
                             last_hash = _f.read().strip()
@@ -1085,6 +1100,29 @@ def _write_hash(h: str) -> None:
         pass
 
 
+def _mark_session_injected(session_id: str) -> None:
+    """iter805: 记录已成功注入的 session_id，供 TLB 快捷路径判断。
+    文件只保留最近 50 个 session_id（每行一个），避免无限增长。"""
+    if not session_id or session_id == "unknown":
+        return
+    try:
+        existing = set()
+        try:
+            with open(SESSION_INJECTED_FILE, encoding="utf-8") as _f:
+                existing = set(_f.read().strip().split("\n"))
+        except OSError:
+            pass
+        if session_id in existing:
+            return
+        existing.add(session_id)
+        # 保留最近 50 个（文件末尾是最新的）
+        lines = list(existing)[-50:]
+        with open(SESSION_INJECTED_FILE, 'w', encoding="utf-8") as _f:
+            _f.write("\n".join(lines) + "\n")
+    except Exception:
+        pass
+
+
 def _live_access_counts(chunk_ids: list) -> dict:
     """iter634: 用标准连接获取最新 access_count，绕过 immutable WAL 盲区。
     主连接 immutable=1 看不到 WAL 中的最新写入，导致 monopoly_post_filter
@@ -1473,7 +1511,14 @@ def main():
     # 有缺页时不走 vDSO TLB → 这里是唯一的 TLB 检查点
     # 迭代156：zlib.crc32 — 与 vDSO Stage 1 保持一致（相同 prompt → 相同 hash）
     prompt_hash = format(zlib.crc32(prompt.encode()) & 0xffffffff, '08x')
-    if not has_page_fault:
+    # iter805: session_first_inject_guard (main path, defense-in-depth)
+    _sid_inj_main = False
+    try:
+        with open(SESSION_INJECTED_FILE, encoding="utf-8") as _f:
+            _sid_inj_main = session_id in _f.read()
+    except OSError:
+        pass
+    if not has_page_fault and _sid_inj_main:
         chunk_ver = _read_chunk_version()
         tlb = _tlb_read()
         tlb_ver = tlb.get("chunk_version", -1)
@@ -3185,6 +3230,7 @@ def main():
                     if len(context_text) > effective_max_chars:
                         context_text = context_text[:effective_max_chars] + "…"
                     _write_hash(current_hash)
+                    _mark_session_injected(session_id)  # iter805
                     _tlb_write(prompt_hash, current_hash, _get_db_mtime())  # 迭代57: TLB
                     _tlb_bump_generation()  # iter583: FULL 完成后 bump generation
                     duration_ms = _elapsed_ms()
@@ -4274,7 +4320,14 @@ def main():
             for s, c in top_k
         ]
 
-        if current_hash == _read_hash():
+        # iter805: session_first_inject_guard — 新 session 不走 same_hash 快捷路径
+        _sid_inj_late = False
+        try:
+            with open(SESSION_INJECTED_FILE, encoding="utf-8") as _f:
+                _sid_inj_late = session_id in _f.read()
+        except OSError:
+            pass
+        if current_hash == _read_hash() and _sid_inj_late:
             _tlb_write(prompt_hash, current_hash, _get_db_mtime())  # 迭代57: TLB 回填
             _tlb_bump_generation()  # iter583: FULL 完成后 bump generation
             # 迭代61：PSI Noise Floor — skipped_same_hash 记录 duration_ms=0
@@ -4754,6 +4807,7 @@ def main():
         if _iter359_dedup_count > 0:
             reason += f"|dedup:{_iter359_dedup_count}"  # 迭代359：去重计数
         _write_hash(current_hash)
+        _mark_session_injected(session_id)  # iter805
         _tlb_write(prompt_hash, current_hash, _get_db_mtime())  # 迭代57: TLB
         _tlb_bump_generation()  # iter583: FULL 完成后 bump generation
 
