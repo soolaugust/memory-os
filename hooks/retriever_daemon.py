@@ -4108,15 +4108,17 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                               session_id=session_id, project=project)
             else:
                 # iter772: dead_zone_fallback — 消除 (0, noise_floor) 死区
-                # 根因（数据驱动）：score 0.01~0.14 时两分支均不命中 → 空召回
+                # iter775: dead_zone_min_score — 防止 FTS5 无匹配时注入垃圾
+                _sef_full_max = _sef_full[0]
+                _DEAD_ZONE_MIN_FULL = 0.05
                 _sef_by_imp = [(float(c.get(_CI_IMP, 0) or 0), c) for _, c in final
                                if (c.get(_CI_AC, 0) or 0) < 30]
-                if _sef_by_imp:
+                if _sef_by_imp and _sef_full_max >= _DEAD_ZONE_MIN_FULL:
                     _sef_best = max(_sef_by_imp, key=_SORT_KEY)
                     top_k = [(_sef_best[0] * 0.1, _sef_best[1])]
                     _deferred.log(DMESG_WARN, "retriever_daemon",
-                                  f"iter772_dead_zone_fallback_full: imp={_sef_best[0]:.2f} "
-                                  f"id={_sef_best[1][_CI_ID][:12]}",
+                                  f"iter775_dead_zone_fallback_full: imp={_sef_best[0]:.2f} "
+                                  f"max_s={_sef_full_max:.4f} id={_sef_best[1][_CI_ID][:12]}",
                                   session_id=session_id, project=project)
 
         # ── design_constraint 强制注入 ──

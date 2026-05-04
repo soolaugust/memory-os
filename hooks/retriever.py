@@ -2995,15 +2995,20 @@ def main():
                     positive = [_sef_hd]
                 else:
                     # iter772: dead_zone_fallback — 消除 (0, noise_floor) 死区
-                    # 根因（数据驱动）：score 0.01~0.14 时两分支均不命中 → 空召回
+                    # iter775: dead_zone_min_score — 防止 FTS5 几乎无匹配时注入垃圾
+                    # 根因（数据驱动，2026-05-04）：import-90139 score=0.0097 被注入，
+                    #   与当前 query 完全不相关。max(final) < 0.05 说明 FTS5 词汇匹配
+                    #   接近零，按 importance 选也无法保证相关性。
+                    _sef_hd_max = _sef_hd[0]  # final 中最高 _score_chunk 输出
+                    _DEAD_ZONE_MIN = 0.05
                     _sef_hd_imp = [(float(c.get("importance", 0) or 0), c) for _, c in final
                                    if (c.get("access_count", 0) or 0) < 30]
-                    if _sef_hd_imp:
+                    if _sef_hd_imp and _sef_hd_max >= _DEAD_ZONE_MIN:
                         _sef_hd_best = max(_sef_hd_imp, key=lambda x: x[0])
                         positive = [(_sef_hd_best[0] * 0.1, _sef_hd_best[1])]
                         _deferred.log(DMESG_WARN, "retriever",
-                                      f"iter772_dead_zone_fallback_hd: imp={_sef_hd_best[0]:.2f} "
-                                      f"id={_sef_hd_best[1].get('id','')[:12]}",
+                                      f"iter775_dead_zone_fallback_hd: imp={_sef_hd_best[0]:.2f} "
+                                      f"max_s={_sef_hd_max:.4f} id={_sef_hd_best[1].get('id','')[:12]}",
                                       session_id=session_id, project=project)
             if _sysctl("retriever.drr_enabled") and len(positive) > effective_top_k:
                 top_k = _drr_select(positive, effective_top_k)
@@ -3545,15 +3550,17 @@ def main():
                               session_id=session_id, project=project)
             else:
                 # iter772: dead_zone_fallback — 消除 (0, noise_floor) 死区
-                # 根因同 hard_deadline 路径：score 在 (0, noise_floor) 时两分支均不命中
+                # iter775: dead_zone_min_score — 同 hard_deadline 路径
+                _sef_full_max = _sef_full[0]
+                _DEAD_ZONE_MIN_FULL = 0.05
                 _sef_by_imp = [(float(c.get("importance", 0) or 0), c) for _, c in final
                                if (c.get("access_count", 0) or 0) < 30]
-                if _sef_by_imp:
+                if _sef_by_imp and _sef_full_max >= _DEAD_ZONE_MIN_FULL:
                     _sef_best = max(_sef_by_imp, key=lambda x: x[0])
                     positive = [(_sef_best[0] * 0.1, _sef_best[1])]
                     _deferred.log(DMESG_WARN, "retriever",
-                                  f"iter772_dead_zone_fallback_full: imp={_sef_best[0]:.2f} "
-                                  f"id={_sef_best[1].get('id','')[:12]}",
+                                  f"iter775_dead_zone_fallback_full: imp={_sef_best[0]:.2f} "
+                                  f"max_s={_sef_full_max:.4f} id={_sef_best[1].get('id','')[:12]}",
                                   session_id=session_id, project=project)
 
         # ── 迭代334：IWCSI — Importance-Weighted Cold-Start Injection ───────
