@@ -1896,7 +1896,9 @@ import re as _re_vfs
 _RE_VFS_SELFREF = _re_vfs.compile(
     r'(?:suppress|inject|score\s*[×*降=]|bandwidth|recall.count|'
     r'access.count|hard.?cap|hard.?gate|oom_adj|zero.access|'
-    r'垄断|逃逸|burst|saturation|注入|chunk.{0,4}注入)',
+    r'垄断|逃逸|burst|saturation|注入|chunk.{0,4}注入|'
+    # iter754: 迭代器自评噪声关键词 — 拦截 "空召回率 68%→25%" 等自我描述
+    r'空召回|误杀率|fallback.*率|过滤规则|写入过滤|iter\d{3})',
     _re_vfs.IGNORECASE
 )
 
@@ -1949,11 +1951,9 @@ def _vfs_write_protect(summary: str) -> bool:
     # 纯数字/符号行
     if _re_vfs.match(r'^[\d\s.,:;/×\-+=%]+$', s):
         return True
-    # iter629: self-referential noise gate (VFS 层同步, 仅短文本)
-    # 根因：extractor._is_quality_chunk 有 self-ref 检测，但 direct/MCP 写入绕过。
-    # 实测："suppress chunk"(14B)、"量化改善：zero_access rate 36%→29%"(46B) 漏网。
-    # 修复：<80 字符短文本检测 memory-os 内部术语 ≥2 个 → 拒绝。长文本跳过（性能）。
-    if len(s) < 80 and len(_RE_VFS_SELFREF.findall(s)) >= 2:
+    # iter629+754: self-referential noise gate (VFS 层同步)
+    # iter754: 上限 80→120 — "空召回率 68%→25%" 等 summary 长 50-100B 漏网。
+    if len(s) < 120 and len(_RE_VFS_SELFREF.findall(s)) >= 2:
         return True
     return False
 
