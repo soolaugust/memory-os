@@ -1190,6 +1190,12 @@ def _is_quality_chunk(summary: str) -> bool:
     # 特征：单个拉丁小写字母 + 空格 + 中文/标点 = 句子中间截断
     if re.match(r'^[a-z]\s', s):
         return False
+    # iter791: 多字母截断碎片拦截
+    # 数据驱动：659be6cd "eshold 注入 0% useful rate" — "threshold" 被截断只剩 "eshold"
+    # 特征：以小写拉丁词开头 + 空格 + 中文字符 = 英文单词尾部截断后拼接中文
+    # 正常英文开头的知识 chunk 不会紧跟中文（如 "BPF 程序" 以大写开头）
+    if re.match(r'^[a-z]{2,}\s+[\u4e00-\u9fff]', s):
+        return False
     # ── iter B12：JSON 键值对碎片过滤 ──────────────────────────────────
     # 以双引号开头 = JSON 字符串值（"recommended_action": "..."、"if_wrong": "..."）
     # 这些是从包含 JSON 格式输出的 assistant 回复中误提取的片段，无法被自然语言检索命中
