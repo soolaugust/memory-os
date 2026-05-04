@@ -3880,6 +3880,11 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             # iter695: threshold_degrade — 阈值过高全灭时降级到默认 0.30
             if not positive and _min_thresh > 0.30:
                 positive = [(s, c) for s, c in final if s >= 0.30 and s > 0]
+            # iter697: candidates_rescue — 有候选全灭时按 top1*0.8 降级（最低 0.15）
+            if not positive and final and len(final) >= 5:
+                _rescue_thresh = max(final[0][0] * 0.8, 0.15)
+                if _rescue_thresh < _min_thresh:
+                    positive = [(s, c) for s, c in final if s >= _rescue_thresh and s > 0]
             if _drr_enabled and len(positive) > effective_top_k:
                 top_k = _drr_select(positive, effective_top_k)
             else:
@@ -4015,6 +4020,11 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
         # iter695: threshold_degrade — 阈值过高全灭时降级到默认 0.30
         if not positive and _min_thresh > 0.30:
             positive = [(s, c) for s, c in final if s >= 0.30 and s > 0]
+        # iter697: candidates_rescue — 有候选全灭时按 top1*0.8 降级（最低 0.15）
+        if not positive and final and len(final) >= 5:
+            _rescue_thresh = max(final[0][0] * 0.8, 0.15)
+            if _rescue_thresh < _min_thresh:
+                positive = [(s, c) for s, c in final if s >= _rescue_thresh and s > 0]
 
         if _drr_enabled and len(positive) > effective_top_k:
             top_k = _drr_select(positive, effective_top_k)
