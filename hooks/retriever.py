@@ -1801,6 +1801,7 @@ def main():
             #   写入在 write-back phase（与 session_injection_counts 同步），
             #   读取在此处直接从文件计算 24h/7d 计数，完全绕过 SQLite WAL。
             _INJECTION_TIMELINE_FILE = os.path.join(MEMORY_OS_DIR, ".injection_timeline.json")
+            _recent_6h_counts = {}   # iter813: short_burst_suppress
             _recent_24h_counts = {}
             _recent_7d_counts = {}
             _injection_timeline = {}  # {chunk_id: [iso_ts, ...]}
@@ -1810,6 +1811,7 @@ def main():
                         _injection_timeline = json.loads(_itf.read())
                 from datetime import datetime as _dt647, timezone as _tz647, timedelta as _td647
                 _now647 = _dt647.now(_tz647.utc)
+                _cutoff_6h = (_now647 - _td647(hours=6)).isoformat()  # iter813
                 _cutoff_24h = (_now647 - _td647(hours=24)).isoformat()
                 _cutoff_7d = (_now647 - _td647(days=7)).isoformat()
                 _pruned = {}  # GC: 丢弃 >7d 的条目
@@ -1821,6 +1823,10 @@ def main():
                         _cnt_24h = sum(1 for t in _kept if t > _cutoff_24h)
                         if _cnt_24h > 0:
                             _recent_24h_counts[_cid647] = _cnt_24h
+                        # iter813: 6h burst count
+                        _cnt_6h = sum(1 for t in _kept if t > _cutoff_6h)
+                        if _cnt_6h > 0:
+                            _recent_6h_counts[_cid647] = _cnt_6h
                 _injection_timeline = _pruned
                 # ── iter659: timeline_ghost_gc — 清理已删除 chunk 的 timeline 条目 ──
                 # 根因：chunk 被删除/swap 后 timeline 残留幽灵条目（实测 27 条），
@@ -1862,9 +1868,11 @@ def main():
                 _fb_now = _dt652.now(_tz652.utc)
                 _cut_7d = (_fb_now - _td652(days=7)).isoformat()
                 _cut_24h = (_fb_now - _td652(hours=24)).isoformat()
+                _cut_6h = (_fb_now - _td652(hours=6)).isoformat()  # iter813
                 # iter653: 从 recall_traces 独立统计，再 merge max
                 _rt_7d = {}
                 _rt_24h = {}
+                _rt_6h = {}  # iter813
                 for (_tk_json, _tk_ts) in _fb_conn.execute(
                         "SELECT top_k_json, timestamp FROM recall_traces WHERE injected=1 AND timestamp>?",
                         (_cut_7d,)).fetchall():
@@ -1873,17 +1881,23 @@ def main():
                         _ids = json.loads(_tk_json)
                     except Exception: continue
                     _is_24h = _tk_ts > _cut_24h if _tk_ts else False
+                    _is_6h = _tk_ts > _cut_6h if _tk_ts else False  # iter813
                     for _it in (_ids if isinstance(_ids, list) else []):
                         _c = _it.get("id","") if isinstance(_it, dict) else (_it if isinstance(_it, str) else "")
                         if _c:
                             _rt_7d[_c] = _rt_7d.get(_c, 0) + 1
                             if _is_24h:
                                 _rt_24h[_c] = _rt_24h.get(_c, 0) + 1
+                            if _is_6h:
+                                _rt_6h[_c] = _rt_6h.get(_c, 0) + 1  # iter813
                 # merge max: timeline 和 recall_traces 取大值
                 for _mc, _mv in _rt_7d.items():
                     _recent_7d_counts[_mc] = max(_recent_7d_counts.get(_mc, 0), _mv)
                 for _mc, _mv in _rt_24h.items():
                     _recent_24h_counts[_mc] = max(_recent_24h_counts.get(_mc, 0), _mv)
+                # iter813: 6h merge
+                for _mc, _mv in _rt_6h.items():
+                    _recent_6h_counts[_mc] = max(_recent_6h_counts.get(_mc, 0), _mv)
                 _fb_conn.close()
             except Exception:
                 pass
@@ -2203,6 +2217,9 @@ def main():
                 #   early exit 是 relevance<0.005 路径，score 必然低，用低分阈值对齐。
                 # iter801: micro_db (<=5) 跳过 24h/7d/saturation suppress
                 if _db_chunk_count > 5:
+                    # iter813: 6h burst suppress (early exit path)
+                    if _recent_6h_counts.get(chunk.get("id", ""), 0) >= 2:
+                        return 0.0
                     _r24_ee = _recent_24h_counts.get(chunk.get("id", ""), 0)
                     _ee_24h_thresh = 4 if _db_chunk_count < 30 else 3 if _db_chunk_count < 100 else 2
                     if _r24_ee >= _ee_24h_thresh:
@@ -2368,6 +2385,14 @@ def main():
             #   iter776 suppress_zero_fallback 已解决空召回兜底，可安全收紧。
             # iter801: micro_db (<=5) 跳过 24h/7d suppress — 唯一知识不可 suppress
             if not _micro_db:
+                # iter813: short_burst_suppress — 6h 内 >=2 次即 suppress
+                # 根因（数据驱动，2026-05-05）：import-90139 在 38 分钟内被 3 session 注入，
+                #   24h 阈值=3 因 writeback 延迟和进程重启丢失 inmem log 而逃逸。
+                #   6h 窗口更紧，阈值=2 可捕获短期密集注入。
+                _r6h_cnt = _recent_6h_counts.get(chunk.get("id", ""), 0)
+                if _r6h_cnt >= 2:
+                    score = 0.0
+                    _hard_suppressed = True
                 # iter806: small_db_suppress_tighten — 收紧 small_db 24h 阈值
                 # 根因（数据驱动，2026-05-05）：35 chunk 库 import-90139 24h 内被
                 #   3 个不同 session 注入（score>=0.5），阈值=4 恰好逃逸。
@@ -2377,8 +2402,7 @@ def main():
                 # iter810: tiny_db_24h_relax — 小库统一阈值=3，不因 low-score 过早 suppress
                 # 根因：22 chunk 库中 score=0.3 的有价值知识被 24h>=2 suppress，
                 #   导致 14/20 次注入只有 1 条。小库知识密度高，重复注入是正常的。
-                _suppress_24h_thresh = 3 if _tiny_db else (3 if score >= 0.5 else 2) if _small_db else (3 if score >= 0.5 else 2)
-                if _r24_cnt >= _suppress_24h_thresh:
+                elif _r24_cnt >= (3 if _tiny_db else (3 if score >= 0.5 else 2) if _small_db else (3 if score >= 0.5 else 2)):
                     score = 0.0
                     _hard_suppressed = True  # iter616
             # ── iter618: 7d_rolling_suppress — 长期慢性垄断 suppress ────────
@@ -3156,7 +3180,8 @@ def main():
                 # iter806: final_gate 24h/7d 阈值同步 small_db_suppress_tighten
                 # tiny_db 保持宽松兜底 (10/8, 20/15)；small_db 4/3→3/2 同步
                 top_k = [(s, c) for s, c in top_k
-                         if _recent_24h_counts.get(c["id"], 0) < ((10 if s >= 0.5 else 8) if _hd_tiny_db else (3 if s >= 0.5 else 2) if _hd_small_db else (3 if s >= 0.5 else 2))
+                         if _recent_6h_counts.get(c["id"], 0) < 2  # iter813: short_burst_suppress
+                         and _recent_24h_counts.get(c["id"], 0) < ((10 if s >= 0.5 else 8) if _hd_tiny_db else (3 if s >= 0.5 else 2) if _hd_small_db else (3 if s >= 0.5 else 2))
                          and _recent_7d_counts.get(c["id"], 0) < ((20 if s >= 0.5 else 15) if _hd_tiny_db else (5 if s >= 0.5 else 4) if _hd_small_db else (5 if s >= 0.5 else 3))]
             # ── iter670: suppress_fallback — hard_deadline suppress 全灭降级 ──
             if not top_k and _pre_suppress_top_k_hd:
@@ -3828,6 +3853,9 @@ def main():
                 #   ac=11 (9a1c5b4f) 仍可通过。
                 _ac_abs = _constraint_live_ac.get(_cid, c.get("access_count", 0) or 0)
                 if _ac_abs >= 15:
+                    return False
+                # iter813: 6h burst suppress (constraint path)
+                if _recent_6h_counts.get(_cid, 0) >= 2:
                     return False
                 # iter617: 24h burst suppress 也在 constraint 通道生效
                 # iter806: sync small_db_suppress_tighten

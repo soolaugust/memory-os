@@ -3111,6 +3111,7 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
         #   retriever.py 在 iter565 已用独立标准连接修复；daemon 路径遗漏。
         # 修复：用独立标准连接加载 recall_counts，确保看到最新 traces。
         _recall_counts = {}
+        _recent_6h_counts = {}   # iter813: short_burst_suppress
         _recent_24h_counts = {}  # iter630: hoist defaults outside try — NameError if connect() fails
         _recent_7d_counts = {}   # iter630: same — suppress must degrade to no-op, not crash
         _effective_bw_window = 30
@@ -3216,11 +3217,15 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     with open(_INJECTION_TIMELINE_FILE, encoding="utf-8") as _itf_r:
                         _itl_data = _itl_json.loads(_itf_r.read())
                     _now648 = _dt648.now(_tz648.utc)
+                    _cutoff_6h = (_now648 - _td648(hours=6)).isoformat()  # iter813
                     _cutoff_24h = (_now648 - _td648(hours=24)).isoformat()
                     _cutoff_7d = (_now648 - _td648(days=7)).isoformat()
                     for _cid648, _ts_list in _itl_data.items():
                         _cnt_7d = sum(1 for t in _ts_list if t > _cutoff_7d)
                         _cnt_24h = sum(1 for t in _ts_list if t > _cutoff_24h)
+                        _cnt_6h = sum(1 for t in _ts_list if t > _cutoff_6h)  # iter813
+                        if _cnt_6h > _recent_6h_counts.get(_cid648, 0):
+                            _recent_6h_counts[_cid648] = _cnt_6h
                         if _cnt_24h > _recent_24h_counts.get(_cid648, 0):
                             _recent_24h_counts[_cid648] = _cnt_24h
                         if _cnt_7d > _recent_7d_counts.get(_cid648, 0):
@@ -3242,14 +3247,17 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 _fb_now = datetime.now(timezone.utc)
                 _cut_7d_fb = (_fb_now - _td652(days=7)).isoformat()
                 _cut_24h_fb = (_fb_now - _td652(hours=24)).isoformat()
+                _cut_6h_fb = (_fb_now - _td652(hours=6)).isoformat()  # iter813
                 _rt_7d_d = {}
                 _rt_24h_d = {}
+                _rt_6h_d = {}  # iter813
                 for (_fb_json, _fb_ts) in _fb_conn.execute(
                         "SELECT top_k_json, timestamp FROM recall_traces "
                         "WHERE injected=1 AND timestamp>?", (_cut_7d_fb,)).fetchall():
                     try:
                         _fb_items = json.loads(_fb_json) if isinstance(_fb_json, str) else _fb_json
                         _is_24h_d = _fb_ts > _cut_24h_fb if _fb_ts else False
+                        _is_6h_d = _fb_ts > _cut_6h_fb if _fb_ts else False  # iter813
                         if isinstance(_fb_items, list):
                             for _fb_item in _fb_items:
                                 if isinstance(_fb_item, dict) and "id" in _fb_item:
@@ -3257,12 +3265,17 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                                     _rt_7d_d[_fid] = _rt_7d_d.get(_fid, 0) + 1
                                     if _is_24h_d:
                                         _rt_24h_d[_fid] = _rt_24h_d.get(_fid, 0) + 1
+                                    if _is_6h_d:
+                                        _rt_6h_d[_fid] = _rt_6h_d.get(_fid, 0) + 1  # iter813
                     except Exception:
                         continue
                 for _mc, _mv in _rt_7d_d.items():
                     _recent_7d_counts[_mc] = max(_recent_7d_counts.get(_mc, 0), _mv)
                 for _mc, _mv in _rt_24h_d.items():
                     _recent_24h_counts[_mc] = max(_recent_24h_counts.get(_mc, 0), _mv)
+                # iter813: 6h merge
+                for _mc, _mv in _rt_6h_d.items():
+                    _recent_6h_counts[_mc] = max(_recent_6h_counts.get(_mc, 0), _mv)
                 _fb_conn.close()
             except Exception:
                 pass
@@ -3673,12 +3686,13 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             # iter806: small_db_suppress_tighten — 24h 4/3→3/2, 7d 7/5→5/4
             # iter801: micro_db (<=5) 跳过 24h/7d/saturation suppress — 唯一知识不可 suppress
             if not _s672_micro:
-                # iter810: tiny_db_24h_relax — 小库统一阈值
-                _s672_24h_t = 3 if _s672_tiny else (3 if score >= 0.5 else 2) if _s672_small else (3 if score >= 0.5 else 2)
-                _s672_7d_t = 5 if _s672_tiny else (5 if score >= 0.5 else 4) if _s672_small else (5 if score >= 0.5 else 3)
-                if _recent_24h_counts.get(_cid, 0) >= _s672_24h_t:
+                # iter813: short_burst_suppress — 6h 内 >=2 次即 suppress
+                if _recent_6h_counts.get(_cid, 0) >= 2:
                     score = 0.0
-                elif _recent_7d_counts.get(_cid, 0) >= _s672_7d_t:
+                # iter810: tiny_db_24h_relax — 小库统一阈值
+                elif _recent_24h_counts.get(_cid, 0) >= (3 if _s672_tiny else (3 if score >= 0.5 else 2) if _s672_small else (3 if score >= 0.5 else 2)):
+                    score = 0.0
+                elif _recent_7d_counts.get(_cid, 0) >= (5 if _s672_tiny else (5 if score >= 0.5 else 4) if _s672_small else (5 if score >= 0.5 else 3)):
                     score = 0.0
                 # iter622: saturation_absolute_suppress — access_count >= 30 永久 suppress
                 elif (chunk[_CI_AC] or 0) >= 30:
@@ -3755,12 +3769,13 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             # iter806: small_db_suppress_tighten — sync with retriever.py
             # iter801: micro_db (<=5) 跳过 suppress
             if not _s672d_micro:
-                # iter810: tiny_db_24h_relax — sync
-                _s672d_24h_t = 3 if _s672d_tiny else (3 if score >= 0.5 else 2) if _s672d_small else (3 if score >= 0.5 else 2)
-                _s672d_7d_t = 5 if _s672d_tiny else (5 if score >= 0.5 else 4) if _s672d_small else (5 if score >= 0.5 else 3)
-                if _recent_24h_counts.get(_cid, 0) >= _s672d_24h_t:
+                # iter813: short_burst_suppress — 6h 内 >=2 次即 suppress
+                if _recent_6h_counts.get(_cid, 0) >= 2:
                     score = 0.0
-                elif _recent_7d_counts.get(_cid, 0) >= _s672d_7d_t:
+                # iter810: tiny_db_24h_relax — sync
+                elif _recent_24h_counts.get(_cid, 0) >= (3 if _s672d_tiny else (3 if score >= 0.5 else 2) if _s672d_small else (3 if score >= 0.5 else 2)):
+                    score = 0.0
+                elif _recent_7d_counts.get(_cid, 0) >= (5 if _s672d_tiny else (5 if score >= 0.5 else 4) if _s672d_small else (5 if score >= 0.5 else 3)):
                     score = 0.0
                 # iter622: saturation_absolute_suppress — access_count >= 30 永久 suppress
                 elif (chunk.get("access_count", 0) or 0) >= 30:
@@ -4433,13 +4448,14 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                                     _rt663d_24h[_c663d] = _rt663d_24h.get(_c663d, 0) + 1
                     except Exception:
                         continue
-                _sf663d_conn.close()
                 # iter807: daemon_inmem_suppress — 叠加进程内存注入记录（消除 writeback 竞争）
                 # 根因：writeback 异步 → DB 查询滞后 → 连续注入逃逸。
                 # 方案：进程内计数取 max(db, inmem)——不相加避免双重计数。
                 _now_unix = time.time()
+                _cut_6h_unix = _now_unix - 21600  # iter813
                 _cut_24h_unix = _now_unix - 86400
                 _cut_7d_unix = _now_unix - 604800
+                _inmem_6h = {}  # iter813
                 _inmem_24h = {}
                 _inmem_7d = {}
                 _gc_idx = 0
@@ -4450,18 +4466,38 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     _inmem_7d[_il807_cid] = _inmem_7d.get(_il807_cid, 0) + 1
                     if _il807_ts >= _cut_24h_unix:
                         _inmem_24h[_il807_cid] = _inmem_24h.get(_il807_cid, 0) + 1
+                    if _il807_ts >= _cut_6h_unix:
+                        _inmem_6h[_il807_cid] = _inmem_6h.get(_il807_cid, 0) + 1  # iter813
                 if _gc_idx > 0:
                     del _daemon_inject_log[:_gc_idx]
-                for _mk807 in set(_inmem_24h) | set(_inmem_7d):
+                # iter813: 也统计 DB 侧的 6h counts
+                _rt663d_6h = {}
+                for (_tk663d_6h, _ts663d_6h) in _sf663d_conn.execute(
+                        "SELECT top_k_json, timestamp FROM recall_traces "
+                        "WHERE injected=1 AND timestamp>?",
+                        ((_sf663d_now - _td663d(hours=6)).isoformat(),)).fetchall():
+                    if not _tk663d_6h: continue
+                    try:
+                        for _it663d_6h in json.loads(_tk663d_6h):
+                            _c663d_6h = _it663d_6h.get("id", "") if isinstance(_it663d_6h, dict) else ""
+                            if _c663d_6h:
+                                _rt663d_6h[_c663d_6h] = _rt663d_6h.get(_c663d_6h, 0) + 1
+                    except Exception:
+                        continue
+                _sf663d_conn.close()
+                for _mk807 in set(_inmem_6h) | set(_inmem_24h) | set(_inmem_7d):
+                    if _mk807 in _inmem_6h:
+                        _rt663d_6h[_mk807] = max(_rt663d_6h.get(_mk807, 0), _inmem_6h[_mk807])
                     _rt663d_24h[_mk807] = max(_rt663d_24h.get(_mk807, 0), _inmem_24h.get(_mk807, 0))
                     _rt663d_7d[_mk807] = max(_rt663d_7d.get(_mk807, 0), _inmem_7d.get(_mk807, 0))
                 _pre663d = len(top_k)
                 # iter767: tiered_small_db — 分级小库阈值（同 _score_chunk）
                 _sf663d_tiny_db = _db_chunk_count < 30
                 _sf663d_small_db = _db_chunk_count < 100
-                # iter810: tiny_db_24h_relax — sync daemon final_gate
+                # iter813+810: short_burst + tiny_db_24h_relax — sync daemon final_gate
                 top_k = [(s, c) for s, c in top_k
-                         if _rt663d_24h.get(c[_CI_ID], 0) < (3 if _sf663d_tiny_db else (3 if s >= 0.5 else 2) if _sf663d_small_db else (3 if s >= 0.5 else 2))
+                         if _rt663d_6h.get(c[_CI_ID], 0) < 2  # iter813: 6h burst
+                         and _rt663d_24h.get(c[_CI_ID], 0) < (3 if _sf663d_tiny_db else (3 if s >= 0.5 else 2) if _sf663d_small_db else (3 if s >= 0.5 else 2))
                          and _rt663d_7d.get(c[_CI_ID], 0) < (5 if _sf663d_tiny_db else (5 if s >= 0.5 else 4) if _sf663d_small_db else (5 if s >= 0.5 else 3))]
                 if len(top_k) < _pre663d:
                     _deferred.log(DMESG_WARN, "retriever_daemon",
