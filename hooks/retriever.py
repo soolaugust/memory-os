@@ -1665,9 +1665,23 @@ def main():
         _INJECTION_TIMELINE_FILE = os.path.join(MEMORY_OS_DIR, ".injection_timeline.json")  # iter647
         _injection_timeline = {}  # iter647: WAL-immune cross-session timeline
         _local_bw_window = 30  # iter610: fallback if outer try fails
+        # iter797: db_chunk_count — 用 DB 中实际 chunk 总数判定 tiny/small，
+        #   替代 candidates_count（FTS5 返回数）。
+        #   根因（数据驱动，2026-05-04）：实际仅 36 chunks，但长 query 的
+        #   FTS5 可返回 32 candidates → candidates_count>=30 → tiny_db=False
+        #   → suppress 阈值收紧 + fallback noise_floor 提高(0.15→0.25)
+        #   → 51% 空召回。chunk 总数才是"库大小"的真实度量。
+        _db_chunk_count = 50  # fallback: 保守估计（走 small_db 路径）
         try:
             import sqlite3 as _rc_sql
             _rc_conn = _rc_sql.connect(str(STORE_DB))
+            # iter797: 查询实际 chunk 总数
+            try:
+                _db_chunk_count = _rc_conn.execute(
+                    "SELECT COUNT(*) FROM memory_chunks WHERE project=?", (project,)
+                ).fetchone()[0] or 0
+            except Exception:
+                pass  # 保持 fallback=50
             _recall_counts = chunk_recall_counts(_rc_conn, project, window=30)
             # ── iter588: effective_bw_window — 实际 trace 数量（修复少 trace 项目窗口稀释） ──
             # 问题（数据驱动，2026-05-02）：项目只有 8 条 trace 时 rc=3/window=30=10% < 30%，
@@ -2129,7 +2143,7 @@ def main():
                 _ee_hard_cap = _sysctl("retriever.constraint_inject_hard_cap") or 0.30
                 # iter756: small_db_bw_tighten; iter774: tiny_db_bw_relax
                 if _local_bw_window <= 30 and _ee_hard_cap > 0.12:
-                    _ee_hard_cap = 0.25 if candidates_count < 30 else 0.12
+                    _ee_hard_cap = 0.25 if _db_chunk_count < 30 else 0.12
                 if _rc_ee > 0 and _rc_ee / _local_bw_window > _ee_hard_cap:
                     return 0.0
                 # iter617: early exit 也必须检查 24h_burst_suppression
@@ -2141,14 +2155,14 @@ def main():
                 #   early exit 固定 >=2 → 34 chunk 小库中 24h=2 即全灭（56% 空召回）。
                 #   early exit 是 relevance<0.005 路径，score 必然低，用低分阈值对齐。
                 _r24_ee = _recent_24h_counts.get(chunk.get("id", ""), 0)
-                _ee_24h_thresh = 4 if candidates_count < 30 else 3 if candidates_count < 100 else 2
+                _ee_24h_thresh = 4 if _db_chunk_count < 30 else 3 if _db_chunk_count < 100 else 2
                 if _r24_ee >= _ee_24h_thresh:
                     return 0.0
                 # iter618: early exit 也检查 7d_rolling_suppress
                 # iter619: 8→5; iter664: 5→3，与评分阶段阈值统一
                 # iter796: 同步 tiny_db 放宽
                 _r7d_ee = _recent_7d_counts.get(chunk.get("id", ""), 0)
-                _ee_7d_thresh = 8 if candidates_count < 30 else 5 if candidates_count < 100 else 3
+                _ee_7d_thresh = 8 if _db_chunk_count < 30 else 5 if _db_chunk_count < 100 else 3
                 if _r7d_ee >= _ee_7d_thresh:
                     return 0.0
                 # iter621→622: saturation_absolute_suppress — 累积注入过饱和永久 suppress
@@ -2263,7 +2277,7 @@ def main():
                 _hard_cap_val = _sysctl("retriever.constraint_inject_hard_cap") or 0.30
                 # iter756: small_db_bw_tighten; iter774: tiny_db_bw_relax
                 if _local_bw_window <= 30 and _hard_cap_val > 0.12:
-                    _hard_cap_val = 0.25 if candidates_count < 30 else 0.12
+                    _hard_cap_val = 0.25 if _db_chunk_count < 30 else 0.12
                 _hard_util = _rc / _local_bw_window
                 if _hard_util > _hard_cap_val:
                     score = 0.0  # iter601: hard gate
@@ -2293,8 +2307,8 @@ def main():
             # 根因（数据驱动，2026-05-04）：52 chunk 库中 import-90139 7d=5 但阈值=8 → 逃逸
             #   iter703/764 一刀切 <100 放宽到 5/6,8/10 对 50+ chunk 库过于宽松
             # 修复：<30 极小库保持宽松；30-100 中小库收紧
-            _tiny_db = candidates_count < 30
-            _small_db = candidates_count < 100
+            _tiny_db = _db_chunk_count < 30
+            _small_db = _db_chunk_count < 100
             # iter781: tiny_db_suppress_tighten — 收紧 tiny_db suppress 阈值
             #   数据驱动（2026-05-04）：100% injected traces 的 candidates_count<30（全部 tiny_db）
             #   iter777 的 10/8 阈值导致 24h 内同一 chunk 被 5+ session 注入仍不 suppress
@@ -3012,7 +3026,7 @@ def main():
             # iter771: tiny_db_fallback_relax — 小库 FTS5 词汇覆盖低致 score 偏低，
             #   0.25 门槛导致 score 0.15-0.24 的有用 chunk 落入 dead zone（78% 空召回）。
             #   修复：tiny_db(<30 cands) 降至 0.15，保留大库 0.25 防垃圾。
-            _FALLBACK_NOISE_FLOOR = 0.15 if candidates_count < 30 else 0.25
+            _FALLBACK_NOISE_FLOOR = 0.15 if _db_chunk_count < 30 else 0.25
             if not positive and final:
                 _sef_hd = max(final, key=lambda x: x[0])
                 if _sef_hd[0] >= _FALLBACK_NOISE_FLOOR:
@@ -3070,8 +3084,8 @@ def main():
             # 修复：hard_deadline 路径用闭包变量做零成本兜底。
             if top_k:
                 # iter767: tiered_small_db — 分级小库阈值
-                _hd_tiny_db = candidates_count < 30
-                _hd_small_db = candidates_count < 100
+                _hd_tiny_db = _db_chunk_count < 30
+                _hd_small_db = _db_chunk_count < 100
                 # iter777: tiny_db 24h 10/8, 7d 20/15
                 top_k = [(s, c) for s, c in top_k
                          if _recent_24h_counts.get(c["id"], 0) < ((10 if s >= 0.5 else 8) if _hd_tiny_db else (4 if s >= 0.5 else 3) if _hd_small_db else (3 if s >= 0.5 else 2))
@@ -3576,7 +3590,7 @@ def main():
         #   score=0.0 → 原 > 0 条件阻止 fallback。空召回 = 系统零价值。
         # iter770: fallback_noise_gate — fallback 也需硬性下限
         # iter771: tiny_db_fallback_relax — 小库降至 0.15（同 hard_deadline 路径）
-        _FALLBACK_NOISE_FLOOR_FULL = 0.15 if candidates_count < 30 else 0.25
+        _FALLBACK_NOISE_FLOOR_FULL = 0.15 if _db_chunk_count < 30 else 0.25
         if not positive and final:
             _sef_full = max(final, key=lambda x: x[0])
             if _sef_full[0] >= _FALLBACK_NOISE_FLOOR_FULL:
@@ -3719,7 +3733,7 @@ def main():
             _inject_hard_cap = _sysctl("retriever.constraint_inject_hard_cap")
             # iter756: small_db_bw_tighten (constraint path); iter774: tiny_db_bw_relax
             if _local_bw_window <= 30 and (not _inject_hard_cap or _inject_hard_cap > 0.12):
-                _inject_hard_cap = 0.25 if candidates_count < 30 else 0.12
+                _inject_hard_cap = 0.25 if _db_chunk_count < 30 else 0.12
             # iter608: session_constraint_cap — 同 session 内同一 constraint 注入上限
             # 根因：_ac_gated 的全局 hard_cap 依赖 recall_count 累积到阈值才生效，
             #   但单次长 session（如 memory-os 迭代 agent）可连续触发多次 retrieval，
@@ -3746,8 +3760,8 @@ def main():
                     return False
                 # iter617: 24h burst suppress 也在 constraint 通道生效
                 # iter764: sync_small_db_relax — 同步 daemon iter703
-                _cst_tiny_db = candidates_count < 30
-                _cst_small_db = candidates_count < 100
+                _cst_tiny_db = _db_chunk_count < 30
+                _cst_small_db = _db_chunk_count < 100
                 if _recent_24h_counts.get(_cid, 0) >= ((5 if _cst_tiny_db else 3) if _cst_small_db else 2):
                     return False
                 # iter618: 7d rolling suppress 也在 constraint 通道生效
@@ -4207,8 +4221,8 @@ def main():
                 _sf663_conn.close()
                 _pre663 = len(top_k)
                 # iter764: sync_small_db_relax — 同步 daemon iter704 小库放宽
-                _sf663_tiny_db = candidates_count < 30
-                _sf663_small_db = candidates_count < 100
+                _sf663_tiny_db = _db_chunk_count < 30
+                _sf663_small_db = _db_chunk_count < 100
                 # iter783: sync_final_gate_thresholds — 与 _score_chunk iter781 对齐
                 # 根因：iter781 收紧 _score_chunk 24h=5/4, 7d=10/8，但 final_gate 仍是 10/8, 20/15
                 #   导致 _score_chunk suppress 因 cached counts 失效时，final_gate 兜底完全无效。
@@ -4299,8 +4313,8 @@ def main():
                 _cut758_7d = (_now758 - _td758(days=7)).isoformat()
                 _pre758 = len(top_k)
                 # iter764: sync_small_db_relax — 同步 daemon iter703 小库放宽
-                _sf758_tiny_db = candidates_count < 30
-                _sf758_small_db = candidates_count < 100
+                _sf758_tiny_db = _db_chunk_count < 30
+                _sf758_small_db = _db_chunk_count < 100
                 # iter783: sync_final_gate_thresholds — 与 _score_chunk iter781 对齐
                 top_k = [(s, c) for s, c in top_k
                          if sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_24h) < ((5 if s >= 0.5 else 4) if _sf758_tiny_db else (4 if s >= 0.5 else 3) if _sf758_small_db else (3 if s >= 0.5 else 2))

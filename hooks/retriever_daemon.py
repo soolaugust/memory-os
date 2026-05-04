@@ -3099,10 +3099,18 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
         _recent_7d_counts = {}   # iter630: same — suppress must degrade to no-op, not crash
         _effective_bw_window = 30
         _local_bw_window = 30  # iter610: fallback
+        _db_chunk_count = 50  # iter797: fallback for tiny/small判定
         try:
             # iter602: 用标准连接（非 immutable）读取 recall_traces
             import sqlite3 as _rc_sql
             _rc_conn = _rc_sql.connect(str(STORE_DB))
+            # iter797: 查询实际 chunk 总数
+            try:
+                _db_chunk_count = _rc_conn.execute(
+                    "SELECT COUNT(*) FROM memory_chunks WHERE project=?", (project,)
+                ).fetchone()[0] or 0
+            except Exception:
+                pass
             try:
                 if _psi_cached:
                     _recall_counts = _psi_gov_rc_cached[2]
@@ -3643,8 +3651,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             #   DB<100 chunk 时 24h:3→5, 7d:5→8（低分）/ 24h:3→6, 7d:5→10（高分）
             #   根因：40 chunk × 频繁对话 → 2次/24h 即封锁 → 注入率骤降
             # iter767: tiered_small_db — 分级小库阈值
-            _s672_tiny = candidates_count < 30
-            _s672_small = candidates_count < 100
+            _s672_tiny = _db_chunk_count < 30
+            _s672_small = _db_chunk_count < 100
             # iter781: tiny_db_suppress_tighten — 收紧 tiny_db 24h 5/4, 7d 10/8
             _s672_24h_t = (5 if score >= 0.5 else 4) if _s672_tiny else (4 if score >= 0.5 else 3) if _s672_small else (3 if score >= 0.5 else 2)
             _s672_7d_t = (10 if score >= 0.5 else 8) if _s672_tiny else (7 if score >= 0.5 else 5) if _s672_small else (5 if score >= 0.5 else 3)
@@ -3721,8 +3729,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             # iter619: 阈值收紧 24h:3→2, 7d:8→5
             # iter672: relevance_exempt — 高分 chunk 放宽阈值，防 suppress 过杀
             # iter767: tiered_small_db — 分级小库阈值（同 _score_chunk）
-            _s672d_tiny = candidates_count < 30
-            _s672d_small = candidates_count < 100
+            _s672d_tiny = _db_chunk_count < 30
+            _s672d_small = _db_chunk_count < 100
             # iter781: tiny_db_suppress_tighten — 收紧 tiny_db 24h 5/4, 7d 10/8
             _s672d_24h_t = (5 if score >= 0.5 else 4) if _s672d_tiny else (4 if score >= 0.5 else 3) if _s672d_small else (3 if score >= 0.5 else 2)
             _s672d_7d_t = (10 if score >= 0.5 else 8) if _s672d_tiny else (7 if score >= 0.5 else 5) if _s672d_small else (5 if score >= 0.5 else 3)
@@ -3786,8 +3794,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             # iter756: small_db_bw_tighten; iter774: tiny_db_bw_relax
             #   根因(756)：42 chunk 库中 hard_cap=0.30 → rc>9 才 suppress → 逃逸。
             #   根因(774)：6 chunk 库中 0.12 → rc≥3 suppress → cands=3 全灭 → 66% 空召回。
-            if candidates_count < 100:
-                _inject_hard_cap = 0.25 if candidates_count < 30 else 0.12
+            if _db_chunk_count < 100:
+                _inject_hard_cap = 0.25 if _db_chunk_count < 30 else 0.12
             fts_ids = {chunk[_CI_ID] for chunk in fts_results}  # iter235: positional tuple
             final = [(_score_chunk(chunk, chunk[_CI_FR] / max_rank), chunk)
                      for chunk in fts_results]
@@ -3913,8 +3921,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 return
             candidates_count = len(chunks)
             # iter756: small_db_bw_tighten; iter774: tiny_db_bw_relax (BM25 path)
-            if candidates_count < 100:
-                _inject_hard_cap = 0.25 if candidates_count < 30 else 0.12
+            if _db_chunk_count < 100:
+                _inject_hard_cap = 0.25 if _db_chunk_count < 30 else 0.12
             # iter683: raw_relevance_gate — 绝对相关性门槛
             # 根因（用户可感知）：normalize 是相对排名（max=1.0），当 DB 中无真正相关 chunk 时，
             # 噪声匹配（中文通用 bigram 重叠）被放大到 1.0 超过阈值 → 注入不相关内容。
@@ -3958,7 +3966,7 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             # ── iter689: score_empty_fallback (hard_deadline) ──
             # iter770: fallback_noise_gate — 硬性下限防止低分垃圾注入
             # iter771: tiny_db_fallback_relax — 小库降至 0.15
-            _FALLBACK_NOISE_FLOOR = 0.15 if candidates_count < 30 else 0.25
+            _FALLBACK_NOISE_FLOOR = 0.15 if _db_chunk_count < 30 else 0.25
             if not top_k and final:
                 _sef_hd = max(final, key=_SORT_KEY)
                 if _sef_hd[0] >= _FALLBACK_NOISE_FLOOR:
@@ -4102,7 +4110,7 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
         # iter751: suppress 全灭兜底 — score=0 时用 importance 排序选最佳 1 条
         # iter770: fallback_noise_gate — 硬性下限防止低分垃圾注入
         # iter771: tiny_db_fallback_relax — 小库降至 0.15
-        _FALLBACK_NOISE_FLOOR_FULL = 0.15 if candidates_count < 30 else 0.25
+        _FALLBACK_NOISE_FLOOR_FULL = 0.15 if _db_chunk_count < 30 else 0.25
         if not top_k and final:
             _sef_full = max(final, key=_SORT_KEY)
             if _sef_full[0] >= _FALLBACK_NOISE_FLOOR_FULL:
@@ -4314,7 +4322,7 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 # 修复：从 final（scoring 后的全量候选）中挑 score 最高且 >0 的降级注入。
                 # iter770: fallback_noise_gate — 硬性下限防止低分垃圾注入
                 # iter771: tiny_db_fallback_relax — 小库降至 0.15
-                _FALLBACK_NOISE_FLOOR_LATE = 0.15 if candidates_count < 30 else 0.25
+                _FALLBACK_NOISE_FLOOR_LATE = 0.15 if _db_chunk_count < 30 else 0.25
                 if final:
                     _sef_best = max(final, key=_SORT_KEY)
                     if _sef_best[0] >= _FALLBACK_NOISE_FLOOR_LATE:
@@ -4393,8 +4401,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 _sf663d_conn.close()
                 _pre663d = len(top_k)
                 # iter767: tiered_small_db — 分级小库阈值（同 _score_chunk）
-                _sf663d_tiny_db = candidates_count < 30
-                _sf663d_small_db = candidates_count < 100
+                _sf663d_tiny_db = _db_chunk_count < 30
+                _sf663d_small_db = _db_chunk_count < 100
                 # iter783: sync_final_gate_thresholds — 与 _score_chunk iter781 对齐
                 # 根因同 retriever.py：final_gate 宽松阈值(10/8, 20/15)导致 _score_chunk
                 #   suppress 因 cached counts 失效时兜底无效。
