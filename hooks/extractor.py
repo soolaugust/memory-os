@@ -1211,7 +1211,12 @@ def _is_quality_chunk(summary: str) -> bool:
                 # 数据驱动：id=61cd3637 "空召回率 72.5%" 含 trace/candidates/全灭，
                 #   通过了 iter696 的过滤（只拦 "空注入率" 未拦 "空召回率"）
                 "空召回率", "candidates_rescue", "iter69", "iter70",
-                "hard_deadline", "score_chunk", "top_k_data"]
+                "hard_deadline", "score_chunk", "top_k_data",
+                # iter701: content_echo_gate — 拦截 content=summary 的残留噪声
+                # 数据驱动：6d4f68bb "降级注入 1 条最佳结果" content=summary，
+                #   描述 memory-os 内部降级策略，对用户零价值（ac=0）。
+                "降级注入", "降级阈值", "空返回", "注入策略",
+                "score_empty_fallback", "suppress_pierce"]
     if any(kw in s for kw in noise_kw):
         return False
     placeholders = {"方案 X 是最优解", "extractor 升级", "KnowledgeRouter"}
@@ -2005,6 +2010,13 @@ def _write_chunk(chunk_type: str, summary: str, project: str, session_id: str,
     # 这些类型天然短暂（会话级），写入 store 只增加 FTS 噪声和 swap 压力。
     _EPHEMERAL_TYPES = {"prompt_context", "conversation_summary"}
     if chunk_type in _EPHEMERAL_TYPES:
+        return
+    # iter701: content_echo_gate — summary 无补充内容时拒绝写入
+    # 数据驱动：6d4f68bb content=summary="选就会降级注入 1 条最佳结果"（ac=0）。
+    # 根因：调用方未传 content_override，_write_chunk 自动生成 "[type] summary"，
+    #   但 summary 本身是句子碎片（<15字），无法被 FTS 有效检索。
+    # 阈值 15 字：生产中最短合法 chunk summary 为 19 字（test），wiki import 有 content_override 不受影响。
+    if not content_override and len(summary) < 15:
         return
     # iter607: _write_chunk 内置 quality gate — 最终防线
     # 根因（数据驱动，2026-05-03）：causal_chain/decision 绕过调用方的 _is_quality_chunk
