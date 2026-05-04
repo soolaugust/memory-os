@@ -1841,6 +1841,12 @@ CHUNK_VERSION_FILE = os.path.join(MEMORY_OS_DIR, ".chunk_version")
 # 修复：进程内 set 跟踪已注入 session，未注入的 session 不走 hash/TLB 缓存快捷路径。
 # 内存安全：session UUID 36B × 1000 sessions ≈ 36KB，daemon 重启自然清空。
 _sessions_with_injection: set = set()
+# iter807: daemon_inmem_suppress — 消除 writeback 竞争导致的 suppress 逃逸
+# 根因（数据驱动，2026-05-05）：daemon writeback 异步，final_gate 查 DB 时前一次 trace
+#   未 commit → 24h suppress 计数滞后 → 连续注入逃逸（如 38 分钟内同 chunk 注入 3 次）。
+# 修复：进程内记录每次注入的 (chunk_id, unix_ts)，final_gate 叠加内存数据。
+# 内存安全：7d 上限 ~200 entries × 60B ≈ 12KB，每次请求 gc 超 7d 条目。
+_daemon_inject_log: list = []  # [(chunk_id, unix_timestamp), ...]
 PAGE_FAULT_LOG = os.path.join(MEMORY_OS_DIR, "page_fault_log.json")
 SHADOW_TRACE_FILE = os.path.join(MEMORY_OS_DIR, ".shadow_trace.json")
 MADVISE_FILE_PATH = os.path.join(MEMORY_OS_DIR, "madvise.json")
@@ -4044,6 +4050,10 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     # Output is valid JSON regardless; Claude Code parses \uXXXX → correct Unicode str.
                     sys.stdout.write(_OUTPUT_HEADER + json.dumps(context_text, ensure_ascii=True) + "}}\n")
                     _sessions_with_injection.add(session_id)  # iter804
+                    # iter807: daemon_inmem_suppress — 记录注入到进程内存
+                    _now_ts = time.time()
+                    for _iid807 in top_k_ids:
+                        _daemon_inject_log.append((_iid807, _now_ts))
                     # iter173: persistent conn — do NOT close
                     try:
                         wconn = open_db()
@@ -4418,6 +4428,27 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     except Exception:
                         continue
                 _sf663d_conn.close()
+                # iter807: daemon_inmem_suppress — 叠加进程内存注入记录（消除 writeback 竞争）
+                # 根因：writeback 异步 → DB 查询滞后 → 连续注入逃逸。
+                # 方案：进程内计数取 max(db, inmem)——不相加避免双重计数。
+                _now_unix = time.time()
+                _cut_24h_unix = _now_unix - 86400
+                _cut_7d_unix = _now_unix - 604800
+                _inmem_24h = {}
+                _inmem_7d = {}
+                _gc_idx = 0
+                for _il807_cid, _il807_ts in _daemon_inject_log:
+                    if _il807_ts < _cut_7d_unix:
+                        _gc_idx += 1
+                        continue
+                    _inmem_7d[_il807_cid] = _inmem_7d.get(_il807_cid, 0) + 1
+                    if _il807_ts >= _cut_24h_unix:
+                        _inmem_24h[_il807_cid] = _inmem_24h.get(_il807_cid, 0) + 1
+                if _gc_idx > 0:
+                    del _daemon_inject_log[:_gc_idx]
+                for _mk807 in set(_inmem_24h) | set(_inmem_7d):
+                    _rt663d_24h[_mk807] = max(_rt663d_24h.get(_mk807, 0), _inmem_24h.get(_mk807, 0))
+                    _rt663d_7d[_mk807] = max(_rt663d_7d.get(_mk807, 0), _inmem_7d.get(_mk807, 0))
                 _pre663d = len(top_k)
                 # iter767: tiered_small_db — 分级小库阈值（同 _score_chunk）
                 _sf663d_tiny_db = _db_chunk_count < 30
@@ -4590,6 +4621,10 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
         # iter228: ensure_ascii=True saves ~0.977us (C encoder skips UTF-8 path, outputs \uXXXX)
         sys.stdout.write(_OUTPUT_HEADER + json.dumps(context_text, ensure_ascii=True) + "}}\n")
         _sessions_with_injection.add(session_id)  # iter804
+        # iter807: daemon_inmem_suppress — 记录注入到进程内存
+        _now_ts = time.time()
+        for _iid807 in top_k_ids:
+            _daemon_inject_log.append((_iid807, _now_ts))
         # iter219: removed sys.stdout.flush() — no-op on StringIO (captured in _handle_connection)
         # iter173: persistent conn — do NOT close here; writeback will invalidate after write
 
