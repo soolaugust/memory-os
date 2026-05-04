@@ -2372,7 +2372,10 @@ def main():
                 #   35 chunk 库 24h 3 次注入同一 chunk = 8.6% 集中度，用户感知垄断。
                 # 修复：small_db 24h 阈值 4/3 → 3/2；tiny_db 同步（unify 原则）。
                 #   suppress_fallback 兜底确保不会空召回。
-                _suppress_24h_thresh = (3 if score >= 0.5 else 2) if _tiny_db else (3 if score >= 0.5 else 2) if _small_db else (3 if score >= 0.5 else 2)
+                # iter810: tiny_db_24h_relax — 小库统一阈值=3，不因 low-score 过早 suppress
+                # 根因：22 chunk 库中 score=0.3 的有价值知识被 24h>=2 suppress，
+                #   导致 14/20 次注入只有 1 条。小库知识密度高，重复注入是正常的。
+                _suppress_24h_thresh = 3 if _tiny_db else (3 if score >= 0.5 else 2) if _small_db else (3 if score >= 0.5 else 2)
                 if _r24_cnt >= _suppress_24h_thresh:
                     score = 0.0
                     _hard_suppressed = True  # iter616
@@ -2383,7 +2386,8 @@ def main():
             if not _micro_db:
                 # iter806: small_db_suppress_tighten — 7d 阈值同步收紧
                 # small_db 7/5 → 5/4；tiny_db 同步（unify 原则）。
-                _suppress_7d_thresh = (5 if score >= 0.5 else 4) if _tiny_db else (5 if score >= 0.5 else 4) if _small_db else (5 if score >= 0.5 else 3)
+                # iter810: tiny_db_24h_relax — 小库 7d 统一阈值=5
+                _suppress_7d_thresh = 5 if _tiny_db else (5 if score >= 0.5 else 4) if _small_db else (5 if score >= 0.5 else 3)
                 if _r7d_cnt >= _suppress_7d_thresh:
                     score = 0.0
                     _hard_suppressed = True
@@ -4288,11 +4292,10 @@ def main():
                 # iter764: sync_small_db_relax — 同步 daemon iter704 小库放宽
                 _sf663_tiny_db = _db_chunk_count < 30
                 _sf663_small_db = _db_chunk_count < 100
-                # iter806: sync small_db_suppress_tighten to FULL final_gate
-                # small_db 24h 4/3→3/2, 7d 7/5→5/4; tiny_db 同步（unify 原则）
+                # iter810: tiny_db_24h_relax — sync FULL final_gate
                 top_k = [(s, c) for s, c in top_k
-                         if _rt663_24h.get(c["id"], 0) < ((3 if s >= 0.5 else 2) if _sf663_tiny_db else (3 if s >= 0.5 else 2) if _sf663_small_db else (3 if s >= 0.5 else 2))
-                         and _rt663_7d.get(c["id"], 0) < ((5 if s >= 0.5 else 4) if _sf663_tiny_db else (5 if s >= 0.5 else 4) if _sf663_small_db else (5 if s >= 0.5 else 3))]
+                         if _rt663_24h.get(c["id"], 0) < (3 if _sf663_tiny_db else (3 if s >= 0.5 else 2) if _sf663_small_db else (3 if s >= 0.5 else 2))
+                         and _rt663_7d.get(c["id"], 0) < (5 if _sf663_tiny_db else (5 if s >= 0.5 else 4) if _sf663_small_db else (5 if s >= 0.5 else 3))]
                 if len(top_k) < _pre663:
                     _deferred.log(DMESG_WARN, "retriever",
                                   f"iter663_suppress_final_gate: filtered "
@@ -4385,10 +4388,10 @@ def main():
                 # iter764: sync_small_db_relax — 同步 daemon iter703 小库放宽
                 _sf758_tiny_db = _db_chunk_count < 30
                 _sf758_small_db = _db_chunk_count < 100
-                # iter806: sync small_db_suppress_tighten to LITE final_gate
+                # iter810: tiny_db_24h_relax — sync LITE final_gate
                 top_k = [(s, c) for s, c in top_k
-                         if sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_24h) < ((3 if s >= 0.5 else 2) if _sf758_tiny_db else (3 if s >= 0.5 else 2) if _sf758_small_db else (3 if s >= 0.5 else 2))
-                         and sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_7d) < ((5 if s >= 0.5 else 4) if _sf758_tiny_db else (5 if s >= 0.5 else 4) if _sf758_small_db else (5 if s >= 0.5 else 3))]
+                         if sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_24h) < (3 if _sf758_tiny_db else (3 if s >= 0.5 else 2) if _sf758_small_db else (3 if s >= 0.5 else 2))
+                         and sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_7d) < (5 if _sf758_tiny_db else (5 if s >= 0.5 else 4) if _sf758_small_db else (5 if s >= 0.5 else 3))]
                 if len(top_k) < _pre758:
                     _deferred.log(DMESG_WARN, "retriever",
                                   f"iter758_suppress_final_gate_lite: filtered "
