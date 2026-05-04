@@ -2233,8 +2233,16 @@ def main():
             #   3192147e 在同 session 内被注入 3 次，0.70 惩罚不足以压下。
             # 修复：累进惩罚 >=2 → *0.40, >=4 → *0.05（近乎 suppress）。
             #   已见过的知识边际价值急剧递减，第 2 次后信息增量 ≈0。
+            # iter788: tiny_db_session_hard_suppress — 小库 >=3 直接 hard suppress
+            #   根因（数据驱动，2026-05-04）：import-90139 在 tiny_db(cands=5~6)
+            #   同 session 被注入 3 次，*0.40 衰减不够（唯一高分候选仍入选）。
+            #   24h suppress 阈值=5 未触发。用户已看过 2 次，第 3 次零信息增量。
             _sess_inj = _session_injection_counts.get(chunk.get("id", ""), 0)
-            if _sess_inj >= _tmv_session_density_gate:   # >=4: near-suppress
+            _sdg_hard = 3 if _tiny_db else _tmv_session_density_gate
+            if _sess_inj >= _sdg_hard:
+                score = 0.0
+                _hard_suppressed = True
+            elif _sess_inj >= _tmv_session_density_gate:   # >=4: near-suppress (non-tiny)
                 score *= 0.05
             elif _sess_inj >= 2:                          # >=2: strong decay
                 score *= 0.40
