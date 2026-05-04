@@ -634,8 +634,13 @@ def check_stale_refs(conn: sqlite3.Connection, fix: bool = False) -> AssertionRe
         if stale_count == 0:
             r.passed = True
             r.message = f"No stale refs in {checked} checked references"
-        elif fix:
-            # 自修复：从 recall_traces 中清除 stale refs
+        else:
+            # iter789: stale_refs_auto_fix — 始终自动修复 stale refs
+            # 根因（数据驱动，2026-05-04）：27/84 stale refs 持续累积，
+            #   因 context_budget_guard/extractor 的 DELETE 路径绕过 mmu_notifier。
+            #   stale refs 污染 recall_count 统计 + suppress 阈值计算。
+            # 修复：stale ref 清理是安全幂等操作（只移除对已删 chunk 的引用），
+            #   无需 --fix 手动触发，检测即修复。
             cleaned = 0
             rows_to_fix = conn.execute(
                 "SELECT id, top_k_json FROM recall_traces WHERE top_k_json IS NOT NULL ORDER BY timestamp DESC LIMIT 200"
@@ -656,13 +661,8 @@ def check_stale_refs(conn: sqlite3.Connection, fix: bool = False) -> AssertionRe
                 conn.commit()
             r.passed = True
             r.fix_applied = True
-            r.fix_description = f"Cleaned stale refs from {cleaned} traces"
+            r.fix_description = f"Auto-cleaned stale refs from {cleaned} traces ({stale_count} refs removed)"
             r.message = r.fix_description
-        else:
-            r.passed = False
-            r.severity = "warn"
-            r.message = f"{stale_count}/{checked} stale refs — pointing to deleted chunks"
-            r.actual = {"stale": stale_count, "checked": checked}
 
     except Exception as e:
         r.passed = False

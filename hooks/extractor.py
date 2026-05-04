@@ -3736,26 +3736,31 @@ def main():
         pass  # 冷备份失败不影响主流程（mm 可能离线）
 
     # ── 会话结束 GC：清除 prompt_context chunks（临时短暂信号，无跨会话召回价值）──
+    # iter789: 改用 delete_chunks() 统一路径，自动触发 mmu_notifier 清理 stale refs
     try:
         _gc_conn = open_db()
         ensure_schema(_gc_conn)
-        _gc_deleted = _gc_conn.execute(
-            "DELETE FROM memory_chunks WHERE chunk_type = 'prompt_context'"
-        ).rowcount
+        from store_vfs import delete_chunks as _gc_delete_chunks
+        _gc_pc_ids = [r[0] for r in _gc_conn.execute(
+            "SELECT id FROM memory_chunks WHERE chunk_type = 'prompt_context'"
+        ).fetchall()]
+        _gc_deleted = _gc_delete_chunks(_gc_conn, _gc_pc_ids) if _gc_pc_ids else 0
         # iter114: tool_insight GC — bash 输出量化结论是 point-in-time 数据，
         # 跨会话召回率极低（100% 从未访问），与 prompt_context 同级清除。
         # 保留逻辑：access_count >= 1 的 tool_insight 说明曾被实际使用，保留。
         # OS 类比：tmpfs — 进程退出时自动释放 VMA 映射的临时文件系统内容。
-        _gc_tool = _gc_conn.execute(
-            "DELETE FROM memory_chunks WHERE chunk_type = 'tool_insight' AND COALESCE(access_count,0) = 0"
-        ).rowcount
+        _gc_ti_ids = [r[0] for r in _gc_conn.execute(
+            "SELECT id FROM memory_chunks WHERE chunk_type = 'tool_insight' AND COALESCE(access_count,0) = 0"
+        ).fetchall()]
+        _gc_tool = _gc_delete_chunks(_gc_conn, _gc_ti_ids) if _gc_ti_ids else 0
         _gc_deleted += _gc_tool
         # iter328: entity_stub GC — NER 提取的实体存根 100% zero-access（噪声率高）
         # 策略：只保留 access_count >= 1 的（曾被实际用于检索），其余清除。
         # OS 类比：dentries 的 d_count=0 时被 dentry_cache 的 LRU 回收。
-        _gc_entity = _gc_conn.execute(
-            "DELETE FROM memory_chunks WHERE chunk_type = 'entity_stub' AND COALESCE(access_count,0) = 0"
-        ).rowcount
+        _gc_es_ids = [r[0] for r in _gc_conn.execute(
+            "SELECT id FROM memory_chunks WHERE chunk_type = 'entity_stub' AND COALESCE(access_count,0) = 0"
+        ).fetchall()]
+        _gc_entity = _gc_delete_chunks(_gc_conn, _gc_es_ids) if _gc_es_ids else 0
         _gc_deleted += _gc_entity
         _gc_conn.commit()
         if _gc_deleted > 0:

@@ -237,9 +237,10 @@ def _db_vacuum(db_path: Path):
         #   已写入的噪声 chunk 仍留在 store 中（实测 14 条，占零访问 chunk 的 37%）。
         # 清理条件：access_count=0（从未被用户召回）AND 匹配迭代器自引用特征。
         # 安全性：只删零访问 chunk，不影响任何已被用户使用的知识。
+        # iter789: 改用 SELECT+DELETE+mmu_notifier 防止 stale refs 累积
         try:
-            _noise_deleted = conn.execute("""
-                DELETE FROM memory_chunks WHERE access_count = 0 AND (
+            _noise_ids = [r[0] for r in conn.execute("""
+                SELECT id FROM memory_chunks WHERE access_count = 0 AND (
                     chunk_type = 'prompt_context'
                     OR (summary LIKE '%inject%suppress%' OR summary LIKE '%suppress%inject%')
                     OR (summary LIKE '%zero_access%' OR summary LIKE '%零访问率%')
@@ -263,8 +264,11 @@ def _db_vacuum(db_path: Path):
                     OR summary LIKE '%项目孤岛化%'
                     OR summary LIKE '%daemon injected=%'
                 )
-            """).rowcount
-            freed_total += _noise_deleted
+            """).fetchall()]
+            if _noise_ids:
+                from store_vfs import delete_chunks as _delete_chunks
+                _noise_deleted = _delete_chunks(conn, _noise_ids)
+                freed_total += _noise_deleted
         except Exception:
             pass
 
