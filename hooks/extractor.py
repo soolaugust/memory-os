@@ -1202,7 +1202,11 @@ def _is_quality_chunk(summary: str) -> bool:
                 # iter673: 迭代器工作汇报模式 — "+N/-M 行"改动量报告
                 "改动 +", "改动 -",
                 # iter656: 对话诊断/审计输出碎片 — AI 分析 AIOS 时产出的数据行
-                "边际收益在递减", "存量清理：swap_out", "Active chunks"]
+                "边际收益在递减", "存量清理：swap_out", "Active chunks",
+                # iter696: memory-os 迭代器自身实现细节 — retriever/daemon 内部机制
+                # 数据驱动：8 条零访问 chunk 含 retriever.py/suppress/threshold 等自引用
+                "retriever.py", "retriever_daemon.py", "空注入率",
+                "burst suppress", "suppress_fallback", "zero_relevance_gate"]
     if any(kw in s for kw in noise_kw):
         return False
     placeholders = {"方案 X 是最优解", "extractor 升级", "KnowledgeRouter"}
