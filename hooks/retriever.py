@@ -4006,6 +4006,26 @@ def main():
                                   f"score={_pebf_score:.3f} id={_pebf_id[:12]}",
                                   session_id=session_id, project=project)
 
+            # ── iter792: importance_ultimate_fallback — 消灭 FULL 路径空召回 ──
+            # 根因（数据驱动，2026-05-04）：27% trace（27/100）走到此处 top_k=[]。
+            #   FTS5 检索到 3-14 candidates 但 score 全 < min_thresh(0.30)。
+            #   iter700/775/776 fallback 覆盖了 score<0.30 的情况，但仍有空召回，
+            #   说明某些边界条件（异常路径/条件组合）导致 fallback 链被跳过。
+            # 修复：在最终 exit 前，从 final 按 importance 选最佳 1 条兜底。
+            #   空召回 = 系统零价值，注入低分但有用的知识远优于什么都不注入。
+            if not top_k and final:
+                _iuf_by_imp = [(float(c.get("importance", 0) or 0), s, c) for s, c in final
+                               if (c.get("access_count", 0) or 0) < 30]
+                if _iuf_by_imp:
+                    _iuf_best = max(_iuf_by_imp, key=lambda x: x[0])
+                    top_k = [(_iuf_best[0] * 0.01, _iuf_best[2])]
+                    _deferred.log(DMESG_WARN, "retriever",
+                                  f"iter792_importance_ultimate_fallback: "
+                                  f"imp={_iuf_best[0]:.2f} orig_s={_iuf_best[1]:.4f} "
+                                  f"id={_iuf_best[2].get('id','')[:12]} "
+                                  f"final_len={len(final)} positive_was_empty",
+                                  session_id=session_id, project=project)
+
             if not top_k:
                 # 迭代84：关闭只读连接，flush deferred logs
                 conn.close()
