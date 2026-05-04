@@ -84,16 +84,12 @@ def swap_out(conn: sqlite3.Connection, chunk_ids: list) -> dict:
         importance = row[9] if row[9] is not None else 0.5
         # 低于阈值的 chunk 直接删除，不值得 swap 保留
         if importance < min_imp:
-            # iter142: 删除前先清理 FTS5 索引（防 ghost 条目）
+            # iter142+iter768: 删除前先清理 FTS5 索引（防 ghost 条目）
+            # iter768 fix: FTS5 是独立表（无 rowid_ref 列），用 id 列匹配
             try:
-                _rowid_row = conn.execute(
-                    "SELECT rowid FROM memory_chunks WHERE id=?", (cid,)
-                ).fetchone()
-                if _rowid_row:
-                    conn.execute(
-                        "DELETE FROM memory_chunks_fts WHERE rowid_ref=?",
-                        (str(_rowid_row[0]),)
-                    )
+                conn.execute(
+                    "DELETE FROM memory_chunks_fts WHERE id=?", (cid,)
+                )
             except Exception:
                 pass
             conn.execute("DELETE FROM memory_chunks WHERE id = ?", (cid,))
@@ -120,16 +116,12 @@ def swap_out(conn: sqlite3.Connection, chunk_ids: list) -> dict:
             (cid, now_iso, row[3], row[5], importance, row[12], compressed),
         )
 
-        # 从主表删除（iter142: 同步清理 FTS5 索引防 ghost 条目）
+        # 从主表删除（iter142+iter768: 同步清理 FTS5 索引防 ghost 条目）
+        # iter768 fix: FTS5 是独立表（无 rowid_ref 列），用 id 列匹配
         try:
-            _rowid_row2 = conn.execute(
-                "SELECT rowid FROM memory_chunks WHERE id=?", (cid,)
-            ).fetchone()
-            if _rowid_row2:
-                conn.execute(
-                    "DELETE FROM memory_chunks_fts WHERE rowid_ref=?",
-                    (str(_rowid_row2[0]),)
-                )
+            conn.execute(
+                "DELETE FROM memory_chunks_fts WHERE id=?", (cid,)
+            )
         except Exception:
             pass
         conn.execute("DELETE FROM memory_chunks WHERE id = ?", (cid,))
