@@ -3931,12 +3931,10 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             # iter695: threshold_degrade — 阈值过高全灭时降级到默认 0.30
             if not positive and _min_thresh > 0.30:
                 positive = [(s, c) for s, c in final if s >= 0.30 and s > 0]
-            # iter697: candidates_rescue — 有候选全灭时按 top1*0.8 降级（最低 0.15）
-            # iter698: 门槛 >=5 → >=2（candidates=3 场景 11 次空召回）
-            if not positive and final and len(final) >= 2:
-                _rescue_thresh = max(final[0][0] * 0.8, 0.15)
-                if _rescue_thresh < _min_thresh:
-                    positive = [(s, c) for s, c in final if s >= _rescue_thresh and s > 0]
+            # iter759: 移除 candidates_rescue — 宁可不注入也不注入垃圾
+            # 根因（用户可感知）：rescue 下限 0.15 导致 score=0.156 的不相关 PE 分析被注入，
+            # 占用 context 空间干扰注意力。注入不相关内容比不注入更糟。
+            # 原 iter697/698 rescue 机制已删除。
             if _drr_enabled and len(positive) > effective_top_k:
                 top_k = _drr_select(positive, effective_top_k)
             else:
@@ -4072,12 +4070,7 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
         # iter695: threshold_degrade — 阈值过高全灭时降级到默认 0.30
         if not positive and _min_thresh > 0.30:
             positive = [(s, c) for s, c in final if s >= 0.30 and s > 0]
-        # iter697: candidates_rescue — 有候选全灭时按 top1*0.8 降级（最低 0.15）
-        # iter698: 门槛 >=5 → >=2（candidates=3 场景 11 次空召回）
-        if not positive and final and len(final) >= 2:
-            _rescue_thresh = max(final[0][0] * 0.8, 0.15)
-            if _rescue_thresh < _min_thresh:
-                positive = [(s, c) for s, c in final if s >= _rescue_thresh and s > 0]
+        # iter759: 移除 candidates_rescue（同 hard_deadline 路径）
 
         if _drr_enabled and len(positive) > effective_top_k:
             top_k = _drr_select(positive, effective_top_k)
