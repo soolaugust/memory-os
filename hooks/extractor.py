@@ -1216,7 +1216,11 @@ def _is_quality_chunk(summary: str) -> bool:
                 # 数据驱动：6d4f68bb "降级注入 1 条最佳结果" content=summary，
                 #   描述 memory-os 内部降级策略，对用户零价值（ac=0）。
                 "降级注入", "降级阈值", "空返回", "注入策略",
-                "score_empty_fallback", "suppress_pierce"]
+                "score_empty_fallback", "suppress_pierce",
+                # iter752: 迭代器度量/内部机制通用拦截
+                # 数据驱动：7 个 ac=0 噪声 chunk 含 suppress/全库锁死/误标率/注入率/轮迭代
+                "全库锁死", "饥饿螺旋", "误标率", "注入率",
+                "轮迭代", "连续空召回", "allzero_fallback"]
     if any(kw in s for kw in noise_kw):
         return False
     placeholders = {"方案 X 是最优解", "extractor 升级", "KnowledgeRouter"}
