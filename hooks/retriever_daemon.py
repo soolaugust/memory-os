@@ -2952,6 +2952,9 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
         slots = tlb.get("slots", {})
         last_hash = _read_hash()  # iter201: read once here, reused at L_same_hash + L_reason_base
         if chunk_ver == tlb_ver:
+            # iter780: empty_result_tlb — 空结果缓存避免重复检索空转
+            if prompt_hash in slots and slots[prompt_hash].get("injection_hash") == "__empty__":
+                return
             if prompt_hash in slots and slots[prompt_hash].get("injection_hash") == last_hash:
                 return
             if last_hash:
@@ -4337,6 +4340,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                                       f"pierce best={_spf_best[1][_CI_ID][:12]} imp={_spf_best[0]:.2f}",
                                       session_id=session_id, project=project)
                 if not top_k:
+                    # iter780: empty_result_tlb — 写入空结果标记避免重复空转
+                    _tlb_write(prompt_hash, "__empty__", _get_db_mtime())
                     # iter173: persistent conn — do NOT close
                     if _deferred._buf:  # iter222: direct slot access
                         try:
@@ -4411,6 +4416,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                               f"suppressed, fallback to best={_fb[1][_CI_ID][:12]}",
                               session_id=session_id, project=project)
             else:
+                # iter780: empty_result_tlb — 写入空结果标记避免重复空转
+                _tlb_write(prompt_hash, "__empty__", _get_db_mtime())
                 return
         top_k_ids = sorted([c[_CI_ID] for _, c in top_k])  # iter235
         # iter217: crc32 faster than md5 (~0.712us vs ~1.107us, same 8-char hex format)

@@ -492,6 +492,9 @@ def _vdso_fast_exit() -> bool:
 
                 # L1: prompt_hash + chunk_version 完全匹配
                 if chunk_ver == tlb_ver and prompt_hash in slots and not _gen_expired:
+                    # iter780: empty_result_tlb — 空结果缓存避免重复检索空转
+                    if slots[prompt_hash].get("injection_hash") == "__empty__":
+                        sys.exit(0)  # TLB L1 hit (empty result cached)
                     try:
                         with open(HASH_FILE, encoding="utf-8") as _f:
                             last_hash = _f.read().strip()
