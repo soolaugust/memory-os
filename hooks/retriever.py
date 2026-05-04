@@ -4420,8 +4420,14 @@ def main():
                 _sf758_tiny_db = _db_chunk_count < 30
                 _sf758_small_db = _db_chunk_count < 100
                 # iter810: tiny_db_24h_relax — sync LITE final_gate
+                # iter815: lite_6h_suppress_sync — LITE 路径补充 6h burst suppress（与 FULL 路径 iter813 对齐）
+                # 根因（数据驱动，2026-05-05）：import-90139 在 psi_downgrade LITE 路径
+                #   38 分钟内被 3 个不同 session 注入（02:43/03:13/03:21），因 LITE final_gate
+                #   缺少 6h 检查而逃逸。FULL 路径第 3183 行有 6h<2 但 LITE 路径遗漏。
+                _cut758_6h = (_now758 - _td758(hours=6)).isoformat()
                 top_k = [(s, c) for s, c in top_k
-                         if sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_24h) < (3 if _sf758_tiny_db else (3 if s >= 0.5 else 2) if _sf758_small_db else (3 if s >= 0.5 else 2))
+                         if sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_6h) < 2  # iter815: 6h burst
+                         and sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_24h) < (3 if _sf758_tiny_db else (3 if s >= 0.5 else 2) if _sf758_small_db else (3 if s >= 0.5 else 2))
                          and sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_7d) < (5 if _sf758_tiny_db else (5 if s >= 0.5 else 4) if _sf758_small_db else (5 if s >= 0.5 else 3))]
                 if len(top_k) < _pre758:
                     _deferred.log(DMESG_WARN, "retriever",
