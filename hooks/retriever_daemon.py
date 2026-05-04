@@ -3116,6 +3116,10 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     " AND top_k_json IS NOT NULL AND top_k_json != '[]'", (project,)
                 ).fetchone()[0]
                 _effective_bw_window = min(30, max(1, _atc))
+                # iter773: bw_window_floor — 统计不充分时不应过度 suppress
+                # 根因：bw_window=12 + hard_cap=0.12 → rc>1.44 即 suppress，
+                #   任何 chunk 注入 ≥2 次就被封锁。floor=20 确保 rc>=3 才触发。
+                _effective_bw_window = max(_effective_bw_window, 20)
                 # iter610: hard_cap_local_window — memcg inflate 前的 per-project window
                 _local_bw_window = _effective_bw_window
                 # iter603+606: memcg_stat — cross-project recall 计数 + bw_window parity

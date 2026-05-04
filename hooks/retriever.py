@@ -1687,6 +1687,14 @@ def main():
                 _effective_bw_window = min(30, max(1, _atc))
             except Exception:
                 _effective_bw_window = 30
+            # iter773: bw_window_floor — 统计不充分时不应过度 suppress
+            # 根因（数据驱动，2026-05-04）：project 只有 12 条有效 inject trace，
+            #   _effective_bw_window=12 + hard_cap=0.12 → rc>1.44 即 suppress。
+            #   结果：任何 chunk 被注入 ≥2 次就被 suppress，导致 cands=10 全灭空召回。
+            #   本质：12 条样本不足以判定"垄断"，过早惩罚压制了有价值的知识。
+            # 修复：floor=20 确保 suppress 阈值至少 rc>2.4（rc>=3 才触发），
+            #   让系统积累足够统计量后再做垄断判断。
+            _effective_bw_window = max(_effective_bw_window, 20)
             # iter610: hard_cap_local_window — memcg inflate 前的 per-project window
             # 根因：iter606 memcg inflate 将 _effective_bw_window 从 19→39，
             #   导致 per-project 垄断 chunk (rc=12/39=0.31) 刚好逃脱 hard_cap=0.30。
