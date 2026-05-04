@@ -4555,8 +4555,14 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 pass
         if not top_k:
             # ── iter670: suppress_fallback — suppress 全灭时降级注入最佳 1 条 ──
+            # iter829: fallback_rotation — 排除上次已注入 chunk 避免 same_hash 死循环
             if _pre_suppress_top_k:
-                _fb = max(_pre_suppress_top_k, key=lambda x: x[0])
+                _fb_sorted = sorted(_pre_suppress_top_k, key=lambda x: x[0], reverse=True)
+                _fb = _fb_sorted[0]
+                if last_hash and len(_fb_sorted) > 1:
+                    _fb_hash = '%08x' % zlib.crc32(_fb[1][_CI_ID].encode())
+                    if _fb_hash == last_hash:
+                        _fb = _fb_sorted[1]
                 top_k = [_fb]
                 _deferred.log(DMESG_WARN, "retriever_daemon",
                               f"iter670_suppress_fallback: all {len(_pre_suppress_top_k)} "

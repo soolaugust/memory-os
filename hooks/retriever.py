@@ -3220,8 +3220,15 @@ def main():
                          and _recent_24h_counts.get(c["id"], 0) < ((10 if s >= 0.5 else 8) if _hd_tiny_db else (3 if s >= 0.5 else 2) if _hd_small_db else (3 if s >= 0.5 else 2))
                          and _recent_7d_counts.get(c["id"], 0) < ((20 if s >= 0.5 else 15) if _hd_tiny_db else (8 if s >= 0.5 else 6) if _hd_small_db else (5 if s >= 0.5 else 3))]
             # ── iter670: suppress_fallback — hard_deadline suppress 全灭降级 ──
+            # iter829: fallback_rotation (hard_deadline path)
             if not top_k and _pre_suppress_top_k_hd:
-                _fb_hd = max(_pre_suppress_top_k_hd, key=lambda x: x[0])
+                _fb_hd_sorted = sorted(_pre_suppress_top_k_hd, key=lambda x: x[0], reverse=True)
+                _fb_hd = _fb_hd_sorted[0]
+                _last_hash_hd = _read_hash()
+                if _last_hash_hd and len(_fb_hd_sorted) > 1:
+                    _fb_hd_hash = hashlib.md5(_fb_hd[1].get("id", "").encode()).hexdigest()[:8]
+                    if _fb_hd_hash == _last_hash_hd:
+                        _fb_hd = _fb_hd_sorted[1]
                 top_k = [_fb_hd]
                 _deferred.log(DMESG_WARN, "retriever",
                               f"iter670_suppress_fallback_hd: all {len(_pre_suppress_top_k_hd)} "
@@ -4415,8 +4422,18 @@ def main():
                 pass  # 兜底查询失败不阻塞
         if not top_k:
             # ── iter670: suppress_fallback — suppress 全灭时降级注入最佳 1 条 ──
+            # iter829: fallback_rotation — 避免 fallback 永远选同一 chunk 导致 same_hash 死循环
+            # 根因（数据驱动，2026-05-05）：26% 空召回中 suppress_fallback 恢复的 chunk
+            #   与上次注入的 hash 相同 → same_hash 跳过 → 用户永远看同一个知识。
+            # 修复：排除上次已注入的 chunk 组合，选次优候选。若无次优则仍选最佳。
             if _pre_suppress_top_k:
-                _fb = max(_pre_suppress_top_k, key=lambda x: x[0])
+                _last_hash = _read_hash()
+                _fb_sorted = sorted(_pre_suppress_top_k, key=lambda x: x[0], reverse=True)
+                _fb = _fb_sorted[0]
+                if _last_hash and len(_fb_sorted) > 1:
+                    _fb_hash = hashlib.md5(_fb[1].get("id", "").encode()).hexdigest()[:8]
+                    if _fb_hash == _last_hash:
+                        _fb = _fb_sorted[1]  # 选次优
                 top_k = [_fb]
                 _deferred.log(DMESG_WARN, "retriever",
                               f"iter670_suppress_fallback: all {len(_pre_suppress_top_k)} "
@@ -4515,11 +4532,15 @@ def main():
                                   f"{_pre758 - len(top_k)} chunks (timeline re-read)",
                                   session_id=session_id, project=project)
                 # ── iter793: suppress_fallback_lite — LITE 路径 suppress 全灭降级 ──
-                # 根因（数据驱动，2026-05-04）：FULL 路径有 iter670 suppress_fallback，
-                #   但 LITE 路径 suppress 后 top_k=[] 无任何兜底 → 直接空召回。
-                #   空召回 = 系统零价值，降级注入最佳 1 条远优于无输出。
+                # iter829: fallback_rotation (LITE path)
                 if not top_k and _pre_suppress_top_k_lite:
-                    _fb_lite = max(_pre_suppress_top_k_lite, key=lambda x: x[0])
+                    _fb_lite_sorted = sorted(_pre_suppress_top_k_lite, key=lambda x: x[0], reverse=True)
+                    _fb_lite = _fb_lite_sorted[0]
+                    _last_hash_lite = _read_hash()
+                    if _last_hash_lite and len(_fb_lite_sorted) > 1:
+                        _fb_lite_hash = hashlib.md5(_fb_lite[1].get("id", "").encode()).hexdigest()[:8]
+                        if _fb_lite_hash == _last_hash_lite:
+                            _fb_lite = _fb_lite_sorted[1]
                     top_k = [_fb_lite]
                     _deferred.log(DMESG_WARN, "retriever",
                                   f"iter793_suppress_fallback_lite: all {_pre758} "
