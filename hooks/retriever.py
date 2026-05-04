@@ -3010,6 +3010,19 @@ def main():
                                       f"iter775_dead_zone_fallback_hd: imp={_sef_hd_best[0]:.2f} "
                                       f"max_s={_sef_hd_max:.4f} id={_sef_hd_best[1].get('id','')[:12]}",
                                       session_id=session_id, project=project)
+                    # iter776: suppress_zero_fallback — suppress 全灭导致 score=0 时兜底
+                    # 根因（数据驱动，2026-05-04）：24h/7d suppress 将所有 candidate
+                    #   score 压到 0.0 → max(final)=0 < DEAD_ZONE_MIN=0.05 → 不触发。
+                    #   2026-05-03 连续 13 次空召回（cands=3~10）均因此路径丢失。
+                    # 修复：检测 suppress 全灭（max_score=0 但有 candidates），
+                    #   按 importance 选最佳 1 条（跳过 AC>=30），给极低分让后续 gate 可过滤。
+                    elif _sef_hd_imp and _sef_hd_max == 0 and candidates_count > 0:
+                        _sef_hd_best = max(_sef_hd_imp, key=lambda x: x[0])
+                        positive = [(_sef_hd_best[0] * 0.01, _sef_hd_best[1])]
+                        _deferred.log(DMESG_WARN, "retriever",
+                                      f"iter776_suppress_zero_fallback_hd: imp={_sef_hd_best[0]:.2f} "
+                                      f"id={_sef_hd_best[1].get('id','')[:12]}",
+                                      session_id=session_id, project=project)
             if _sysctl("retriever.drr_enabled") and len(positive) > effective_top_k:
                 top_k = _drr_select(positive, effective_top_k)
             else:
@@ -3561,6 +3574,14 @@ def main():
                     _deferred.log(DMESG_WARN, "retriever",
                                   f"iter775_dead_zone_fallback_full: imp={_sef_best[0]:.2f} "
                                   f"max_s={_sef_full_max:.4f} id={_sef_best[1].get('id','')[:12]}",
+                                  session_id=session_id, project=project)
+                # iter776: suppress_zero_fallback — 同 hard_deadline 路径
+                elif _sef_by_imp and _sef_full_max == 0 and candidates_count > 0:
+                    _sef_best = max(_sef_by_imp, key=lambda x: x[0])
+                    positive = [(_sef_best[0] * 0.01, _sef_best[1])]
+                    _deferred.log(DMESG_WARN, "retriever",
+                                  f"iter776_suppress_zero_fallback_full: imp={_sef_best[0]:.2f} "
+                                  f"id={_sef_best[1].get('id','')[:12]}",
                                   session_id=session_id, project=project)
 
         # ── 迭代334：IWCSI — Importance-Weighted Cold-Start Injection ───────

@@ -4120,6 +4120,14 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                                   f"iter775_dead_zone_fallback_full: imp={_sef_best[0]:.2f} "
                                   f"max_s={_sef_full_max:.4f} id={_sef_best[1][_CI_ID][:12]}",
                                   session_id=session_id, project=project)
+                # iter776: suppress_zero_fallback — suppress 全灭导致 score=0 时兜底
+                elif _sef_by_imp and _sef_full_max == 0 and candidates_count > 0:
+                    _sef_best = max(_sef_by_imp, key=_SORT_KEY)
+                    top_k = [(_sef_best[0] * 0.01, _sef_best[1])]
+                    _deferred.log(DMESG_WARN, "retriever_daemon",
+                                  f"iter776_suppress_zero_fallback: imp={_sef_best[0]:.2f} "
+                                  f"id={_sef_best[1][_CI_ID][:12]}",
+                                  session_id=session_id, project=project)
 
         # ── design_constraint 强制注入 ──
         # iter219: chunk_type [] not .get() — schema guarantees field exists (TEXT nullable)
