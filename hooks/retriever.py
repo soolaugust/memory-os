@@ -2983,14 +2983,16 @@ def main():
                 _sef_hd = max(final, key=lambda x: x[0])
                 if _sef_hd[0] >= _FALLBACK_NOISE_FLOOR:
                     positive = [_sef_hd]
-                elif _sef_hd[0] == 0.0:
+                else:
+                    # iter772: dead_zone_fallback — 消除 (0, noise_floor) 死区
+                    # 根因（数据驱动）：score 0.01~0.14 时两分支均不命中 → 空召回
                     _sef_hd_imp = [(float(c.get("importance", 0) or 0), c) for _, c in final
                                    if (c.get("access_count", 0) or 0) < 30]
                     if _sef_hd_imp:
                         _sef_hd_best = max(_sef_hd_imp, key=lambda x: x[0])
                         positive = [(_sef_hd_best[0] * 0.1, _sef_hd_best[1])]
                         _deferred.log(DMESG_WARN, "retriever",
-                                      f"iter751_suppress_allzero_fallback_hd: imp={_sef_hd_best[0]:.2f} "
+                                      f"iter772_dead_zone_fallback_hd: imp={_sef_hd_best[0]:.2f} "
                                       f"id={_sef_hd_best[1].get('id','')[:12]}",
                                       session_id=session_id, project=project)
             if _sysctl("retriever.drr_enabled") and len(positive) > effective_top_k:
@@ -3531,15 +3533,16 @@ def main():
                               f"iter700_score_empty_fallback_full: fallback "
                               f"best={_sef_full[1].get('id','')[:12]} s={_sef_full[0]:.4f}",
                               session_id=session_id, project=project)
-            elif _sef_full[0] == 0.0:
-                # iter751: all suppressed — pick by importance, skip AC>=30
+            else:
+                # iter772: dead_zone_fallback — 消除 (0, noise_floor) 死区
+                # 根因同 hard_deadline 路径：score 在 (0, noise_floor) 时两分支均不命中
                 _sef_by_imp = [(float(c.get("importance", 0) or 0), c) for _, c in final
                                if (c.get("access_count", 0) or 0) < 30]
                 if _sef_by_imp:
                     _sef_best = max(_sef_by_imp, key=lambda x: x[0])
                     positive = [(_sef_best[0] * 0.1, _sef_best[1])]
                     _deferred.log(DMESG_WARN, "retriever",
-                                  f"iter751_suppress_allzero_fallback: imp={_sef_best[0]:.2f} "
+                                  f"iter772_dead_zone_fallback_full: imp={_sef_best[0]:.2f} "
                                   f"id={_sef_best[1].get('id','')[:12]}",
                                   session_id=session_id, project=project)
 

@@ -4102,15 +4102,16 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                               f"iter700_score_empty_fallback_full: fallback "
                               f"best={_sef_full[1][_CI_ID][:12]} s={_sef_full[0]:.4f}",
                               session_id=session_id, project=project)
-            elif _sef_full[0] == 0.0:
-                # iter751: all suppressed — pick by importance, skip AC>=30
+            else:
+                # iter772: dead_zone_fallback — 消除 (0, noise_floor) 死区
+                # 根因（数据驱动）：score 0.01~0.14 时两分支均不命中 → 空召回
                 _sef_by_imp = [(float(c.get(_CI_IMP, 0) or 0), c) for _, c in final
                                if (c.get(_CI_AC, 0) or 0) < 30]
                 if _sef_by_imp:
                     _sef_best = max(_sef_by_imp, key=_SORT_KEY)
                     top_k = [(_sef_best[0] * 0.1, _sef_best[1])]
                     _deferred.log(DMESG_WARN, "retriever_daemon",
-                                  f"iter751_suppress_allzero_fallback: imp={_sef_best[0]:.2f} "
+                                  f"iter772_dead_zone_fallback_full: imp={_sef_best[0]:.2f} "
                                   f"id={_sef_best[1][_CI_ID][:12]}",
                                   session_id=session_id, project=project)
 
