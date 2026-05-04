@@ -2190,6 +2190,46 @@ def _write_chunk(chunk_type: str, summary: str, project: str, session_id: str,
             if not _txn_managed:
                 conn.commit()
             return
+        # iter784: session_burst_cap — 同 session 同 chunk_type 短期写入过多时合并
+        #   根因（数据驱动，2026-05-04）：session e3e4392b 在 2 分钟内写了 5 条 decision，
+        #   4 条同秒写入。Jaccard 去重无法捕捉"同话题不同细节"的变体。
+        #   修复：同 session 同 type 在 5 分钟内已写 >=3 条 → 合并到最近的同类 chunk。
+        _BURST_CAP = 3
+        if session_id:
+            try:
+                from datetime import timedelta as _td784
+                _cut784 = (datetime.now(timezone.utc) - _td784(minutes=5)).isoformat()
+                _burst_cnt784 = conn.execute(
+                    "SELECT COUNT(*) FROM memory_chunks "
+                    "WHERE source_session=? AND chunk_type=? AND created_at>?",
+                    (session_id, chunk_type, _cut784)
+                ).fetchone()[0]
+                if _burst_cnt784 >= _BURST_CAP:
+                    _burst784 = conn.execute(
+                        "SELECT id, content FROM memory_chunks "
+                        "WHERE source_session=? AND chunk_type=? AND created_at>? "
+                        "ORDER BY created_at DESC LIMIT 1",
+                        (session_id, chunk_type, _cut784)
+                    ).fetchone()
+                    if _burst784:
+                        _merge_id784, _merge_content784 = _burst784
+                        if summary not in (_merge_content784 or ""):
+                            _new784 = ((_merge_content784 or "") + "\n" + summary).strip()[:2000]
+                            conn.execute(
+                                "UPDATE memory_chunks SET content=?, importance=MAX(importance,?), "
+                                "updated_at=? WHERE id=?",
+                                (_new784, importance, datetime.now(timezone.utc).isoformat(), _merge_id784))
+                            from store_vfs import _fts5_sync_chunk
+                            _fts5_sync_chunk(conn, _merge_id784, summary=None, content=_new784)
+                        dmesg_log(conn, DMESG_INFO, "extractor",
+                                  f"iter784_burst_cap: {chunk_type} merged into {_merge_id784[:12]} "
+                                  f"(session burst {_burst_cnt784+1}>={_BURST_CAP})",
+                                  session_id=session_id, project=project)
+                        if not _txn_managed:
+                            conn.commit()
+                        return
+            except Exception:
+                pass  # burst cap 失败不阻塞正常写入
         insert_chunk(conn, chunk.to_dict())
 
         # ── 迭代318：Summary 三元组自动抽取 ────────────────────────────────
