@@ -3635,8 +3635,11 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             # iter703: 小库放宽 — 40 chunk DB 中 2/3 阈值导致全库 suppress spiral
             #   DB<100 chunk 时 24h:3→5, 7d:5→8（低分）/ 24h:3→6, 7d:5→10（高分）
             #   根因：40 chunk × 频繁对话 → 2次/24h 即封锁 → 注入率骤降
-            _s672_24h_t = (6 if score >= 0.5 else 5) if candidates_count < 100 else (3 if score >= 0.5 else 2)
-            _s672_7d_t = (10 if score >= 0.5 else 8) if candidates_count < 100 else (5 if score >= 0.5 else 3)
+            # iter767: tiered_small_db — 分级小库阈值
+            _s672_tiny = candidates_count < 30
+            _s672_small = candidates_count < 100
+            _s672_24h_t = (6 if score >= 0.5 else 5) if _s672_tiny else (4 if score >= 0.5 else 3) if _s672_small else (3 if score >= 0.5 else 2)
+            _s672_7d_t = (10 if score >= 0.5 else 8) if _s672_tiny else (7 if score >= 0.5 else 5) if _s672_small else (5 if score >= 0.5 else 3)
             if _recent_24h_counts.get(_cid, 0) >= _s672_24h_t:
                 score = 0.0
             elif _recent_7d_counts.get(_cid, 0) >= _s672_7d_t:
@@ -3709,9 +3712,11 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             # iter618: 24h + 7d burst suppress（daemon 此前完全缺失）
             # iter619: 阈值收紧 24h:3→2, 7d:8→5
             # iter672: relevance_exempt — 高分 chunk 放宽阈值，防 suppress 过杀
-            # iter703: 小库放宽（同 _score_chunk）
-            _s672d_24h_t = (6 if score >= 0.5 else 5) if candidates_count < 100 else (3 if score >= 0.5 else 2)
-            _s672d_7d_t = (10 if score >= 0.5 else 8) if candidates_count < 100 else (5 if score >= 0.5 else 3)
+            # iter767: tiered_small_db — 分级小库阈值（同 _score_chunk）
+            _s672d_tiny = candidates_count < 30
+            _s672d_small = candidates_count < 100
+            _s672d_24h_t = (6 if score >= 0.5 else 5) if _s672d_tiny else (4 if score >= 0.5 else 3) if _s672d_small else (3 if score >= 0.5 else 2)
+            _s672d_7d_t = (10 if score >= 0.5 else 8) if _s672d_tiny else (7 if score >= 0.5 else 5) if _s672d_small else (5 if score >= 0.5 else 3)
             if _recent_24h_counts.get(_cid, 0) >= _s672d_24h_t:
                 score = 0.0
             elif _recent_7d_counts.get(_cid, 0) >= _s672d_7d_t:
@@ -4356,12 +4361,12 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                         continue
                 _sf663d_conn.close()
                 _pre663d = len(top_k)
-                # iter672: relevance_exempt — 高分 chunk 放宽 suppress 阈值
-                # iter704: 小库放宽（同 iter703 _score_chunk）— 防止 final_gate 全灭
+                # iter767: tiered_small_db — 分级小库阈值（同 _score_chunk）
+                _sf663d_tiny_db = candidates_count < 30
                 _sf663d_small_db = candidates_count < 100
                 top_k = [(s, c) for s, c in top_k
-                         if _rt663d_24h.get(c[_CI_ID], 0) < ((6 if s >= 0.5 else 5) if _sf663d_small_db else (3 if s >= 0.5 else 2))
-                         and _rt663d_7d.get(c[_CI_ID], 0) < ((10 if s >= 0.5 else 8) if _sf663d_small_db else (5 if s >= 0.5 else 3))]
+                         if _rt663d_24h.get(c[_CI_ID], 0) < ((6 if s >= 0.5 else 5) if _sf663d_tiny_db else (4 if s >= 0.5 else 3) if _sf663d_small_db else (3 if s >= 0.5 else 2))
+                         and _rt663d_7d.get(c[_CI_ID], 0) < ((10 if s >= 0.5 else 8) if _sf663d_tiny_db else (7 if s >= 0.5 else 5) if _sf663d_small_db else (5 if s >= 0.5 else 3))]
                 if len(top_k) < _pre663d:
                     _deferred.log(DMESG_WARN, "retriever_daemon",
                                   f"iter663_suppress_final_gate: filtered "
