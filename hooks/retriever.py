@@ -2413,7 +2413,10 @@ def main():
                 # iter806: small_db_suppress_tighten — 7d 阈值同步收紧
                 # small_db 7/5 → 5/4；tiny_db 同步（unify 原则）。
                 # iter810: tiny_db_24h_relax — 小库 7d 统一阈值=5
-                _suppress_7d_thresh = 5 if _tiny_db else (5 if score >= 0.5 else 4) if _small_db else (5 if score >= 0.5 else 3)
+                # iter816: small_db_7d_relax — 小库 7d 阈值 5/4→8/6
+                # 根因（数据驱动，2026-05-05）：23-chunk 库中核心知识 7d=5 即 suppress，
+                #   日活跃项目 <1次/天即封锁过于激进。24h>=3 和 6h>=2 仍有效控制 burst。
+                _suppress_7d_thresh = 5 if _tiny_db else (8 if score >= 0.5 else 6) if _small_db else (5 if score >= 0.5 else 3)
                 if _r7d_cnt >= _suppress_7d_thresh:
                     score = 0.0
                     _hard_suppressed = True
@@ -3182,7 +3185,7 @@ def main():
                 top_k = [(s, c) for s, c in top_k
                          if _recent_6h_counts.get(c["id"], 0) < 2  # iter813: short_burst_suppress
                          and _recent_24h_counts.get(c["id"], 0) < ((10 if s >= 0.5 else 8) if _hd_tiny_db else (3 if s >= 0.5 else 2) if _hd_small_db else (3 if s >= 0.5 else 2))
-                         and _recent_7d_counts.get(c["id"], 0) < ((20 if s >= 0.5 else 15) if _hd_tiny_db else (5 if s >= 0.5 else 4) if _hd_small_db else (5 if s >= 0.5 else 3))]
+                         and _recent_7d_counts.get(c["id"], 0) < ((20 if s >= 0.5 else 15) if _hd_tiny_db else (8 if s >= 0.5 else 6) if _hd_small_db else (5 if s >= 0.5 else 3))]
             # ── iter670: suppress_fallback — hard_deadline suppress 全灭降级 ──
             if not top_k and _pre_suppress_top_k_hd:
                 _fb_hd = max(_pre_suppress_top_k_hd, key=lambda x: x[0])
@@ -3865,7 +3868,8 @@ def main():
                     return False
                 # iter618: 7d rolling suppress 也在 constraint 通道生效
                 # iter806: 7/5 → 5/4 sync
-                if _recent_7d_counts.get(_cid, 0) >= ((5 if _cst_tiny_db else 5) if _cst_small_db else 3):
+                # iter816: small_db_7d_relax — sync constraint path
+                if _recent_7d_counts.get(_cid, 0) >= ((5 if _cst_tiny_db else 8) if _cst_small_db else 3):
                     return False
                 # iter608: session-level constraint dedup — 早于全局 cap 拦截
                 _sinj = _session_injection_counts.get(_cid, 0)
@@ -4326,7 +4330,7 @@ def main():
                 # iter810: tiny_db_24h_relax — sync FULL final_gate
                 top_k = [(s, c) for s, c in top_k
                          if _rt663_24h.get(c["id"], 0) < (3 if _sf663_tiny_db else (3 if s >= 0.5 else 2) if _sf663_small_db else (3 if s >= 0.5 else 2))
-                         and _rt663_7d.get(c["id"], 0) < (5 if _sf663_tiny_db else (5 if s >= 0.5 else 4) if _sf663_small_db else (5 if s >= 0.5 else 3))]
+                         and _rt663_7d.get(c["id"], 0) < (5 if _sf663_tiny_db else (8 if s >= 0.5 else 6) if _sf663_small_db else (5 if s >= 0.5 else 3))]
                 if len(top_k) < _pre663:
                     _deferred.log(DMESG_WARN, "retriever",
                                   f"iter663_suppress_final_gate: filtered "
@@ -4428,7 +4432,7 @@ def main():
                 top_k = [(s, c) for s, c in top_k
                          if sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_6h) < 2  # iter815: 6h burst
                          and sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_24h) < (3 if _sf758_tiny_db else (3 if s >= 0.5 else 2) if _sf758_small_db else (3 if s >= 0.5 else 2))
-                         and sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_7d) < (5 if _sf758_tiny_db else (5 if s >= 0.5 else 4) if _sf758_small_db else (5 if s >= 0.5 else 3))]
+                         and sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_7d) < (5 if _sf758_tiny_db else (8 if s >= 0.5 else 6) if _sf758_small_db else (5 if s >= 0.5 else 3))]
                 if len(top_k) < _pre758:
                     _deferred.log(DMESG_WARN, "retriever",
                                   f"iter758_suppress_final_gate_lite: filtered "
