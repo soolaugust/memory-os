@@ -1461,7 +1461,9 @@ def _is_quality_chunk(summary: str) -> bool:
         # 代码语法元素
         re.search(r'`[^`]+`|def |class |import |function |const |var |let ', s),
         # 技术术语（英文）
-        re.search(r'\b(?:API|DB|SQL|FTS|BM25|CPU|RAM|OOM|GC|LRU|PID|hook|chunk|cache|mutex|thread|kernel|patch|commit|git|docker|nginx|redis)\b', s, re.I),
+        # iter809: web_tech_signals — 扩展 curl/HTML/fetch/regex 等 web 开发术语
+        # 根因：a8f13757 "微信公众号(curl+UA)获取方式" has_tech=False → 被 _LIFE_KEYWORDS 误杀
+        re.search(r'\b(?:API|DB|SQL|FTS|BM25|CPU|RAM|OOM|GC|LRU|PID|hook|chunk|cache|mutex|thread|kernel|patch|commit|git|docker|nginx|redis|curl|HTML|JSON|XML|CLI|regex|fetch|playwright|UA|SDK|OAuth|JWT|WebSocket)\b', s, re.I),
         # 数字度量
         re.search(r'\d+(?:\.\d+)?(?:%|ms|s|MB|GB|KB|次|条|个|行)', s),
         # 技术中文术语
@@ -1502,7 +1504,10 @@ def _is_quality_chunk(summary: str) -> bool:
         r'空召回|空.?trace|top_k|injected[=]|_accessed_ids|闭包捕获|self.ref|candidates.count|'
         # iter808: guard_gate_terms — 迭代器内部 guard/writeback 术语
         # 根因：'session_first_inject_guard' (1 match=inject_) 逃逸，TLB/hash/guard 是 retriever 内部术语
-        r'inject.guard|final.gate|writeback|TLB.{0,4}cache|prompt.hash|零注入)',
+        r'inject.guard|final.gate|writeback|TLB.{0,4}cache|prompt.hash|零注入|'
+        # iter809: extractor_internal_gate — extractor 内部函数名/指标逃逸
+        # 根因：'_is_quality_chunk 误杀 2/34'（0 match）逃逸，内部函数名不在 pattern 中
+        r'false.?positive|_is_quality|_should_block|_dedup|误杀.*chunk|漏网模式)',
         s, re.I
     )
     if len(_SELF_REF_TERMS) >= 2:
@@ -1515,7 +1520,10 @@ def _is_quality_chunk(summary: str) -> bool:
         _has_domain_anchor = re.search(
             r'(?:kernel|sched|CPU|Android|feishu|飞书|patch|线程|进程|调度|'
             r'binder|LKMM|scx|qos|migration|MTK|三星|vendor|AOSP|'
-            r'公众号|微信|curl|HTTP|API|REST|gRPC|proto)',
+            r'公众号|微信|curl|HTTP|API|REST|gRPC|proto|'
+            # iter809: claude_tool_anchor — Glob/Read/CLAUDE.md 是用户工作流约束
+            # 根因：93cbc985 "memory 引用前必须用 Glob/Read 验证" 被误杀
+            r'Glob|Read|Write|Edit|Grep|CLAUDE\.md|claude[\s-]code)',
             s, re.I
         )
         if not _has_domain_anchor:

@@ -1666,6 +1666,7 @@ def _load_all_modules():
             " FROM memory_chunks_fts"
             " JOIN memory_chunks mc ON mc.id = memory_chunks_fts.id"
             " WHERE memory_chunks_fts MATCH ?"
+            " AND mc.chunk_state = 'ACTIVE'"
             " AND mc.summary != ''"
             " AND COALESCE(mc.access_count, 0) < 30"
         )

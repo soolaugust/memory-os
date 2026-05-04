@@ -1750,6 +1750,7 @@ def fts_search(conn: sqlite3.Connection, query: str, project: str,
             FROM memory_chunks_fts
             JOIN memory_chunks mc ON mc.rowid = CAST(memory_chunks_fts.rowid_ref AS INTEGER)
             WHERE memory_chunks_fts MATCH ?
+              AND mc.chunk_state = 'ACTIVE'
               AND mc.summary != ''
               AND mc.importance > 0.0
               AND COALESCE(mc.access_count, 0) < 30
