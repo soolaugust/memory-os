@@ -2321,7 +2321,12 @@ def main():
             #   iter776 suppress_zero_fallback 已解决空召回兜底，可安全收紧。
             # iter801: micro_db (<=5) 跳过 24h/7d suppress — 唯一知识不可 suppress
             if not _micro_db:
-                _suppress_24h_thresh = (5 if score >= 0.5 else 4) if _tiny_db else (4 if score >= 0.5 else 3) if _small_db else (3 if score >= 0.5 else 2)
+                # iter803: tinydb_suppress_unify — tiny_db 与 small_db 对齐
+                # 根因（数据驱动，2026-05-05）：34 chunk 库 import-90139 在 40min 内
+                #   被 3 个不同 session 注入，24h=3 < 阈值5 → 逃逸。
+                #   34 chunks 不算"极小"，5/4 阈值过于宽松。
+                # 修复：tiny_db 24h 阈值从 5/4 → 4/3（与 small_db 一致）。
+                _suppress_24h_thresh = (4 if score >= 0.5 else 3) if _tiny_db else (4 if score >= 0.5 else 3) if _small_db else (3 if score >= 0.5 else 2)
                 if _r24_cnt >= _suppress_24h_thresh:
                     score = 0.0
                     _hard_suppressed = True  # iter616
@@ -2330,7 +2335,8 @@ def main():
             _r7d_cnt = _recent_7d_counts.get(chunk.get("id", ""), 0)
             # iter781: tiny_db 7d 阈值 20/15→10/8（同步收紧）
             if not _micro_db:
-                _suppress_7d_thresh = (10 if score >= 0.5 else 8) if _tiny_db else (7 if score >= 0.5 else 5) if _small_db else (5 if score >= 0.5 else 3)
+                # iter803: tinydb_suppress_unify — 7d 也对齐 small_db
+                _suppress_7d_thresh = (7 if score >= 0.5 else 5) if _tiny_db else (7 if score >= 0.5 else 5) if _small_db else (5 if score >= 0.5 else 3)
                 if _r7d_cnt >= _suppress_7d_thresh:
                     score = 0.0
                     _hard_suppressed = True
@@ -4236,9 +4242,10 @@ def main():
                 # 根因：iter781 收紧 _score_chunk 24h=5/4, 7d=10/8，但 final_gate 仍是 10/8, 20/15
                 #   导致 _score_chunk suppress 因 cached counts 失效时，final_gate 兜底完全无效。
                 #   实测：import-90139 24h 注入 3 次（>=5 应 suppress），final_gate 10/8 未拦截。
+                # iter803: tinydb_suppress_unify
                 top_k = [(s, c) for s, c in top_k
-                         if _rt663_24h.get(c["id"], 0) < ((5 if s >= 0.5 else 4) if _sf663_tiny_db else (4 if s >= 0.5 else 3) if _sf663_small_db else (3 if s >= 0.5 else 2))
-                         and _rt663_7d.get(c["id"], 0) < ((10 if s >= 0.5 else 8) if _sf663_tiny_db else (7 if s >= 0.5 else 5) if _sf663_small_db else (5 if s >= 0.5 else 3))]
+                         if _rt663_24h.get(c["id"], 0) < ((4 if s >= 0.5 else 3) if _sf663_tiny_db else (4 if s >= 0.5 else 3) if _sf663_small_db else (3 if s >= 0.5 else 2))
+                         and _rt663_7d.get(c["id"], 0) < ((7 if s >= 0.5 else 5) if _sf663_tiny_db else (7 if s >= 0.5 else 5) if _sf663_small_db else (5 if s >= 0.5 else 3))]
                 if len(top_k) < _pre663:
                     _deferred.log(DMESG_WARN, "retriever",
                                   f"iter663_suppress_final_gate: filtered "
@@ -4326,8 +4333,8 @@ def main():
                 _sf758_small_db = _db_chunk_count < 100
                 # iter783: sync_final_gate_thresholds — 与 _score_chunk iter781 对齐
                 top_k = [(s, c) for s, c in top_k
-                         if sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_24h) < ((5 if s >= 0.5 else 4) if _sf758_tiny_db else (4 if s >= 0.5 else 3) if _sf758_small_db else (3 if s >= 0.5 else 2))
-                         and sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_7d) < ((10 if s >= 0.5 else 8) if _sf758_tiny_db else (7 if s >= 0.5 else 5) if _sf758_small_db else (5 if s >= 0.5 else 3))]
+                         if sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_24h) < ((4 if s >= 0.5 else 3) if _sf758_tiny_db else (4 if s >= 0.5 else 3) if _sf758_small_db else (3 if s >= 0.5 else 2))
+                         and sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_7d) < ((7 if s >= 0.5 else 5) if _sf758_tiny_db else (7 if s >= 0.5 else 5) if _sf758_small_db else (5 if s >= 0.5 else 3))]
                 if len(top_k) < _pre758:
                     _deferred.log(DMESG_WARN, "retriever",
                                   f"iter758_suppress_final_gate_lite: filtered "
