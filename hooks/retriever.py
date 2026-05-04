@@ -2115,7 +2115,10 @@ def main():
                 # 绕过后续 throttle 以 importance*0.1 持续进入 top_k（根因：feishu CLI
                 # rc=26/30=87%，score=0.000092 仍入选因为候选池不足）
                 _rc_ee = _recall_counts.get(chunk.get("id", ""), 0)
-                if _rc_ee > 0 and _rc_ee / _local_bw_window > (_sysctl("retriever.constraint_inject_hard_cap") or 0.30):
+                _ee_hard_cap = _sysctl("retriever.constraint_inject_hard_cap") or 0.30
+                if _local_bw_window <= 30 and _ee_hard_cap > 0.12:  # iter756: small_db_bw_tighten
+                    _ee_hard_cap = 0.12
+                if _rc_ee > 0 and _rc_ee / _local_bw_window > _ee_hard_cap:
                     return 0.0
                 # iter617: early exit 也必须检查 24h_burst_suppression
                 # 根因：高 importance chunk (0.9) 走 early exit 返回 0.09，跳过 2084 行的
@@ -2231,6 +2234,8 @@ def main():
             _rc = _recall_counts.get(chunk.get("id", ""), 0)
             if _rc > 0:
                 _hard_cap_val = _sysctl("retriever.constraint_inject_hard_cap") or 0.30
+                if _local_bw_window <= 30 and _hard_cap_val > 0.12:  # iter756: small_db_bw_tighten
+                    _hard_cap_val = 0.12
                 _hard_util = _rc / _local_bw_window
                 if _hard_util > _hard_cap_val:
                     score = 0.0  # iter601: hard gate
@@ -3636,6 +3641,9 @@ def main():
             #   1. Jaccard 严格为 0 → 无条件拦截（不依赖 min_relevance 阈值配置）
             #   2. hard_cap 从 0.50 降至 0.30，与 thrash_max_pct(0.20) 更紧密对齐
             _inject_hard_cap = _sysctl("retriever.constraint_inject_hard_cap")
+            # iter756: small_db_bw_tighten (constraint path)
+            if _local_bw_window <= 30 and (not _inject_hard_cap or _inject_hard_cap > 0.12):
+                _inject_hard_cap = 0.12
             # iter608: session_constraint_cap — 同 session 内同一 constraint 注入上限
             # 根因：_ac_gated 的全局 hard_cap 依赖 recall_count 累积到阈值才生效，
             #   但单次长 session（如 memory-os 迭代 agent）可连续触发多次 retrieval，

@@ -3769,6 +3769,11 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             # set comprehension replaces per-iteration set.add() (combined: ~2.09us total)
             # iter235: chunk[_CI_ID]/chunk[_CI_FR] — positional tuple access
             # OS 类比：vectorized SIMD load — 批量构建比逐元素 push_back 快（减少 Python per-iter overhead）
+            # iter756: small_db_bw_tighten — 小库（<100 candidate）收紧 bandwidth hard_cap
+            #   根因：42 chunk 库中 hard_cap=0.30 → rc>9 才 suppress → 最高 rc=4 完全逃逸。
+            #   修复：小库 hard_cap 0.30→0.12（rc>3.5 suppress, rc>1.7 soft penalty）。
+            if candidates_count < 100:
+                _inject_hard_cap = 0.12
             fts_ids = {chunk[_CI_ID] for chunk in fts_results}  # iter235: positional tuple
             final = [(_score_chunk(chunk, chunk[_CI_FR] / max_rank), chunk)
                      for chunk in fts_results]
@@ -3893,6 +3898,9 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             if not chunks:
                 return
             candidates_count = len(chunks)
+            # iter756: small_db_bw_tighten (BM25 path — same as FTS path above)
+            if candidates_count < 100:
+                _inject_hard_cap = 0.12
             # iter683: raw_relevance_gate — 绝对相关性门槛
             # 根因（用户可感知）：normalize 是相对排名（max=1.0），当 DB 中无真正相关 chunk 时，
             # 噪声匹配（中文通用 bigram 重叠）被放大到 1.0 超过阈值 → 注入不相关内容。
