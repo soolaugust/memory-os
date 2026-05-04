@@ -4079,6 +4079,7 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
         # ── iter700: score_empty_fallback (FULL path) ──
         # 根因（数据驱动，2026-05-04）：用户工作项目 15 次空召回，有 3-21 个 candidates
         #   但 top1 < 0.15 → rescue 不触发。hard_deadline 有 iter689，此处遗漏。
+        # iter751: suppress 全灭兜底 — score=0 时用 importance 排序选最佳 1 条
         if not top_k and final:
             _sef_full = max(final, key=_SORT_KEY)
             if _sef_full[0] > 0:
@@ -4087,6 +4088,17 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                               f"iter700_score_empty_fallback_full: fallback "
                               f"best={_sef_full[1][_CI_ID][:12]} s={_sef_full[0]:.4f}",
                               session_id=session_id, project=project)
+            elif _sef_full[0] == 0.0:
+                # iter751: all suppressed — pick by importance, skip AC>=30
+                _sef_by_imp = [(float(c.get(_CI_IMP, 0) or 0), c) for _, c in final
+                               if (c.get(_CI_AC, 0) or 0) < 30]
+                if _sef_by_imp:
+                    _sef_best = max(_sef_by_imp, key=_SORT_KEY)
+                    top_k = [(_sef_best[0] * 0.1, _sef_best[1])]
+                    _deferred.log(DMESG_WARN, "retriever_daemon",
+                                  f"iter751_suppress_allzero_fallback: imp={_sef_best[0]:.2f} "
+                                  f"id={_sef_best[1][_CI_ID][:12]}",
+                                  session_id=session_id, project=project)
 
         # ── design_constraint 强制注入 ──
         # iter219: chunk_type [] not .get() — schema guarantees field exists (TEXT nullable)

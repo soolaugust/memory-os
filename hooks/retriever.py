@@ -2962,6 +2962,21 @@ def main():
                 _rescue_thresh = max(final[0][0] * 0.8, 0.15)
                 if _rescue_thresh < _min_thresh:
                     positive = [(s, c) for s, c in final if s >= _rescue_thresh and s > 0]
+            # iter751: suppress 全灭兜底 (hard_deadline path)
+            if not positive and final:
+                _sef_hd = max(final, key=lambda x: x[0])
+                if _sef_hd[0] > 0:
+                    positive = [_sef_hd]
+                elif _sef_hd[0] == 0.0:
+                    _sef_hd_imp = [(float(c.get("importance", 0) or 0), c) for _, c in final
+                                   if (c.get("access_count", 0) or 0) < 30]
+                    if _sef_hd_imp:
+                        _sef_hd_best = max(_sef_hd_imp, key=lambda x: x[0])
+                        positive = [(_sef_hd_best[0] * 0.1, _sef_hd_best[1])]
+                        _deferred.log(DMESG_WARN, "retriever",
+                                      f"iter751_suppress_allzero_fallback_hd: imp={_sef_hd_best[0]:.2f} "
+                                      f"id={_sef_hd_best[1].get('id','')[:12]}",
+                                      session_id=session_id, project=project)
             if _sysctl("retriever.drr_enabled") and len(positive) > effective_top_k:
                 top_k = _drr_select(positive, effective_top_k)
             else:
@@ -3489,6 +3504,9 @@ def main():
         # ── iter700: score_empty_fallback (FULL path) ──
         # 根因（数据驱动，2026-05-04）：用户工作项目 15 次空召回，有 3-21 个 candidates
         #   但 top1 < 0.15 → rescue 不触发。hard_deadline 有 iter689，此处遗漏。
+        # iter751: suppress 全灭兜底 — score=0 时用 importance 排序选最佳 1 条
+        #   根因（数据驱动，2026-05-04）：13 次连续空召回 cands=3~10 全因 suppress
+        #   score=0.0 → 原 > 0 条件阻止 fallback。空召回 = 系统零价值。
         if not positive and final:
             _sef_full = max(final, key=lambda x: x[0])
             if _sef_full[0] > 0:
@@ -3497,6 +3515,17 @@ def main():
                               f"iter700_score_empty_fallback_full: fallback "
                               f"best={_sef_full[1].get('id','')[:12]} s={_sef_full[0]:.4f}",
                               session_id=session_id, project=project)
+            elif _sef_full[0] == 0.0:
+                # iter751: all suppressed — pick by importance, skip AC>=30
+                _sef_by_imp = [(float(c.get("importance", 0) or 0), c) for _, c in final
+                               if (c.get("access_count", 0) or 0) < 30]
+                if _sef_by_imp:
+                    _sef_best = max(_sef_by_imp, key=lambda x: x[0])
+                    positive = [(_sef_best[0] * 0.1, _sef_best[1])]
+                    _deferred.log(DMESG_WARN, "retriever",
+                                  f"iter751_suppress_allzero_fallback: imp={_sef_best[0]:.2f} "
+                                  f"id={_sef_best[1].get('id','')[:12]}",
+                                  session_id=session_id, project=project)
 
         # ── 迭代334：IWCSI — Importance-Weighted Cold-Start Injection ───────
         # 信息论依据（Shannon 1948）：高 importance + 零召回 chunk 的期望信息增益最高：
