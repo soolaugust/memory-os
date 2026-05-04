@@ -3093,6 +3093,9 @@ def main():
                 _af_min_top1 = _sysctl("retriever.adaptive_floor_min_top1")
                 if _top1_score >= _af_min_top1:
                     _af_ratio = _sysctl("retriever.adaptive_floor_ratio")
+                    # iter823: small_db_af_relax — 小库 BM25 分布稀疏，0.25 过滤 top2
+                    if _db_chunk_count < 100:
+                        _af_ratio = min(_af_ratio, 0.12)
                     _adaptive_floor = _top1_score * _af_ratio
                     _min_thresh = min(_min_thresh, max(_adaptive_floor, 0.10))
             # iter579: copy_page_range — hard deadline 路径也应用 gap bridging
@@ -3654,6 +3657,9 @@ def main():
             _af_min_top1 = _sysctl("retriever.adaptive_floor_min_top1")
             if _top1_score >= _af_min_top1:
                 _af_ratio = _sysctl("retriever.adaptive_floor_ratio")
+                # iter823: small_db_af_relax — 小库 BM25 分布稀疏，0.25 过滤 top2
+                if _db_chunk_count < 100:
+                    _af_ratio = min(_af_ratio, 0.12)
                 _adaptive_floor = _top1_score * _af_ratio
                 _min_thresh = min(_min_thresh, max(_adaptive_floor, 0.10))
         # ── iter579: copy_page_range — Score Gap Bridging ─────────────────
