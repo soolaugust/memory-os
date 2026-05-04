@@ -3877,6 +3877,9 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             _min_thresh = (_gen_query_thr if _is_generic_q else _min_score_thr)
             # iter620: zero_score_absolute_gate — hard_suppressed chunk 绝对不入选
             positive = [(s, c) for s, c in final if s >= _min_thresh and s > 0]
+            # iter695: threshold_degrade — 阈值过高全灭时降级到默认 0.30
+            if not positive and _min_thresh > 0.30:
+                positive = [(s, c) for s, c in final if s >= 0.30 and s > 0]
             if _drr_enabled and len(positive) > effective_top_k:
                 top_k = _drr_select(positive, effective_top_k)
             else:
@@ -4009,6 +4012,9 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
         _min_thresh = (_gen_query_thr if _is_generic_q else _min_score_thr)
         # iter620: zero_score_absolute_gate (FULL path) — 同 hard_deadline 路径
         positive = [(s, c) for s, c in final if s >= _min_thresh and s > 0]
+        # iter695: threshold_degrade — 阈值过高全灭时降级到默认 0.30
+        if not positive and _min_thresh > 0.30:
+            positive = [(s, c) for s, c in final if s >= 0.30 and s > 0]
 
         if _drr_enabled and len(positive) > effective_top_k:
             top_k = _drr_select(positive, effective_top_k)

@@ -2943,6 +2943,9 @@ def main():
             #   可将 _min_thresh 降到 0.05，而 focus_bonus 等 += 操作可能将 0.0 抬到
             #   0.00009 级别，恰好通过极低 threshold。绝对零分门槛不可绕过。
             positive = [(s, c) for s, c in final if s >= _min_thresh and s > 0]
+            # iter695: threshold_degrade — 阈值过高全灭时降级到默认 0.30
+            if not positive and _min_thresh > 0.30:
+                positive = [(s, c) for s, c in final if s >= 0.30 and s > 0]
             if _sysctl("retriever.drr_enabled") and len(positive) > effective_top_k:
                 top_k = _drr_select(positive, effective_top_k)
             else:
@@ -3458,6 +3461,9 @@ def main():
                                       session_id=session_id, project=project)
         # iter620: zero_score_absolute_gate (FULL path) — 同 hard_deadline 路径
         positive = [(s, c) for s, c in final if s >= _min_thresh and s > 0]
+        # iter695: threshold_degrade — 阈值过高全灭时降级到默认 0.30
+        if not positive and _min_thresh > 0.30:
+            positive = [(s, c) for s, c in final if s >= 0.30 and s > 0]
 
         # ── 迭代334：IWCSI — Importance-Weighted Cold-Start Injection ───────
         # 信息论依据（Shannon 1948）：高 importance + 零召回 chunk 的期望信息增益最高：

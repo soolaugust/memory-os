@@ -3211,8 +3211,8 @@ _REGISTRY: dict = {
         "low_score_ratio 超过此百分比时提高 min_score_threshold（默认20%：超1/5注入低分则收紧）"),
     "perf.lower_threshold_pct": (0.0, float, 0.0, 20.0, None,
         "low_score_ratio 低于此百分比且avg_score高时降低阈值（默认0%：必须完全无低分才放松）"),
-    "perf.threshold_max": (0.50, float, 0.30, 0.80, None,
-        "min_score_threshold 自动调节上限（防止阈值过高导致无结果注入）"),
+    "perf.threshold_max": (0.40, float, 0.30, 0.80, None,
+        "min_score_threshold 自动调节上限（iter695: 0.50→0.40，防止阈值过高导致72%空注入）"),
     "perf.threshold_min": (0.20, float, 0.05, 0.40, None,
         "min_score_threshold 自动调节下限（保证最低过滤标准）"),
 
