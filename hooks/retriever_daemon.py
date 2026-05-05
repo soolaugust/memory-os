@@ -4907,9 +4907,11 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
         #   tuple 不可变，消除 GC/引用链导致的潜在 mutation。
         top_k_data = tuple({"id": c[_CI_ID], "summary": c[_CI_SUM], "score": s,
                        "chunk_type": c[_CI_CT] or ""} for s, c in top_k)
-        # iter223: reuse top_k_ids (already computed sorted id list) — avoid redundant listcomp
-        # update_accessed/mglru_promote are order-insensitive (WHERE id IN (...)), sorted order OK.
-        accessed_ids = top_k_ids  # iter223: ~0.341us saved (no listcomp re-iteration)
+        # iter871: trace_ids_realign — 重新计算 accessed_ids 与当前 top_k 对齐
+        # 根因（数据驱动，2026-05-05）：top_k_ids 在 line 4771 基于旧 top_k 计算，
+        #   但 suppress_final_gate/fallback 可能修改 top_k，导致 accessed_ids 与
+        #   top_k_data 不一致 → 11% trace 的 top_k_json=[] 污染 recall_counts。
+        accessed_ids = [c[_CI_ID] for _, c in top_k]
 
         # iter200: pre-built header + json.dumps(ctx) only (4.43us → 1.35us)
         # iter226: write() ~0.407us vs print() ~0.679us (saves ~0.271us on inject path)
