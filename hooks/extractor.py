@@ -1285,7 +1285,11 @@ def _is_quality_chunk(summary: str) -> bool:
                 "zero_access_rate", "噪声占比", "空召回率", "注入垄断",
                 # iter839: test_result_noise — 测试结果快照和迭代器修复行摘要
                 # 数据驱动：4 条 ac=0 噪声 "14/14 测试通过"/"修复：extractor.py +5 行"
-                "测试通过", "tests passed"]
+                "测试通过", "tests passed",
+                # iter841: iterator_ops_log_noise — 迭代器操作日志/SQL片段逃逸
+                # 数据驱动：7 条 ac=1 噪声含 "数据改动：删除"/"WHERE injected="
+                #   — 迭代器操作记录和内部 SQL 代码片段，对用户零价值
+                "数据改动", "WHERE injected", "WHERE chunk_ids"]
     if any(kw in s for kw in noise_kw):
         return False
     placeholders = {"方案 X 是最优解", "extractor 升级", "KnowledgeRouter"}
@@ -1373,7 +1377,8 @@ def _is_quality_chunk(summary: str) -> bool:
         re.I
     )
     _ITER_OPS_REPORT = re.compile(
-        r'^(?:删除|清理|移除|GC)\s*\d+\s*(?:个|条)?\s*\S{0,6}(?:噪声|chunk|trace|碎片)',
+        r'^(?:删除|清理|移除|GC)\s*\d+\s*(?:个|条)?\s*\S{0,6}(?:噪声|chunk|trace|碎片)|'
+        r'^数据改动[：:]\s*(?:删除|清理|移除|新增|合并)',
         re.I
     )
     # iter755: 列表项+度量变化 — "2. 数据：5 个 AC≥7 的 chunk imp 0.44 → 0.71"
