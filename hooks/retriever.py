@@ -3185,7 +3185,8 @@ def main():
                                      and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh_hd]
                     if _imp_pairs_hd:
                         _imp_best_hd = max(_imp_pairs_hd, key=lambda x: x[0])
-                        if _imp_best_hd[0] >= 0.3:
+                        # iter941: imp_pair_top1_gate (hard_deadline path)
+                        if _imp_best_hd[0] >= 0.3 and positive[0][0] >= 0.15:
                             positive.append((positive[0][0] * 0.3, _imp_best_hd[1]))
             # iter695: threshold_degrade — 阈值过高全灭时降级到默认 0.30
             if not positive and _min_thresh > 0.30:
@@ -3902,7 +3903,11 @@ def main():
                               and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh]
                 if _imp_pairs:
                     _imp_best = max(_imp_pairs, key=lambda x: x[0])
-                    if _imp_best[0] >= 0.3:  # importance 下限，避免注入低价值 chunk
+                    # iter941: imp_pair_top1_gate — top1 score 过低时不配对
+                    # 根因（数据驱动，2026-05-06）：12 条 score<0.10 注入中 8 条来自 imp_pair，
+                    #   top1=0.20 → pair_score=0.06，用户感知为噪声。
+                    #   单条中等相关 > 两条低相关。top1<0.15 时 pair_score<0.045 无信息增量。
+                    if _imp_best[0] >= 0.3 and positive[0][0] >= 0.15:
                         _pair_score = positive[0][0] * 0.3
                         positive.append((_pair_score, _imp_best[1]))
                         _deferred.log(DMESG_DEBUG, "retriever",

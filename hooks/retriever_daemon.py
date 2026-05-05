@@ -4094,7 +4094,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                                  and _recent_7d_counts.get(c[_CI_ID], 0) < (3 if _db_chunk_count < 50 else 4)]
                     if _ip_cands:
                         _ip_best = max(_ip_cands, key=lambda x: x[0])
-                        if _ip_best[0] >= 0.3:
+                        # iter941: imp_pair_top1_gate — top1 score 过低时不配对
+                        if _ip_best[0] >= 0.3 and positive[0][0] >= 0.15:
                             positive.append((positive[0][0] * 0.3, _ip_best[1]))
                             _deferred.log(DMESG_DEBUG, "retriever_daemon",
                                           f"iter830_imp_pair_hd: paired {_ip_best[1][_CI_ID][:12]} "
@@ -4340,7 +4341,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                                and (c[_CI_AC] or 0) < 30]
                 if _ip_cands_f:
                     _ip_best_f = max(_ip_cands_f, key=lambda x: x[0])
-                    if _ip_best_f[0] >= 0.3:
+                    # iter941: imp_pair_top1_gate (FULL path)
+                    if _ip_best_f[0] >= 0.3 and positive[0][0] >= 0.15:
                         positive.append((positive[0][0] * 0.3, _ip_best_f[1]))
                         _deferred.log(DMESG_DEBUG, "retriever_daemon",
                                       f"iter830_imp_pair_full: paired {_ip_best_f[1][_CI_ID][:12]} "
