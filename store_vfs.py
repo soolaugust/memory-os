@@ -6161,7 +6161,7 @@ def update_accessed(conn: sqlite3.Connection, chunk_ids: list,
 def insert_trace(conn: sqlite3.Connection, trace_dict: dict) -> None:
     """写入 recall_traces 记录。迭代65：新增 ftrace_json 阶段级追踪。"""
     d = trace_dict
-    top_k = json.dumps(d["top_k_json"], ensure_ascii=False) if isinstance(d.get("top_k_json"), list) else d.get("top_k_json", "[]")
+    top_k = json.dumps(d["top_k_json"], ensure_ascii=False) if isinstance(d.get("top_k_json"), (list, tuple)) else d.get("top_k_json", "[]")
     ftrace = d.get("ftrace_json")
     ftrace_str = json.dumps(ftrace, ensure_ascii=False) if isinstance(ftrace, dict) else ftrace
     conn.execute("""

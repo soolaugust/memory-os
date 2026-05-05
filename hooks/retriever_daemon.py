@@ -4839,8 +4839,12 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
 
         # iter217: remove round(s,4) (~1.476us) + chunk_type [] not .get() (~0.039us/chunk)
         # iter235: positional tuple access (_CI_* constants)
-        top_k_data = [{"id": c[_CI_ID], "summary": c[_CI_SUM], "score": s,
-                       "chunk_type": c[_CI_CT] or ""} for s, c in top_k]
+        # iter857: tuple() freeze — 防止 list 对象在 writeback 执行前被意外 mutate
+        # 数据驱动（2026-05-05）：83% trace 的 top_k_json 少于 dmesg injected=N，
+        #   _top_k_data（list）默认参数绑定后在 writeback 执行时长度不一致。
+        #   tuple 不可变，消除 GC/引用链导致的潜在 mutation。
+        top_k_data = tuple({"id": c[_CI_ID], "summary": c[_CI_SUM], "score": s,
+                       "chunk_type": c[_CI_CT] or ""} for s, c in top_k)
         # iter223: reuse top_k_ids (already computed sorted id list) — avoid redundant listcomp
         # update_accessed/mglru_promote are order-insensitive (WHERE id IN (...)), sorted order OK.
         accessed_ids = top_k_ids  # iter223: ~0.341us saved (no listcomp re-iteration)
@@ -4885,9 +4889,20 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 #   但 dmesg 确认 daemon 成功注入了 1-2 个 chunk（_top_k_len>0）。
                 #   根因未完全确定（默认参数绑定应可靠），但 _accessed_ids 始终正确。
                 # 修复：增加 _top_k_len 不变性检查，空时用 _accessed_ids 重建。
+                # iter857: trace_ids_ground_truth — 用 _accessed_ids 长度校验 _top_k_data
+                # 数据驱动（2026-05-05）：10/12 trace 的 top_k_json 少于 dmesg injected=N。
+                #   dmesg extra.top_k_ids（来自 _accessed_ids）始终正确（5 个 ID），
+                #   但 _top_k_data 偶发只有 1 条。tuple freeze（iter857）防止 mutation。
+                # 修复：用 _accessed_ids（已证明可靠）作为 ground truth 校验。
                 _effective_top_k = _top_k_data
-                if (not _effective_top_k or len(_effective_top_k) != _top_k_len) and _accessed_ids:
+                _tkd_len = len(_top_k_data) if _top_k_data else 0
+                _aid_len = len(_accessed_ids) if _accessed_ids else 0
+                if _tkd_len != _aid_len and _accessed_ids:
                     _effective_top_k = [{"id": cid} for cid in _accessed_ids]
+                    dmesg_log(_wconn, DMESG_WARN, "retriever",
+                              f"iter857_trace_mismatch: top_k_data={_tkd_len} "
+                              f"accessed_ids={_aid_len} top_k_len={_top_k_len}",
+                              session_id=_session_id, project=_project)
                 # iter721: trace_injected_fix — 用 _top_k_len 决定 injected 标志
                 # 数据驱动（2026-05-04）：dmesg 确认 daemon 注入了 N chunk（_top_k_len>0），
                 #   但闭包捕获的 _top_k_data/_accessed_ids 偶发为空（根因未确定）。
