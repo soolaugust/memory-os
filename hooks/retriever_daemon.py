@@ -1848,6 +1848,12 @@ _sessions_with_injection: set = set()
 # 修复：进程内记录每次注入的 (chunk_id, unix_ts)，final_gate 叠加内存数据。
 # 内存安全：7d 上限 ~200 entries × 60B ≈ 12KB，每次请求 gc 超 7d 条目。
 _daemon_inject_log: list = []  # [(chunk_id, unix_timestamp), ...]
+# iter872: diversity_counter — 进程内自增计数器替代 hour%len 做 round-robin
+# 根因（数据驱动，2026-05-05）：hour%len 同一小时内总选同一 chunk，
+#   36-chunk 库 1h 内 10+ 请求 diversity pair 全是同一个 → 24h=3 后被 suppress → 下一个轮到时又用完
+#   6 个候选仅 2 个有过曝光。自增计数器每次选不同候选，真正实现 round-robin。
+# 用 list[0] 避免 global 声明（函数内 mutate 无需 global）。
+_diversity_counter = [0]
 PAGE_FAULT_LOG = os.path.join(MEMORY_OS_DIR, "page_fault_log.json")
 SHADOW_TRACE_FILE = os.path.join(MEMORY_OS_DIR, ".shadow_trace.json")
 MADVISE_FILE_PATH = os.path.join(MEMORY_OS_DIR, "madvise.json")
@@ -4086,7 +4092,9 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                         (project, _top1_id_hd)).fetchall()
                     _div_conn_hd.close()
                     if _div_rows_hd:
-                        _div_pick_hd = _div_rows_hd[0]
+                        # iter872: diversity_counter (hard_deadline path)
+                        _div_pick_hd = _div_rows_hd[_diversity_counter[0] % len(_div_rows_hd)]
+                        _diversity_counter[0] += 1
                         _div_chunk_hd = (_div_pick_hd[0], _div_pick_hd[1], _div_pick_hd[2],
                                         _div_pick_hd[4], 0, 0, _div_pick_hd[5], None, None, None,
                                         _div_pick_hd[3], None)
@@ -4321,8 +4329,9 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 _div_recent_ids = {iid for iid, _ in _daemon_inject_log[-50:]}
                 _div_rows_d = [r for r in _div_rows_d if r[0] not in _div_recent_ids]
                 if _div_rows_d:
-                    # iter867: diversity_rotation — 轮转选择避免总是同一 chunk
-                    _div_idx_d = int(time.strftime("%H")) % len(_div_rows_d)
+                    # iter872: diversity_counter — 自增 round-robin 替代 hour%len
+                    _div_idx_d = _diversity_counter[0] % len(_div_rows_d)
+                    _diversity_counter[0] += 1
                     _div_pick_d = _div_rows_d[_div_idx_d]
                     _div_chunk_d = (_div_pick_d[0], _div_pick_d[1], _div_pick_d[2],
                                    _div_pick_d[4], 0, 0, _div_pick_d[5], None, None, None,
