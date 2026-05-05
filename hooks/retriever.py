@@ -3294,8 +3294,11 @@ def main():
             #   suppress 全灭后 fallback 按 score 选最佳 → 高频 chunk 反复被选中。
             #   修复：score/(1+0.5*7d_count) 使低频 chunk 优先，促进注入多样性。
             if not top_k and _pre_suppress_top_k_hd:
+                # iter892: fallback_exp_decay — 线性→指数衰减，高频 chunk 衰减更快促进多样性
+                #   旧公式 score/(1+0.5*7d) 对 7d=10 仅衰减到 17%，top chunk 仍垄断 fallback。
+                #   新公式 score*0.5^(7d/3) 对 7d=9 衰减到 12.5%，给低频 chunk 更多机会。
                 _fb_hd_sorted = sorted(_pre_suppress_top_k_hd,
-                                       key=lambda x: x[0] / (1 + 0.5 * _recent_7d_counts.get(x[1].get("id", ""), 0)),
+                                       key=lambda x: x[0] * (0.5 ** (_recent_7d_counts.get(x[1].get("id", ""), 0) / 3)),
                                        reverse=True)
                 _fb_hd = _fb_hd_sorted[0]
                 _last_hash_hd = _read_hash()
@@ -4703,9 +4706,9 @@ def main():
             # 修复：排除上次已注入的 chunk 组合，选次优候选。若无次优则仍选最佳。
             if _pre_suppress_top_k:
                 _last_hash = _read_hash()
-                # iter889: fallback_7d_decay — 同步 hard_deadline path
+                # iter892: fallback_exp_decay — 线性→指数衰减（同步 hard_deadline path）
                 _fb_sorted = sorted(_pre_suppress_top_k,
-                                    key=lambda x: x[0] / (1 + 0.5 * _recent_7d_counts.get(x[1].get("id", ""), 0)),
+                                    key=lambda x: x[0] * (0.5 ** (_recent_7d_counts.get(x[1].get("id", ""), 0) / 3)),
                                     reverse=True)
                 _fb = _fb_sorted[0]
                 if _last_hash and len(_fb_sorted) > 1:
@@ -4896,9 +4899,10 @@ def main():
                 #   FULL 路径 (line 4707) 和 daemon 已有 score/(1+0.5*7d) 衰减。
                 #   修复：用 _itl758 timeline 数据计算 7d count，应用相同衰减公式。
                 if not top_k and _pre_suppress_top_k_lite:
+                    # iter892: fallback_exp_decay — LITE 路径同步指数衰减
                     _fb_lite_sorted = sorted(
                         _pre_suppress_top_k_lite,
-                        key=lambda x: x[0] / (1 + 0.5 * sum(1 for t in _itl758.get(x[1].get("id", ""), []) if t > _cut758_7d)),
+                        key=lambda x: x[0] * (0.5 ** (sum(1 for t in _itl758.get(x[1].get("id", ""), []) if t > _cut758_7d) / 3)),
                         reverse=True)
                     _fb_lite = _fb_lite_sorted[0]
                     _last_hash_lite = _read_hash()

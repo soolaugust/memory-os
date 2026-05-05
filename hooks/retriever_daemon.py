@@ -4828,8 +4828,9 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             #   suppress 全灭后 fallback 按 score 选最佳 → 高频 chunk 反复被选中。
             #   修复：score/(1+0.5*7d_count) 使低频 chunk 优先，促进注入多样性。
             if _pre_suppress_top_k:
+                # iter892: fallback_exp_decay — 线性→指数衰减，高频 chunk 更快衰减
                 _fb_sorted = sorted(_pre_suppress_top_k,
-                                    key=lambda x: x[0] / (1 + 0.5 * _recent_7d_counts.get(x[1][_CI_ID], 0)),
+                                    key=lambda x: x[0] * (0.5 ** (_recent_7d_counts.get(x[1][_CI_ID], 0) / 3)),
                                     reverse=True)
                 _fb = _fb_sorted[0]
                 if last_hash and len(_fb_sorted) > 1:
