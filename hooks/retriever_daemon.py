@@ -4830,11 +4830,19 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             if _pre_suppress_top_k:
                 # iter892: fallback_exp_decay — 线性→指数衰减，高频 chunk 更快衰减
                 # iter893: fallback_hard_ceiling — 7d>=5 绝对不选，杜绝垄断 chunk 经 fallback 逃逸
+                # iter894: fallback_realtime_align — 优先用实时 DB 计数（与 suppress_final_gate 对齐）
+                # 根因（数据驱动，2026-05-05）：fallback 用启动时闭包 _recent_7d_counts（滞后）+
+                #   hard_ceiling=5，但 suppress_final_gate 用实时 DB + 阈值=3（tiny_db）。
+                #   7d=3-4 的垄断 chunk 被 final_gate suppress 后又被 fallback 重新选中注入。
+                _fb_7d_d = _rt663d_7d if '_rt663d_7d' in dir() and _rt663d_7d else _recent_7d_counts
+                _fb_24h_d = _rt663d_24h if '_rt663d_24h' in dir() and _rt663d_24h else _recent_24h_counts
+                _fb_ceiling_d = 3 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
                 _fb_cap = [(s, c) for s, c in _pre_suppress_top_k
-                           if _recent_7d_counts.get(c[_CI_ID], 0) < 5]
+                           if _fb_7d_d.get(c[_CI_ID], 0) < _fb_ceiling_d
+                           and _fb_24h_d.get(c[_CI_ID], 0) < 3]
                 _fb_pool = _fb_cap if _fb_cap else _pre_suppress_top_k
                 _fb_sorted = sorted(_fb_pool,
-                                    key=lambda x: x[0] * (0.5 ** (_recent_7d_counts.get(x[1][_CI_ID], 0) / 3)),
+                                    key=lambda x: x[0] * (0.5 ** (_fb_7d_d.get(x[1][_CI_ID], 0) / 2)),
                                     reverse=True)
                 _fb = _fb_sorted[0]
                 if last_hash and len(_fb_sorted) > 1:

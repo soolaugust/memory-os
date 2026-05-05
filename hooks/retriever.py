@@ -3295,16 +3295,17 @@ def main():
             #   修复：score/(1+0.5*7d_count) 使低频 chunk 优先，促进注入多样性。
             if not top_k and _pre_suppress_top_k_hd:
                 # iter892: fallback_exp_decay — 线性→指数衰减，高频 chunk 衰减更快促进多样性
-                #   旧公式 score/(1+0.5*7d) 对 7d=10 仅衰减到 17%，top chunk 仍垄断 fallback。
-                #   新公式 score*0.5^(7d/3) 对 7d=9 衰减到 12.5%，给低频 chunk 更多机会。
                 # iter893: fallback_hard_ceiling — 7d>=5 绝对不选，防止垄断 chunk 经 fallback 逃逸
-                #   根因（数据驱动，2026-05-05）：import-90139 7d=6 经 exp_decay 仍为最高分，
-                #   fallback 反复选中 → 用户 7d 内看到 6 次相同知识。绝对上限杜绝该路径。
+                # iter894: fallback_realtime_align — ceiling 对齐 suppress_final_gate 阈值
+                # 根因（数据驱动，2026-05-05）：hard_deadline fallback ceiling=5 但 final_gate 阈值=3，
+                #   7d=3-4 chunk 被 final_gate suppress 后被 fallback 重新选中。对齐消除逃逸。
+                _fb_hd_ceiling = 3 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
                 _fb_hd_cap = [(s, c) for s, c in _pre_suppress_top_k_hd
-                              if _recent_7d_counts.get(c.get("id", ""), 0) < 5]
+                              if _recent_7d_counts.get(c.get("id", ""), 0) < _fb_hd_ceiling
+                              and _recent_24h_counts.get(c.get("id", ""), 0) < 3]
                 _fb_hd_pool = _fb_hd_cap if _fb_hd_cap else _pre_suppress_top_k_hd
                 _fb_hd_sorted = sorted(_fb_hd_pool,
-                                       key=lambda x: x[0] * (0.5 ** (_recent_7d_counts.get(x[1].get("id", ""), 0) / 3)),
+                                       key=lambda x: x[0] * (0.5 ** (_recent_7d_counts.get(x[1].get("id", ""), 0) / 2)),
                                        reverse=True)
                 _fb_hd = _fb_hd_sorted[0]
                 _last_hash_hd = _read_hash()
@@ -4714,11 +4715,20 @@ def main():
                 _last_hash = _read_hash()
                 # iter892: fallback_exp_decay — 线性→指数衰减（同步 hard_deadline path）
                 # iter893: fallback_hard_ceiling — 7d>=5 绝对不选（同步 hard_deadline path）
+                # iter894: fallback_realtime_align — 优先用实时 DB 计数（与 suppress_final_gate 对齐）
+                # 根因（数据驱动，2026-05-05）：fallback 用启动时闭包 _recent_7d_counts（滞后）+
+                #   hard_ceiling=5，但 suppress_final_gate 用实时 DB + 阈值=3（tiny_db）。
+                #   7d=3-4 的垄断 chunk 被 final_gate suppress 后又被 fallback 重新选中注入。
+                #   修复：用 _rt663_7d（如已计算）替代 _recent_7d_counts，ceiling 对齐 final_gate。
+                _fb_7d = _rt663_7d if '_rt663_7d' in dir() and _rt663_7d else _recent_7d_counts
+                _fb_24h = _rt663_24h if '_rt663_24h' in dir() and _rt663_24h else _recent_24h_counts
+                _fb_ceiling = 3 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
                 _fb_cap = [(s, c) for s, c in _pre_suppress_top_k
-                           if _recent_7d_counts.get(c.get("id", ""), 0) < 5]
+                           if _fb_7d.get(c.get("id", ""), 0) < _fb_ceiling
+                           and _fb_24h.get(c.get("id", ""), 0) < 3]
                 _fb_pool = _fb_cap if _fb_cap else _pre_suppress_top_k
                 _fb_sorted = sorted(_fb_pool,
-                                    key=lambda x: x[0] * (0.5 ** (_recent_7d_counts.get(x[1].get("id", ""), 0) / 3)),
+                                    key=lambda x: x[0] * (0.5 ** (_fb_7d.get(x[1].get("id", ""), 0) / 2)),
                                     reverse=True)
                 _fb = _fb_sorted[0]
                 if _last_hash and len(_fb_sorted) > 1:
@@ -4911,12 +4921,15 @@ def main():
                 if not top_k and _pre_suppress_top_k_lite:
                     # iter892: fallback_exp_decay — LITE 路径同步指数衰减
                     # iter893: fallback_hard_ceiling — 7d>=5 绝对不选（LITE 路径同步）
+                    # iter894: fallback_realtime_align — ceiling 对齐 suppress_final_gate_lite 阈值
+                    _fb_lite_ceiling = 3 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
                     _fb_lite_cap = [(s, c) for s, c in _pre_suppress_top_k_lite
-                                    if sum(1 for t in _itl758.get(c.get("id", ""), []) if t > _cut758_7d) < 5]
+                                    if sum(1 for t in _itl758.get(c.get("id", ""), []) if t > _cut758_7d) < _fb_lite_ceiling
+                                    and sum(1 for t in _itl758.get(c.get("id", ""), []) if t > _cut758_24h) < 3]
                     _fb_lite_pool = _fb_lite_cap if _fb_lite_cap else _pre_suppress_top_k_lite
                     _fb_lite_sorted = sorted(
                         _fb_lite_pool,
-                        key=lambda x: x[0] * (0.5 ** (sum(1 for t in _itl758.get(x[1].get("id", ""), []) if t > _cut758_7d) / 3)),
+                        key=lambda x: x[0] * (0.5 ** (sum(1 for t in _itl758.get(x[1].get("id", ""), []) if t > _cut758_7d) / 2)),
                         reverse=True)
                     _fb_lite = _fb_lite_sorted[0]
                     _last_hash_lite = _read_hash()
