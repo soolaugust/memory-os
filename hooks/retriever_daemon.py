@@ -4978,6 +4978,34 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 except Exception:
                     pass
                 if not top_k:
+                    # iter932: fallback_ceiling_escalation — 放宽 ceiling 重试
+                    # 根因（数据驱动，2026-05-06）：23-chunk 活跃库 12 个 7d>=3，
+                    #   ceiling=3 排除 52% chunk → ultimate_fallback 也选不到 → 空召回。
+                    #   16 条 hash_changed|full 空召回 = 有知识但拒绝给出。
+                    # 修复：ceiling+3 重试，允许选 7d 较高但非极端垄断的 chunk。
+                    #   最终选中的仍受 same_hash 去重保护，不会连续重复注入。
+                    _esc_ceiling = _ult_ceiling + 3
+                    _esc_exclude = [cid for cid, cnt in _fb_7d_ult.items() if cnt >= _esc_ceiling]
+                    _esc_ph = ','.join(['?'] * len(_esc_exclude)) if _esc_exclude else ''
+                    _esc_where = f" AND id NOT IN ({_esc_ph})" if _esc_exclude else ''
+                    try:
+                        _esc_row = conn.execute(
+                            "SELECT id, summary, content, chunk_type, importance, "
+                            "COALESCE(access_count,0), created_at, 0.0, COALESCE(lru_gen,0), project "
+                            f"FROM memory_chunks WHERE project=? AND chunk_state='ACTIVE'{_esc_where} "
+                            "ORDER BY importance DESC, access_count ASC LIMIT 1",
+                            (project, *_esc_exclude)
+                        ).fetchone()
+                        if _esc_row:
+                            top_k = [(0.001, _esc_row)]
+                            _deferred.log(DMESG_WARN, "retriever_daemon",
+                                          f"iter932_fallback_ceiling_escalation: "
+                                          f"id={_esc_row[0][:12]} imp={_esc_row[4]:.2f} "
+                                          f"ceiling={_ult_ceiling}→{_esc_ceiling} excluded={len(_esc_exclude)}",
+                                          session_id=session_id, project=project)
+                    except Exception:
+                        pass
+                if not top_k:
                     # iter780: empty_result_tlb — 写入空结果标记避免重复空转
                     _tlb_write(prompt_hash, "__empty__", _get_db_mtime())
                     return

@@ -4938,6 +4938,34 @@ def main():
                 except Exception:
                     pass
                 if not top_k:
+                    # iter932: fallback_ceiling_escalation — 放宽 ceiling 重试
+                    # 根因（数据驱动，2026-05-06）：23-chunk 活跃库 12 个 7d>=3，
+                    #   ceiling=3 排除 52% → ultimate_fallback 空 → 空召回 16 条/7d。
+                    # 修复：ceiling+3 重试，选 7d 较高但非极端垄断的 chunk。
+                    _esc_ceiling = _ult_ceiling + 3
+                    _esc_exclude = [cid for cid, cnt in _fb_7d_ult.items() if cnt >= _esc_ceiling]
+                    _esc_ph = ','.join(['?'] * len(_esc_exclude)) if _esc_exclude else ''
+                    _esc_where = f" AND id NOT IN ({_esc_ph})" if _esc_exclude else ''
+                    try:
+                        _esc_row = conn.execute(
+                            "SELECT id, summary, content, chunk_type, importance "
+                            f"FROM memory_chunks WHERE project=? AND chunk_state='ACTIVE'{_esc_where} "
+                            "ORDER BY importance DESC, access_count ASC LIMIT 1",
+                            (project, *_esc_exclude)
+                        ).fetchone()
+                        if _esc_row:
+                            _esc_chunk = {"id": _esc_row[0], "summary": _esc_row[1],
+                                          "content": _esc_row[2], "chunk_type": _esc_row[3] or "",
+                                          "importance": _esc_row[4] or 0.5}
+                            top_k = [(0.001, _esc_chunk)]
+                            _deferred.log(DMESG_WARN, "retriever",
+                                          f"iter932_fallback_ceiling_escalation: "
+                                          f"id={_esc_row[0][:12]} imp={_esc_row[4]:.2f} "
+                                          f"ceiling={_ult_ceiling}→{_esc_ceiling}",
+                                          session_id=session_id, project=project)
+                    except Exception:
+                        pass
+                if not top_k:
                     return
         # ── iter914: post_fallback_pair — suppress_fallback 恢复单条后补配对 ──
         # 根因（数据驱动，2026-05-06）：52% 单条注入中多数因 suppress 全灭→fallback 恢复 1 条，
