@@ -3297,7 +3297,13 @@ def main():
                 # iter892: fallback_exp_decay — 线性→指数衰减，高频 chunk 衰减更快促进多样性
                 #   旧公式 score/(1+0.5*7d) 对 7d=10 仅衰减到 17%，top chunk 仍垄断 fallback。
                 #   新公式 score*0.5^(7d/3) 对 7d=9 衰减到 12.5%，给低频 chunk 更多机会。
-                _fb_hd_sorted = sorted(_pre_suppress_top_k_hd,
+                # iter893: fallback_hard_ceiling — 7d>=5 绝对不选，防止垄断 chunk 经 fallback 逃逸
+                #   根因（数据驱动，2026-05-05）：import-90139 7d=6 经 exp_decay 仍为最高分，
+                #   fallback 反复选中 → 用户 7d 内看到 6 次相同知识。绝对上限杜绝该路径。
+                _fb_hd_cap = [(s, c) for s, c in _pre_suppress_top_k_hd
+                              if _recent_7d_counts.get(c.get("id", ""), 0) < 5]
+                _fb_hd_pool = _fb_hd_cap if _fb_hd_cap else _pre_suppress_top_k_hd
+                _fb_hd_sorted = sorted(_fb_hd_pool,
                                        key=lambda x: x[0] * (0.5 ** (_recent_7d_counts.get(x[1].get("id", ""), 0) / 3)),
                                        reverse=True)
                 _fb_hd = _fb_hd_sorted[0]
@@ -4707,7 +4713,11 @@ def main():
             if _pre_suppress_top_k:
                 _last_hash = _read_hash()
                 # iter892: fallback_exp_decay — 线性→指数衰减（同步 hard_deadline path）
-                _fb_sorted = sorted(_pre_suppress_top_k,
+                # iter893: fallback_hard_ceiling — 7d>=5 绝对不选（同步 hard_deadline path）
+                _fb_cap = [(s, c) for s, c in _pre_suppress_top_k
+                           if _recent_7d_counts.get(c.get("id", ""), 0) < 5]
+                _fb_pool = _fb_cap if _fb_cap else _pre_suppress_top_k
+                _fb_sorted = sorted(_fb_pool,
                                     key=lambda x: x[0] * (0.5 ** (_recent_7d_counts.get(x[1].get("id", ""), 0) / 3)),
                                     reverse=True)
                 _fb = _fb_sorted[0]
@@ -4900,8 +4910,12 @@ def main():
                 #   修复：用 _itl758 timeline 数据计算 7d count，应用相同衰减公式。
                 if not top_k and _pre_suppress_top_k_lite:
                     # iter892: fallback_exp_decay — LITE 路径同步指数衰减
+                    # iter893: fallback_hard_ceiling — 7d>=5 绝对不选（LITE 路径同步）
+                    _fb_lite_cap = [(s, c) for s, c in _pre_suppress_top_k_lite
+                                    if sum(1 for t in _itl758.get(c.get("id", ""), []) if t > _cut758_7d) < 5]
+                    _fb_lite_pool = _fb_lite_cap if _fb_lite_cap else _pre_suppress_top_k_lite
                     _fb_lite_sorted = sorted(
-                        _pre_suppress_top_k_lite,
+                        _fb_lite_pool,
                         key=lambda x: x[0] * (0.5 ** (sum(1 for t in _itl758.get(x[1].get("id", ""), []) if t > _cut758_7d) / 3)),
                         reverse=True)
                     _fb_lite = _fb_lite_sorted[0]

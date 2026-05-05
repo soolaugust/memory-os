@@ -4829,7 +4829,11 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             #   修复：score/(1+0.5*7d_count) 使低频 chunk 优先，促进注入多样性。
             if _pre_suppress_top_k:
                 # iter892: fallback_exp_decay — 线性→指数衰减，高频 chunk 更快衰减
-                _fb_sorted = sorted(_pre_suppress_top_k,
+                # iter893: fallback_hard_ceiling — 7d>=5 绝对不选，杜绝垄断 chunk 经 fallback 逃逸
+                _fb_cap = [(s, c) for s, c in _pre_suppress_top_k
+                           if _recent_7d_counts.get(c[_CI_ID], 0) < 5]
+                _fb_pool = _fb_cap if _fb_cap else _pre_suppress_top_k
+                _fb_sorted = sorted(_fb_pool,
                                     key=lambda x: x[0] * (0.5 ** (_recent_7d_counts.get(x[1][_CI_ID], 0) / 3)),
                                     reverse=True)
                 _fb = _fb_sorted[0]
