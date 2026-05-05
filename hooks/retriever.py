@@ -3192,6 +3192,22 @@ def main():
                                       f"iter776_suppress_zero_fallback_hd: imp={_sef_hd_best[0]:.2f} "
                                       f"id={_sef_hd_best[1].get('id','')[:12]}",
                                       session_id=session_id, project=project)
+            # ── iter840: fallback_pair_inject (hard_deadline path) ──
+            # 根因：iter826 在 fallback 之前检查 positive==1，fallback 产出的单条不被覆盖。
+            if len(positive) == 1 and len(final) >= 3:
+                _fb_pair_hd_top1_id = positive[0][1].get("id", "")
+                _fb_pair_hd_cands = [(float(c.get("importance", 0) or 0), c) for _, c in final
+                                     if c.get("id") != _fb_pair_hd_top1_id
+                                     and (c.get("access_count", 0) or 0) < 30]
+                if _fb_pair_hd_cands:
+                    _fb_pair_hd_best = max(_fb_pair_hd_cands, key=lambda x: x[0])
+                    if _fb_pair_hd_best[0] >= 0.3:
+                        _fb_pair_hd_score = positive[0][0] * 0.5
+                        positive.append((_fb_pair_hd_score, _fb_pair_hd_best[1]))
+                        _deferred.log(DMESG_DEBUG, "retriever",
+                                      f"iter840_fallback_pair_hd: paired {_fb_pair_hd_best[1].get('id','')[:12]} "
+                                      f"imp={_fb_pair_hd_best[0]:.2f}",
+                                      session_id=session_id, project=project)
             if _sysctl("retriever.drr_enabled") and len(positive) > effective_top_k:
                 top_k = _drr_select(positive, effective_top_k)
             else:
@@ -3803,6 +3819,23 @@ def main():
                     _deferred.log(DMESG_WARN, "retriever",
                                   f"iter776_suppress_zero_fallback_full: imp={_sef_best[0]:.2f} "
                                   f"id={_sef_best[1].get('id','')[:12]}",
+                                  session_id=session_id, project=project)
+
+        # ── iter840: fallback_pair_inject (FULL path) ──
+        # 根因：iter826 只覆盖 positive=1(score 过阈)。45% 单条来自 positive=0→fallback=1。
+        if len(positive) == 1 and len(final) >= 3:
+            _fb_pair_top1_id = positive[0][1].get("id", "")
+            _fb_pair_cands = [(float(c.get("importance", 0) or 0), c) for _, c in final
+                              if c.get("id") != _fb_pair_top1_id
+                              and (c.get("access_count", 0) or 0) < 30]
+            if _fb_pair_cands:
+                _fb_pair_best = max(_fb_pair_cands, key=lambda x: x[0])
+                if _fb_pair_best[0] >= 0.3:
+                    _fb_pair_score = positive[0][0] * 0.5
+                    positive.append((_fb_pair_score, _fb_pair_best[1]))
+                    _deferred.log(DMESG_DEBUG, "retriever",
+                                  f"iter840_fallback_pair: paired {_fb_pair_best[1].get('id','')[:12]} "
+                                  f"imp={_fb_pair_best[0]:.2f} with fallback top1={_fb_pair_top1_id[:12]}",
                                   session_id=session_id, project=project)
 
         # ── 迭代334：IWCSI — Importance-Weighted Cold-Start Injection ───────
