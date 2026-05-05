@@ -5178,6 +5178,32 @@ def main():
             except Exception:
                 pass  # best-effort
 
+        # ── iter910: score_floor_gate — 低相关性注入拦截 ──────────────────
+        # 根因（数据驱动，2026-05-06）：48% 注入 score<0.2，来源为 diversity_probe
+        #   (score=0.01)、suppress_fallback、final_single_pair(score=top1*0.20) 等。
+        #   低分 chunk 与用户当前上下文无关，注入后污染 context window、降低 SNR。
+        # 修复：score < _score_floor 的 chunk 过滤掉。全部低于阈值时保留最高分 1 条
+        #   （宁注入 1 条中低分也不注入 3 条极低分）。micro_db(<=5) 跳过。
+        _score_floor = 0.08
+        if len(top_k) > 0 and _db_chunk_count > 5:
+            _sf_above = [(s, c) for s, c in top_k if s >= _score_floor]
+            if _sf_above:
+                if len(_sf_above) < len(top_k):
+                    _sf_removed = len(top_k) - len(_sf_above)
+                    top_k = _sf_above
+                    _deferred.log(DMESG_DEBUG, "retriever",
+                                  f"iter910_score_floor_gate: removed {_sf_removed} chunks "
+                                  f"below score_floor={_score_floor}",
+                                  session_id=session_id, project=project)
+            else:
+                # 全部低于阈值：保留最高分 1 条
+                _sf_best = max(top_k, key=lambda x: x[0])
+                top_k = [_sf_best]
+                _deferred.log(DMESG_DEBUG, "retriever",
+                              f"iter910_score_floor_gate: all below floor, kept best "
+                              f"s={_sf_best[0]:.3f} id={_sf_best[1].get('id','')[:12]}",
+                              session_id=session_id, project=project)
+
         # ── 迭代359：Session Injection Deduplication ──────────────────────
         # OS 类比：Linux copy-on-write page dedup（KSM kernel samepage merging）
         #   同一物理页被多次 map → 只在达到阈值后合并为单一只读页，避免重复 I/O。
