@@ -4834,7 +4834,10 @@ def main():
                 ).fetchall()
                 # 过滤 7d 过高的候选
                 _dp895_7d = _rt663_7d if '_rt663_7d' in dir() and _rt663_7d else _recent_7d_counts
-                _dp895_lim = 8 if _sf663_tiny_db else 10 if '_sf663_small_db' in dir() and _sf663_small_db else 8
+                # iter920: fix NameError — _sf663_tiny_db 仅在 suppress_final_gate(line 4687) 内定义，
+                #   LITE 路径或 try 失败时不存在 → NameError 被 except 吞掉 → pair 零触发。
+                _dp895_tiny = _sf663_tiny_db if '_sf663_tiny_db' in dir() else (_db_chunk_count < 50)
+                _dp895_lim = 8 if _dp895_tiny else 10 if '_sf663_small_db' in dir() and _sf663_small_db else 8
                 _dp895_ok = [r for r in _dp895_rows
                              if _dp895_7d.get(r[0], 0) < _dp895_lim
                              and _session_injection_counts.get(r[0], 0) < _pair_dedup_thresh]
