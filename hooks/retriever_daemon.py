@@ -3850,9 +3850,9 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             if _db_chunk_count < 100:
                 # iter801: micro_db_suppress_bypass — <=5 chunk 库禁用 bandwidth suppress
                 # 根因：1-chunk 库中唯一 chunk 被自身注入历史 suppress → 15 次连续空召回。
-                # iter812: small_db_bw_relax — <50 用 0.25（原 <30）
-                # 数据驱动：35 chunk 库 bw_window=20 + 0.12 → rc>2.4 即 suppress → 77% 注入仅 1 条
-                _inject_hard_cap = 1.0 if _db_chunk_count <= 5 else (0.25 if _db_chunk_count < 50 else 0.12)
+                # iter861: small_db_bw_tighten — <50 收紧 0.25→0.15
+                # 数据驱动（2026-05-05）：38-chunk 库 0.25→rc>7.5 才 suppress，最高 rc=6 全逃逸。
+                _inject_hard_cap = 1.0 if _db_chunk_count <= 5 else (0.15 if _db_chunk_count < 50 else 0.12)
             fts_ids = {chunk[_CI_ID] for chunk in fts_results}  # iter235: positional tuple
             final = [(_score_chunk(chunk, chunk[_CI_FR] / max_rank), chunk)
                      for chunk in fts_results]
@@ -3980,8 +3980,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             # iter756: small_db_bw_tighten; iter774: tiny_db_bw_relax (BM25 path)
             if _db_chunk_count < 100:
                 # iter801: micro_db_suppress_bypass (BM25 path)
-                # iter812: small_db_bw_relax — <50 用 0.25（sync with FTS path）
-                _inject_hard_cap = 1.0 if _db_chunk_count <= 5 else (0.25 if _db_chunk_count < 50 else 0.12)
+                # iter861: small_db_bw_tighten — <50 收紧 0.25→0.15 (sync)
+                _inject_hard_cap = 1.0 if _db_chunk_count <= 5 else (0.15 if _db_chunk_count < 50 else 0.12)
             # iter683: raw_relevance_gate — 绝对相关性门槛
             # 根因（用户可感知）：normalize 是相对排名（max=1.0），当 DB 中无真正相关 chunk 时，
             # 噪声匹配（中文通用 bigram 重叠）被放大到 1.0 超过阈值 → 注入不相关内容。
