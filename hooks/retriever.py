@@ -3127,12 +3127,14 @@ def main():
                         if s >= _gb_cluster_floor
                     )
                     if _gb_cluster_size >= _gb_min_cluster:
-                        _gb_new_thresh = max(_gb_cluster_floor, 0.05)
+                        # iter863: gap_bridge_floor_raise — 0.05 允许 score<0.10 的不相关知识注入
+                        #   数据驱动：7d 内 12 条 score<0.10 注入全为跨项目无关知识
+                        _gb_new_thresh = max(_gb_cluster_floor, 0.10)
                         if _gb_new_thresh < _min_thresh:
                             _min_thresh = _gb_new_thresh
             # iter620: zero_score_absolute_gate — score=0 的 chunk 绝对不进入 positive
             # 根因：_hard_suppressed 将 score 设为 0.0，但 adaptive_floor/gap_bridge
-            #   可将 _min_thresh 降到 0.05，而 focus_bonus 等 += 操作可能将 0.0 抬到
+            #   可将 _min_thresh 降到 0.10，而 focus_bonus 等 += 操作可能将 0.0 抬到
             #   0.00009 级别，恰好通过极低 threshold。绝对零分门槛不可绕过。
             positive = [(s, c) for s, c in final if s >= _min_thresh and s > 0]
             # iter826: single_result_pair_inject (hard_deadline path)
@@ -3140,7 +3142,7 @@ def main():
             _pair_dedup_thresh_hd = _sysctl("retriever.session_dedup_threshold") or 2
             if len(positive) == 1 and len(final) >= 3:
                 _pair_cands_hd = [(s, c) for s, c in final
-                                  if s > 0.05 and s < _min_thresh
+                                  if s > 0.10 and s < _min_thresh
                                   and c.get("id") != positive[0][1].get("id")
                                   and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh_hd]
                 if _pair_cands_hd:
@@ -3767,7 +3769,8 @@ def main():
                     if s >= _gb_cluster_floor
                 )
                 if _gb_cluster_size >= _gb_min_cluster:
-                    _gb_new_thresh = max(_gb_cluster_floor, 0.05)
+                    # iter863: gap_bridge_floor_raise (FULL path)
+                    _gb_new_thresh = max(_gb_cluster_floor, 0.10)
                     if _gb_new_thresh < _min_thresh:
                         _min_thresh = _gb_new_thresh
                         _deferred.log(DMESG_DEBUG, "retriever",
@@ -3788,10 +3791,10 @@ def main():
         #   cands=29-33 中仅 1 条过 _min_thresh（其余 score=0 被 suppress 或 relevance 极低）。
         #   单条注入缺乏上下文组合，用户感知记忆系统只能给"单点"知识。
         # 修复：positive=1 时从 final 中取 score>0 但 < _min_thresh 的次优候选补充 1 条，
-        #   确保至少 2 条组合上下文。下限 0.05 防止噪声注入。
+        #   确保至少 2 条组合上下文。下限 0.10 防止噪声注入（iter863 从 0.05 提升）。
         if len(positive) == 1 and len(final) >= 3:
             _pair_candidates = [(s, c) for s, c in final
-                                if s > 0.05 and s < _min_thresh
+                                if s > 0.10 and s < _min_thresh
                                 and c.get("id") != positive[0][1].get("id")
                                 and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh]
             if _pair_candidates:

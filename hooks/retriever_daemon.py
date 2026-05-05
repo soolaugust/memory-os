@@ -4031,7 +4031,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     _gb_cf = _gb_t2 * 0.4
                     _gb_cs = sum(1 for s, _ in final[1:] if s >= _gb_cf)
                     if _gb_cs >= 2:
-                        _gb_nt = max(_gb_cf, 0.05)
+                        # iter863: gap_bridge_floor_raise — 0.05→0.10 防止低相关性噪声注入
+                        _gb_nt = max(_gb_cf, 0.10)
                         if _gb_nt < _min_thresh:
                             _min_thresh = _gb_nt
             # iter620: zero_score_absolute_gate — hard_suppressed chunk 绝对不入选
@@ -4048,7 +4049,7 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             #   retriever.py 的 iter826/827 从未在 daemon 被触发。
             if len(positive) == 1 and len(final) >= 3:
                 _pi_cands = [(s, c) for s, c in final
-                             if s > 0.05 and s < _min_thresh
+                             if s > 0.10 and s < _min_thresh
                              and c[_CI_ID] != positive[0][1][_CI_ID]]
                 if _pi_cands:
                     _pi_best = max(_pi_cands, key=lambda x: x[0])
@@ -4240,7 +4241,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 _gb_cf = _gb_t2 * 0.4
                 _gb_cs = sum(1 for s, _ in final[1:] if s >= _gb_cf)
                 if _gb_cs >= 2:
-                    _gb_nt = max(_gb_cf, 0.05)
+                    # iter863: gap_bridge_floor_raise (FULL path)
+                    _gb_nt = max(_gb_cf, 0.10)
                     if _gb_nt < _min_thresh:
                         _min_thresh = _gb_nt
         # iter620: zero_score_absolute_gate (FULL path) — 同 hard_deadline 路径
@@ -4252,7 +4254,7 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
         # ── iter830: daemon_pair_inject — 同步 retriever.py iter826/827 (FULL path) ──
         if len(positive) == 1 and len(final) >= 3:
             _pi_cands_f = [(s, c) for s, c in final
-                           if s > 0.05 and s < _min_thresh
+                           if s > 0.10 and s < _min_thresh
                            and c[_CI_ID] != positive[0][1][_CI_ID]]
             if _pi_cands_f:
                 _pi_best_f = max(_pi_cands_f, key=lambda x: x[0])
