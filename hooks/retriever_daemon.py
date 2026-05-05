@@ -3685,6 +3685,13 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     if _hard_util_sc > _bw_soft_start:
                         _bw_penalty = 1.0 - (_hard_util_sc - _bw_soft_start) / (_inject_hard_cap - _bw_soft_start)
                         score *= _bw_penalty
+            # iter875: soft_diversity_penalty — 7d 注入次数越高，score 乘法衰减越强
+            # 根因（数据驱动，2026-05-05）：37-chunk 库中 11 个 chunk 7d=4（阈值5内不触发 suppress），
+            #   而 9 个 chunk 7d=0 从未被注入。hard suppress 前无任何评分区分 → 高频 chunk 靠 FTS 优势垄断。
+            # 修复：score *= 1/(1 + 7d_count * 0.2)，7d=4 衰减到 55%，自然让位给 7d=0 的 chunk。
+            _r7d_sc = _recent_7d_counts.get(_cid, 0)
+            if _r7d_sc > 0 and _db_chunk_count > 5:
+                score *= 1.0 / (1.0 + _r7d_sc * 0.2)
             # iter618: 24h + 7d burst suppress（daemon 此前完全缺失）
             # iter619: 阈值收紧 24h:3→2, 7d:8→5
             # iter672: relevance_exempt — 高分 chunk 放宽阈值，防 suppress 过杀
@@ -3778,6 +3785,10 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     if _hard_util_sd > _bw_soft_start_d:
                         _bw_pen_d = 1.0 - (_hard_util_sd - _bw_soft_start_d) / (_inject_hard_cap - _bw_soft_start_d)
                         score *= _bw_pen_d
+            # iter875: soft_diversity_penalty — sync with _score_chunk
+            _r7d_sd = _recent_7d_counts.get(_cid, 0)
+            if _r7d_sd > 0 and _db_chunk_count > 5:
+                score *= 1.0 / (1.0 + _r7d_sd * 0.2)
             # iter618: 24h + 7d burst suppress（daemon 此前完全缺失）
             # iter619: 阈值收紧 24h:3→2, 7d:8→5
             # iter672: relevance_exempt — 高分 chunk 放宽阈值，防 suppress 过杀
