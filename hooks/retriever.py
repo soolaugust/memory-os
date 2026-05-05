@@ -4937,6 +4937,13 @@ def main():
                                   session_id=session_id, project=project)
             except Exception:
                 pass
+        # iter918: 确保 _pre_suppress_top_k 在 common path（FULL+LITE 合并点）有默认值
+        # 根因：LITE 路径不经过 line 4606 的 FULL-only 赋值，到达 iter859 时 NameError
+        #   被外层 try/except 吞掉 → diversity_probe 也在同一 try 块内 → 全部静默失败。
+        try:
+            _pre_suppress_top_k
+        except NameError:
+            _pre_suppress_top_k = list(top_k)
         top_k_ids = sorted([c["id"] for _, c in top_k])
         current_hash = hashlib.md5("|".join(top_k_ids).encode()).hexdigest()[:8]
 
@@ -4962,9 +4969,13 @@ def main():
             #   替换后重新计算 hash，若仍相同则放弃（真的没有新知识）。
             _sh_rotated = False
             _sh_top_k_ids_set = set(c["id"] for _, c in top_k)
+            # iter918: relax s>0 → s>=0 — suppress 后 score=0 的候选也可参与 rotation
+            # 根因（数据驱动，2026-05-06）：7d 内 22 次 same_hash skip 中 diversity_probe
+            #   零触发。iter859 因 s>0 过滤排除了所有被 suppress 的候选（score=0），
+            #   但这些候选本身有用户价值（只是因 7d/24h 频率被降权），作为 rotation 替代仍有意义。
             if _pre_suppress_top_k and len(_pre_suppress_top_k) > len(top_k):
                 _sh_alt_cands = [(s, c) for s, c in _pre_suppress_top_k
-                                 if c.get("id", "") not in _sh_top_k_ids_set and s > 0]
+                                 if c.get("id", "") not in _sh_top_k_ids_set]
                 if _sh_alt_cands:
                     _sh_best_alt = max(_sh_alt_cands, key=lambda x: x[0])
                     # 替换 top_k 中最低分的条目
@@ -5028,8 +5039,11 @@ def main():
                                       f"idx={_dp_idx}/{len(_dp_rows)} "
                                       f"replacing={'empty' if not _sh_top_k_ids else 'lowest'}",
                                       session_id=session_id, project=project)
-                except Exception:
-                    pass
+                except Exception as _dp_exc:
+                    # iter918: 记录 diversity_probe 失败原因（此前 pass 导致零诊断）
+                    _deferred.log(DMESG_DEBUG, "retriever",
+                                  f"iter918_diversity_probe_fail: {type(_dp_exc).__name__}: {_dp_exc}",
+                                  session_id=session_id, project=project)
             if not _sh_rotated:
                 _tlb_write(prompt_hash, current_hash, _get_db_mtime())  # 迭代57: TLB 回填
                 _tlb_bump_generation()  # iter583: FULL 完成后 bump generation
