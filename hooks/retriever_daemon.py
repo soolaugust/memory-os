@@ -5288,6 +5288,21 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                                   f"iter881_json_empty_guard: top_k serialized empty, "
                                   f"rebuilt from accessed_ids={len(_accessed_ids)}",
                                   session_id=_session_id, project=_project)
+                # iter915: inmem_log_fallback — 闭包参数全空时从进程内存恢复
+                # 根因（数据驱动，2026-05-06）：40% injected trace 的 top_k_json='[]'，
+                #   _accessed_ids 在闭包中偶发为空（根因未定，疑 GC/thread 竞争）。
+                #   _daemon_inject_log 在 stdout 输出前写入（line 5219），不受闭包影响。
+                # 修复：用 _daemon_inject_log 最近 2s 内的条目作为 ultimate fallback。
+                if not _effective_top_k and _top_k_len > 0:
+                    _wb_now = time.time()
+                    _inmem_recent = [cid for cid, ts in _daemon_inject_log
+                                     if _wb_now - ts < 2.0]
+                    if _inmem_recent:
+                        _effective_top_k = [{"id": cid} for cid in _inmem_recent[-_top_k_len:]]
+                        dmesg_log(_wconn, DMESG_WARN, "retriever",
+                                  f"iter915_inmem_log_fallback: recovered {len(_effective_top_k)} "
+                                  f"ids from daemon_inject_log",
+                                  session_id=_session_id, project=_project)
                 if _effective_injected == 1 and not _effective_top_k:
                     for level, subsystem, message, sid, proj, extra in _deferred_buf:
                         try:
