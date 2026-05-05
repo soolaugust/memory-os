@@ -4612,6 +4612,21 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                                   session_id=session_id, project=project)
             except Exception:
                 pass
+        # ── iter832: post_suppress_pair_inject — suppress 后单条时从快照补配对 ──
+        # 根因（数据驱动，2026-05-05）：70% 注入为单条。suppress_final_gate 事后砍掉
+        #   pair_inject 添加的第 2 条 → 最终仍单条。
+        # 修复：suppress 过滤后如果 top_k=1，从 _pre_suppress_top_k 中选不同 chunk 配对。
+        if len(top_k) == 1 and len(_pre_suppress_top_k) >= 2:
+            _ps_top1_id = top_k[0][1][_CI_ID]
+            _ps_candidates = [(s, c) for s, c in _pre_suppress_top_k
+                              if c[_CI_ID] != _ps_top1_id and s > 0]
+            if _ps_candidates:
+                _ps_best = max(_ps_candidates, key=lambda x: x[0])
+                top_k.append(_ps_best)
+                _deferred.log(DMESG_DEBUG, "retriever_daemon",
+                              f"iter832_post_suppress_pair: paired {_ps_best[1][_CI_ID][:12]} "
+                              f"s={_ps_best[0]:.3f} with top1={_ps_top1_id[:12]}",
+                              session_id=session_id, project=project)
         if not top_k:
             # ── iter670: suppress_fallback — suppress 全灭时降级注入最佳 1 条 ──
             # iter829: fallback_rotation — 排除上次已注入 chunk 避免 same_hash 死循环

@@ -4420,6 +4420,21 @@ def main():
                                   session_id=session_id, project=project)
             except Exception:
                 pass  # 兜底查询失败不阻塞
+        # ── iter832: post_suppress_pair_inject — suppress 后单条时从快照补配对 ──
+        # 根因（数据驱动，2026-05-05）：FULL 路径 44% 输出单条。iter826 pair_inject
+        #   在 positive 阶段添加第 2 条，但 suppress_final_gate 事后砍掉 → 最终仍单条。
+        # 修复：suppress 过滤后如果 top_k=1，从 _pre_suppress_top_k 中选不同 chunk 配对。
+        if len(top_k) == 1 and len(_pre_suppress_top_k) >= 2:
+            _ps_top1_id = top_k[0][1].get("id", "")
+            _ps_candidates = [(s, c) for s, c in _pre_suppress_top_k
+                              if c.get("id", "") != _ps_top1_id and s > 0]
+            if _ps_candidates:
+                _ps_best = max(_ps_candidates, key=lambda x: x[0])
+                top_k.append(_ps_best)
+                _deferred.log(DMESG_DEBUG, "retriever",
+                              f"iter832_post_suppress_pair: paired {_ps_best[1].get('id','')[:12]} "
+                              f"s={_ps_best[0]:.3f} with top1={_ps_top1_id[:12]}",
+                              session_id=session_id, project=project)
         if not top_k:
             # ── iter670: suppress_fallback — suppress 全灭时降级注入最佳 1 条 ──
             # iter829: fallback_rotation — 避免 fallback 永远选同一 chunk 导致 same_hash 死循环
@@ -4548,6 +4563,21 @@ def main():
                                   session_id=session_id, project=project)
             except Exception:
                 pass  # timeline 读取失败不阻塞
+
+        # ── iter832: post_suppress_pair_inject — LITE 路径 suppress 后单条配对 ──
+        # 同 FULL 路径逻辑：suppress_final_gate_lite 过滤后如果 top_k=1，
+        # 从 _pre_suppress_top_k_lite 快照中选次优配对，确保多知识组合上下文。
+        if len(top_k) == 1 and len(_pre_suppress_top_k_lite) >= 2:
+            _ps_lite_top1_id = top_k[0][1].get("id", "")
+            _ps_lite_cands = [(s, c) for s, c in _pre_suppress_top_k_lite
+                              if c.get("id", "") != _ps_lite_top1_id and s > 0]
+            if _ps_lite_cands:
+                _ps_lite_best = max(_ps_lite_cands, key=lambda x: x[0])
+                top_k.append(_ps_lite_best)
+                _deferred.log(DMESG_DEBUG, "retriever",
+                              f"iter832_post_suppress_pair_lite: paired "
+                              f"{_ps_lite_best[1].get('id','')[:12]} s={_ps_lite_best[0]:.3f}",
+                              session_id=session_id, project=project)
 
         # ── 迭代359：Session Injection Deduplication ──────────────────────
         # OS 类比：Linux copy-on-write page dedup（KSM kernel samepage merging）
