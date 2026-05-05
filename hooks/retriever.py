@@ -3299,7 +3299,7 @@ def main():
                                    and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh_hd
                                    and _recent_6h_counts.get(c.get("id", ""), 0) < 2  # iter865
                                    and _recent_24h_counts.get(c.get("id", ""), 0) < (3 if _hd_tiny_db else 3)
-                                   and _recent_7d_counts.get(c.get("id", ""), 0) < (5 if _hd_tiny_db else 7)]  # iter884: pair 7d relax +2
+                                   and _recent_7d_counts.get(c.get("id", ""), 0) < (4 if _hd_tiny_db else 6)]  # iter911: pair_7d_tighten — 5/7→4/6 堵 pair 逃逸
                 if _ps842_hd_cands:
                     _ps842_hd_best = max(_ps842_hd_cands, key=lambda x: x[0])
                     if _ps842_hd_best[0] >= 0.3:
@@ -3322,8 +3322,8 @@ def main():
                 # iter894: fallback_realtime_align — ceiling 对齐 suppress_final_gate 阈值
                 # 根因（数据驱动，2026-05-05）：hard_deadline fallback ceiling=5 但 final_gate 阈值=3，
                 #   7d=3-4 chunk 被 final_gate suppress 后被 fallback 重新选中。对齐消除逃逸。
-                # iter904: 7d_rebalance_tiny — fallback ceiling 同步 2→4
-                _fb_hd_ceiling = 4 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
+                # iter911: pair_7d_tighten — fallback ceiling 4→3(tiny) 堵 suppress 后 fallback 逃逸
+                _fb_hd_ceiling = 3 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
                 _fb_hd_cap = [(s, c) for s, c in _pre_suppress_top_k_hd
                               if _recent_7d_counts.get(c.get("id", ""), 0) < _fb_hd_ceiling
                               and _recent_24h_counts.get(c.get("id", ""), 0) < 3]
@@ -4753,8 +4753,8 @@ def main():
                 _p24 = _rt663_24h.get(cid, 0)
                 _p7d = _rt663_7d.get(cid, 0)
                 _p24_lim = 3 if _sf663_tiny_db else (3 if score >= 0.5 else 2) if _sf663_small_db else (3 if score >= 0.5 else 2)
-                # iter884: pair 7d 放宽 +2 — 配对非主注入，容忍更高频率
-                _p7d_lim = 5 if _sf663_tiny_db else (10 if score >= 0.5 else 8) if _sf663_small_db else (7 if score >= 0.5 else 5)
+                # iter911: pair_7d_tighten — 5/10/8/7→4/6/5/5 堵 pair 逃逸
+                _p7d_lim = 4 if _sf663_tiny_db else (6 if score >= 0.5 else 5) if _sf663_small_db else (5 if score >= 0.5 else 5)
                 return _p24 < _p24_lim and _p7d < _p7d_lim
             except NameError:
                 return True  # suppress_final_gate 未执行（try 失败），不额外限制
@@ -5063,8 +5063,8 @@ def main():
                     # iter892: fallback_exp_decay — LITE 路径同步指数衰减
                     # iter893: fallback_hard_ceiling — 7d>=5 绝对不选（LITE 路径同步）
                     # iter894: fallback_realtime_align — ceiling 对齐 suppress_final_gate_lite 阈值
-                    # iter904: 7d_rebalance_tiny — fallback ceiling 同步 2→4
-                    _fb_lite_ceiling = 4 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
+                    # iter911: pair_7d_tighten — fallback ceiling 4→3(tiny) 堵逃逸
+                    _fb_lite_ceiling = 3 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
                     _fb_lite_cap = [(s, c) for s, c in _pre_suppress_top_k_lite
                                     if sum(1 for t in _itl758.get(c.get("id", ""), []) if t > _cut758_7d) < _fb_lite_ceiling
                                     and sum(1 for t in _itl758.get(c.get("id", ""), []) if t > _cut758_24h) < 3]
@@ -5102,8 +5102,8 @@ def main():
                 _p7d = sum(1 for t in _ts_list if t > _cut758_7d)
                 _p6_lim = 3 if _sf758_tiny_db else 2
                 _p24_lim = 3 if _sf758_tiny_db else (3 if score >= 0.5 else 2) if _sf758_small_db else (3 if score >= 0.5 else 2)
-                # iter885: pair 7d = base(3/4/3) +2 → tiny=5, small=6/5, large=7/5
-                _p7d_lim = 5 if _sf758_tiny_db else (6 if score >= 0.5 else 5) if _sf758_small_db else (7 if score >= 0.5 else 5)
+                # iter911: pair_7d_tighten — tiny 5→4, small 6/5→5/4, large 7/5→5/5
+                _p7d_lim = 4 if _sf758_tiny_db else (5 if score >= 0.5 else 4) if _sf758_small_db else (5 if score >= 0.5 else 5)
                 return _p6 < _p6_lim and _p24 < _p24_lim and _p7d < _p7d_lim
             except NameError:
                 return True

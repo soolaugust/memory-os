@@ -4831,8 +4831,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 _p24 = _rt663d_24h.get(cid, 0)
                 _p7d = _rt663d_7d.get(cid, 0)
                 _p24_lim = 3 if _sf663d_tiny_db else (3 if score >= 0.5 else 2) if _sf663d_small_db else (3 if score >= 0.5 else 2)
-                # iter884: pair 7d 放宽 +2
-                _p7d_lim = 5 if _sf663d_tiny_db else (7 if score >= 0.5 else 6) if _sf663d_small_db else (7 if score >= 0.5 else 5)
+                # iter911: pair_7d_tighten — 5/7/6/7→4/6/5/5 堵 pair 逃逸
+                _p7d_lim = 4 if _sf663d_tiny_db else (6 if score >= 0.5 else 5) if _sf663d_small_db else (5 if score >= 0.5 else 5)
                 return _p24 < _p24_lim and _p7d < _p7d_lim
             except NameError:
                 return True
@@ -4915,8 +4915,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 #   7d=3-4 的垄断 chunk 被 final_gate suppress 后又被 fallback 重新选中注入。
                 _fb_7d_d = _rt663d_7d if '_rt663d_7d' in dir() and _rt663d_7d else _recent_7d_counts
                 _fb_24h_d = _rt663d_24h if '_rt663d_24h' in dir() and _rt663d_24h else _recent_24h_counts
-                # iter904: 7d_rebalance_tiny — fallback ceiling 同步 2→4
-                _fb_ceiling_d = 4 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
+                # iter911: pair_7d_tighten — fallback ceiling 4→3(tiny) 堵逃逸
+                _fb_ceiling_d = 3 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
                 _fb_cap = [(s, c) for s, c in _pre_suppress_top_k
                            if _fb_7d_d.get(c[_CI_ID], 0) < _fb_ceiling_d
                            and _fb_24h_d.get(c[_CI_ID], 0) < 3]
