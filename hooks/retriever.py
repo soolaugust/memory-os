@@ -4795,7 +4795,8 @@ def main():
                 top_k = [(s, c) for s, c in top_k
                          if sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_6h) < 2  # iter865: 6h_tighten_tiny
                          and sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_24h) < (3 if _sf758_tiny_db else (3 if s >= 0.5 else 2) if _sf758_small_db else (3 if s >= 0.5 else 2))
-                         and sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_7d) < (7 if _sf758_tiny_db else (8 if s >= 0.5 else 6) if _sf758_small_db else (5 if s >= 0.5 else 3))]
+                         # iter878: lite_7d_thresh_sync — 7→5 对齐 FULL final_gate + _score_chunk
+                         and sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_7d) < (5 if _sf758_tiny_db else (8 if s >= 0.5 else 6) if _sf758_small_db else (5 if s >= 0.5 else 3))]
                 if len(top_k) < _pre758:
                     _deferred.log(DMESG_WARN, "retriever",
                                   f"iter758_suppress_final_gate_lite: filtered "
@@ -4832,7 +4833,7 @@ def main():
                 _p7d = sum(1 for t in _ts_list if t > _cut758_7d)
                 _p6_lim = 3 if _sf758_tiny_db else 2
                 _p24_lim = 3 if _sf758_tiny_db else (3 if score >= 0.5 else 2) if _sf758_small_db else (3 if score >= 0.5 else 2)
-                _p7d_lim = 7 if _sf758_tiny_db else (8 if score >= 0.5 else 6) if _sf758_small_db else (5 if score >= 0.5 else 3)
+                _p7d_lim = 5 if _sf758_tiny_db else (8 if score >= 0.5 else 6) if _sf758_small_db else (5 if score >= 0.5 else 3)  # iter878: sync
                 return _p6 < _p6_lim and _p24 < _p24_lim and _p7d < _p7d_lim
             except NameError:
                 return True
