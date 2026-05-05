@@ -2171,7 +2171,7 @@ def _vma_validate(summary: str) -> bool:
     # iter838: suppress_chunk_combo_gate — 拦截 suppress+chunk 组合的迭代器自引用
     # 根因（数据驱动，2026-05-05）：4 条 ac=0 噪声含 "24h suppress" + "chunk 被注入/触发"，
     #   逃过 _SOFT_META（'suppress' 单次只算 1 hit）。该组合仅在 memory-os 上下文出现。
-    if 'suppress' in _sl and re.search(r'chunk.{0,20}(?:注入|被|触发|suppress|阈值)', s):
+    if 'suppress' in _sl and re.search(r'chunk.{0,40}(?:注入|被|触发|suppress|阈值|累积|垄断)', s):
         return False
     # iter794: code_var_cn_mix_gate — 拦截混合代码变量+中文说明的内部注释碎片
     # 根因（数据驱动，2026-05-04）：728d3c55 "ac>=30），score 设为 imp  0.01 确保不干扰"
@@ -2185,6 +2185,12 @@ def _vma_validate(summary: str) -> bool:
         return False
     # iter605: 拦截引用具体 chunk ID 的实现笔记（如 "b50e0b54 被注入 87%"）
     if re.search(r'[0-9a-f]{8}.*(?:被注入|注入|injected|rc=|trace)', s):
+        return False
+    # iter866: iter_retrieval_analysis_gate — 拦截迭代器对检索/pair 算法的因果分析
+    # 根因（数据驱动，2026-05-05）：3 条近重复噪声逃逸所有 gate：
+    #   "FTS 从未命中它们 → pair 逻辑（iter826/827）无法选到它们"
+    #   特征：含 iter\d{3} 引用 + 检索逻辑关键词（候选/pair/FTS/命中/top_k）
+    if re.search(r'iter\d{3}', s) and re.search(r'候选|pair|FTS.*命中|top_k|final.*列表', s):
         return False
     # iter687: truncated_fragment_gate — 截断碎片拦截
     # 根因（数据驱动，2026-05-04）：'daemon 工作 → 没人发现）'（17 chars）逃逸所有 gate。
