@@ -271,6 +271,7 @@ def _run_extraction_pipeline(payload: dict) -> dict:
         from hooks.extractor import (
             _sysctl,
             _cow_prescan,
+            _is_quality_chunk,
             DECISION_SIGNALS, EXCLUDED_SIGNALS, REASONING_SIGNALS,
             _extract_by_signals,
             _extract_structured_decisions,
@@ -410,6 +411,12 @@ def _run_extraction_pipeline(payload: dict) -> dict:
                 # OS 类比：Linux memfd_seal(F_SEAL_WRITE) (Jeff Xu, 2024) —
                 # sealed memory region 拒绝写入损坏数据，在 write 入口强制校验
                 if _seal_check_reject(t.strip()):
+                    continue
+                # iter900: quality_gate_sync — 统一调用 _is_quality_chunk
+                # 根因（数据驱动，2026-05-05）：extractor_pool 路径缺少 _is_quality_chunk，
+                #   导致噪声 chunk（如 "真菌感染或接触性皮炎"）绕过 extractor.py 的门控写入 DB。
+                #   summary = t[:120]，需与 extractor.py _write_chunk 保持同等过滤。
+                if not _is_quality_chunk(t[:120]):
                     continue
                 imp = base_importance
                 if throttle_active:
