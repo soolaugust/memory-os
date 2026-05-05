@@ -4766,11 +4766,12 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 # iter818: tiny_db_6h_relax — 6h 分级
                 # iter883: full_final_gate_7d_sync — 对齐 hard_deadline iter882
                 # iter905: cross_project_suppress_tighten — daemon 路径同步
+                # iter908: final_gate_7d_align_score — tiny_db 4→3 对齐 _score_chunk(>=3)
                 def _d905_7d_thresh(s, c):
                     _cp = c[_CI_CP] or ""
                     _cross = (_cp != project and _cp != "global")
                     if _sf663d_tiny_db:
-                        _t = 4
+                        _t = 3
                     elif _sf663d_small_db:
                         _t = 4 if s >= 0.5 else 3
                     else:
@@ -4797,11 +4798,12 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             _fg887d_tiny = _db_chunk_count < 50
             _fg887d_small = _db_chunk_count < 100
             # iter905: cross_project_suppress_tighten — daemon closure 路径同步
+            # iter908: final_gate_7d_align_score — tiny_db 4→3
             def _d887_7d_thresh(s, c):
                 _cp = c[_CI_CP] or ""
                 _cross = (_cp != project and _cp != "global")
                 if _fg887d_tiny:
-                    _t = 4
+                    _t = 3
                 elif _fg887d_small:
                     _t = 4 if s >= 0.5 else 3
                 else:

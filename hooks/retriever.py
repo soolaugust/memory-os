@@ -3268,11 +3268,12 @@ def main():
                 # iter882: 7d_tighten_monopoly — tiny_db 20/15→3, small 8/6→4/3（sync daemon）
                 #   根因：tiny_db 7d=20 允许同一 chunk 注入 19 次，垄断根源。
                 # iter905: cross_project_suppress_tighten — hard_deadline 路径同步
+                # iter908: final_gate_7d_align_score — tiny_db 4→3
                 def _hd905_7d_thresh(s, c):
                     _cp = c.get("project", "")
                     _cross = (_cp != project and _cp != "global")
                     if _hd_tiny_db:
-                        _t = 4
+                        _t = 3
                     elif _hd_small_db:
                         _t = 4 if s >= 0.5 else 3
                     else:
@@ -4674,11 +4675,12 @@ def main():
                 #   根因（数据驱动，2026-05-05）：42-chunk 库中 29 个 kernel chunk 与 memory-os 无关，
                 #   但因 FTS5 全库搜索 + session 恢复关键词匹配，7d=3-4 的 kernel chunk 持续注入。
                 #   修复：非本项目非 global chunk 7d 阈值收紧 2，加速 suppress 无关知识。
+                # iter908: final_gate_7d_align_score — tiny_db 4→3 对齐 _score_chunk(>=3)
                 def _sf663_7d_thresh(s, c):
                     _cp = c.get("project", "")
                     _cross = (_cp != project and _cp != "global")
                     if _sf663_tiny_db:
-                        _t = 4
+                        _t = 3
                     elif _sf663_small_db:
                         _t = 4 if s >= 0.5 else 3
                     else:
@@ -4706,11 +4708,12 @@ def main():
             _fg887_tiny = _db_chunk_count < 50
             _fg887_small = _db_chunk_count < 100
             # iter905: cross_project_suppress_tighten — 闭包路径同步跨项目收紧
+            # iter908: final_gate_7d_align_score — tiny_db 4→3
             def _fg887_7d_thresh(s, c):
                 _cp = c.get("project", "")
                 _cross = (_cp != project and _cp != "global")
                 if _fg887_tiny:
-                    _t = 4
+                    _t = 3
                 elif _fg887_small:
                     _t = 4 if s >= 0.5 else 3
                 else:
@@ -5023,11 +5026,12 @@ def main():
                 _cut758_6h = (_now758 - _td758(hours=6)).isoformat()
                 # iter837: tiny_db_24h_relax_v2 — 阈值 3→4（同步 _score_chunk）
                 # iter905: cross_project_suppress_tighten — LITE 路径同步
+                # iter908: final_gate_7d_align_score — tiny_db 4→3
                 def _lt905_7d_thresh(s, c):
                     _cp = c.get("project", "")
                     _cross = (_cp != project and _cp != "global")
                     if _sf758_tiny_db:
-                        _t = 4
+                        _t = 3
                     elif _sf758_small_db:
                         _t = 4 if s >= 0.5 else 3
                     else:
