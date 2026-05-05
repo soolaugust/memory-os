@@ -3310,7 +3310,7 @@ def main():
                                    and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh_hd
                                    and _recent_6h_counts.get(c.get("id", ""), 0) < 2  # iter865
                                    and _recent_24h_counts.get(c.get("id", ""), 0) < (3 if _hd_tiny_db else 3)
-                                   and _recent_7d_counts.get(c.get("id", ""), 0) < (4 if _hd_tiny_db else 6)]  # iter911: pair_7d_tighten — 5/7→4/6 堵 pair 逃逸
+                                   and _recent_7d_counts.get(c.get("id", ""), 0) < (3 if _hd_tiny_db else 4)]  # iter936: pair_7d_align_final_gate — 4/6→3/4 对齐 suppress_final_gate 堵 pair 逃逸
                 if _ps842_hd_cands:
                     _ps842_hd_best = max(_ps842_hd_cands, key=lambda x: x[0])
                     if _ps842_hd_best[0] >= 0.3:
@@ -4785,8 +4785,11 @@ def main():
                 _p24 = _rt663_24h.get(cid, 0)
                 _p7d = _rt663_7d.get(cid, 0)
                 _p24_lim = 3 if _sf663_tiny_db else (3 if score >= 0.5 else 2) if _sf663_small_db else (3 if score >= 0.5 else 2)
-                # iter911: pair_7d_tighten — 5/10/8/7→4/6/5/5 堵 pair 逃逸
-                _p7d_lim = 4 if _sf663_tiny_db else (6 if score >= 0.5 else 5) if _sf663_small_db else (5 if score >= 0.5 else 5)
+                # iter936: pair_7d_align_final_gate — 4/6/5/5→3/4/3/3 对齐 suppress_final_gate
+                # 根因（数据驱动，2026-05-06）：import-90139 7d=6 仍作为 pair(pos=2) 注入，
+                #   因 _pair_suppress_ok 阈值=4 vs final_gate=3 留 1 的缝隙。
+                #   对齐后 7d>=3 的 chunk 无法再经 pair 路径逃逸。
+                _p7d_lim = 3 if _sf663_tiny_db else (4 if score >= 0.5 else 3) if _sf663_small_db else (3 if score >= 0.5 else 3)
                 return _p24 < _p24_lim and _p7d < _p7d_lim
             except NameError:
                 return True  # suppress_final_gate 未执行（try 失败），不额外限制

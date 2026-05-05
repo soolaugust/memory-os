@@ -4075,9 +4075,11 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             # 根因（数据驱动，2026-05-05）：70% 注入为单条。daemon 路径缺失 pair_inject，
             #   retriever.py 的 iter826/827 从未在 daemon 被触发。
             if len(positive) == 1 and len(final) >= 3:
+                # iter936: pair_7d_align_final_gate — pair 候选加 7d suppress 检查
                 _pi_cands = [(s, c) for s, c in final
                              if s > 0.10 and s < _min_thresh
-                             and c[_CI_ID] != positive[0][1][_CI_ID]]
+                             and c[_CI_ID] != positive[0][1][_CI_ID]
+                             and _recent_7d_counts.get(c[_CI_ID], 0) < (3 if _db_chunk_count < 50 else 4)]
                 if _pi_cands:
                     _pi_best = max(_pi_cands, key=lambda x: x[0])
                     positive.append(_pi_best)
@@ -4088,7 +4090,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 else:
                     _ip_cands = [(float(c[_CI_IMP] or 0), c) for _, c in final
                                  if c[_CI_ID] != positive[0][1][_CI_ID]
-                                 and (c[_CI_AC] or 0) < 30]
+                                 and (c[_CI_AC] or 0) < 30
+                                 and _recent_7d_counts.get(c[_CI_ID], 0) < (3 if _db_chunk_count < 50 else 4)]
                     if _ip_cands:
                         _ip_best = max(_ip_cands, key=lambda x: x[0])
                         if _ip_best[0] >= 0.3:
@@ -4129,11 +4132,13 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             else:
                 top_k = positive[:effective_top_k]
             # iter842: post_suppress_pair_from_final (hard_deadline path)
+            # iter936: pair_7d_align_final_gate — 加 7d suppress 检查堵逃逸
             if len(top_k) == 1 and len(final) >= 3:
                 _ps842_hd_top1_id = top_k[0][1][_CI_ID]
                 _ps842_hd_cands = [(float(c[_CI_IMP] or 0), c) for _, c in final
                                    if c[_CI_ID] != _ps842_hd_top1_id
-                                   and (c[_CI_AC] or 0) < 30]
+                                   and (c[_CI_AC] or 0) < 30
+                                   and _recent_7d_counts.get(c[_CI_ID], 0) < (3 if _db_chunk_count < 50 else 4)]
                 if _ps842_hd_cands:
                     _ps842_hd_best = max(_ps842_hd_cands, key=lambda x: x[0])
                     if _ps842_hd_best[0] >= 0.3:
@@ -4842,8 +4847,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 _p24 = _rt663d_24h.get(cid, 0)
                 _p7d = _rt663d_7d.get(cid, 0)
                 _p24_lim = 3 if _sf663d_tiny_db else (3 if score >= 0.5 else 2) if _sf663d_small_db else (3 if score >= 0.5 else 2)
-                # iter911: pair_7d_tighten — 5/7/6/7→4/6/5/5 堵 pair 逃逸
-                _p7d_lim = 4 if _sf663d_tiny_db else (6 if score >= 0.5 else 5) if _sf663d_small_db else (5 if score >= 0.5 else 5)
+                # iter936: pair_7d_align_final_gate — 4/6/5/5→3/4/3/3 对齐 suppress_final_gate
+                _p7d_lim = 3 if _sf663d_tiny_db else (4 if score >= 0.5 else 3) if _sf663d_small_db else (3 if score >= 0.5 else 3)
                 return _p24 < _p24_lim and _p7d < _p7d_lim
             except NameError:
                 return True
