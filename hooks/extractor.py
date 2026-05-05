@@ -1289,7 +1289,11 @@ def _is_quality_chunk(summary: str) -> bool:
                 # iter841: iterator_ops_log_noise — 迭代器操作日志/SQL片段逃逸
                 # 数据驱动：7 条 ac=1 噪声含 "数据改动：删除"/"WHERE injected="
                 #   — 迭代器操作记录和内部 SQL 代码片段，对用户零价值
-                "数据改动", "WHERE injected", "WHERE chunk_ids"]
+                "数据改动", "WHERE injected", "WHERE chunk_ids",
+                # iter847: inventory_snapshot_noise — 库存/chunk数量快照逃逸
+                # 数据驱动：2 条 ac=1 噪声 "库存：50 → 42 chunks"/"chunk 总数"
+                #   特征：memory-os 自身库存描述，纯状态快照无决策价值
+                "库存：", "chunk 总数", "chunks（"]
     if any(kw in s for kw in noise_kw):
         return False
     placeholders = {"方案 X 是最优解", "extractor 升级", "KnowledgeRouter"}
