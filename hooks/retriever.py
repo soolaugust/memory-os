@@ -3332,21 +3332,27 @@ def main():
                 _fb_hd_cap = [(s, c) for s, c in _pre_suppress_top_k_hd
                               if _recent_7d_counts.get(c.get("id", ""), 0) < _fb_hd_ceiling
                               and _recent_24h_counts.get(c.get("id", ""), 0) < 3]
-                _fb_hd_pool = _fb_hd_cap if _fb_hd_cap else _pre_suppress_top_k_hd
-                _fb_hd_sorted = sorted(_fb_hd_pool,
-                                       key=lambda x: x[0] * (0.5 ** (_recent_7d_counts.get(x[1].get("id", ""), 0) / 2)),
-                                       reverse=True)
-                _fb_hd = _fb_hd_sorted[0]
-                _last_hash_hd = _read_hash()
-                if _last_hash_hd and len(_fb_hd_sorted) > 1:
-                    _fb_hd_hash = hashlib.md5(_fb_hd[1].get("id", "").encode()).hexdigest()[:8]
-                    if _fb_hd_hash == _last_hash_hd:
-                        _fb_hd = _fb_hd_sorted[1]
-                top_k = [_fb_hd]
-                _deferred.log(DMESG_WARN, "retriever",
-                              f"iter670_suppress_fallback_hd: all {len(_pre_suppress_top_k_hd)} "
-                              f"suppressed, fallback to best={_fb_hd[1].get('id','')[:12]}",
-                              session_id=session_id, project=project)
+                # iter921: hd_fallback_no_unfiltered_pool — 对齐 FULL 路径 iter916
+                # 根因（数据驱动，2026-05-06）：cap 为空时回退 _pre_suppress_top_k_hd（无过滤），
+                #   7d>=3 的垄断 chunk 经此路径逃逸 suppress_final_gate。
+                #   FULL 路径已在 iter916 修复（cap 空→None→db_ultimate_fallback）。
+                # 修复：hard_deadline 对齐——cap 空时不选，让 iter677/db_fallback 接管。
+                _fb_hd_pool = _fb_hd_cap if _fb_hd_cap else None
+                if _fb_hd_pool:
+                    _fb_hd_sorted = sorted(_fb_hd_pool,
+                                           key=lambda x: x[0] * (0.5 ** (_recent_7d_counts.get(x[1].get("id", ""), 0) / 2)),
+                                           reverse=True)
+                    _fb_hd = _fb_hd_sorted[0]
+                    _last_hash_hd = _read_hash()
+                    if _last_hash_hd and len(_fb_hd_sorted) > 1:
+                        _fb_hd_hash = hashlib.md5(_fb_hd[1].get("id", "").encode()).hexdigest()[:8]
+                        if _fb_hd_hash == _last_hash_hd:
+                            _fb_hd = _fb_hd_sorted[1]
+                    top_k = [_fb_hd]
+                    _deferred.log(DMESG_WARN, "retriever",
+                                  f"iter670_suppress_fallback_hd: all {len(_pre_suppress_top_k_hd)} "
+                                  f"suppressed, fallback to best={_fb_hd[1].get('id','')[:12]}",
+                                  session_id=session_id, project=project)
             # ── iter677: positive_empty_best_fallback (hard_deadline) ──
             # iter681: 移除 24h/7d suppress 检查 — 最后防线不应被 suppress 过杀
             if not top_k and final:
