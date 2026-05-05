@@ -4920,39 +4920,46 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 _fb_cap = [(s, c) for s, c in _pre_suppress_top_k
                            if _fb_7d_d.get(c[_CI_ID], 0) < _fb_ceiling_d
                            and _fb_24h_d.get(c[_CI_ID], 0) < 3]
-                _fb_pool = _fb_cap if _fb_cap else _pre_suppress_top_k
-                _fb_sorted = sorted(_fb_pool,
-                                    key=lambda x: x[0] * (0.5 ** (_fb_7d_d.get(x[1][_CI_ID], 0) / 2)),
-                                    reverse=True)
-                _fb = _fb_sorted[0]
-                if last_hash and len(_fb_sorted) > 1:
-                    _fb_hash = '%08x' % zlib.crc32(_fb[1][_CI_ID].encode())
-                    if _fb_hash == last_hash:
-                        _fb = _fb_sorted[1]
-                top_k = [_fb]
-                _deferred.log(DMESG_WARN, "retriever_daemon",
-                              f"iter670_suppress_fallback: all {len(_pre_suppress_top_k)} "
-                              f"suppressed, fallback to best={_fb[1][_CI_ID][:12]}",
-                              session_id=session_id, project=project)
-            else:
-                # iter902: db_ultimate_fallback — 直接从 DB 选 1 条兜底，消灭空召回
-                # 根因（数据驱动，2026-05-05）：31% trace 空召回，_pre_suppress_top_k 为空
-                #   说明 suppress 在评分阶段就全部清零 → fallback 链无候选。
-                # 修复：绕过 suppress，直接 DB 查最高 importance 的 chunk 注入。
+                # iter916: fallback_no_unfiltered_pool — 全灭时不回退无过滤池，走 db_ultimate_fallback
+                _fb_pool = _fb_cap if _fb_cap else None
+                if _fb_pool:
+                    _fb_sorted = sorted(_fb_pool,
+                                        key=lambda x: x[0] * (0.5 ** (_fb_7d_d.get(x[1][_CI_ID], 0) / 2)),
+                                        reverse=True)
+                    _fb = _fb_sorted[0]
+                    if last_hash and len(_fb_sorted) > 1:
+                        _fb_hash = '%08x' % zlib.crc32(_fb[1][_CI_ID].encode())
+                        if _fb_hash == last_hash:
+                            _fb = _fb_sorted[1]
+                    top_k = [_fb]
+                    _deferred.log(DMESG_WARN, "retriever_daemon",
+                                  f"iter670_suppress_fallback: all {len(_pre_suppress_top_k)} "
+                                  f"suppressed, fallback to best={_fb[1][_CI_ID][:12]}",
+                                  session_id=session_id, project=project)
+            # iter916: fallback_no_unfiltered_pool 后 _fb_pool=None 也会落到这里
+            if not top_k:
+                # iter902+916: db_ultimate_fallback — 排除 7d 垄断 chunk
+                # 根因（2026-05-06）：原 iter902 无 7d 限制，最高 imp chunk 被反复选中(6次/7d)。
+                # 修复：排除 7d >= ceiling 的 chunk，选低频+高 importance 的。
+                _fb_7d_ult = _rt663d_7d if '_rt663d_7d' in dir() and _rt663d_7d else _recent_7d_counts
+                _ult_ceiling = 3 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
+                _ult_exclude = [cid for cid, cnt in _fb_7d_ult.items() if cnt >= _ult_ceiling]
+                _ult_placeholders = ','.join(['?'] * len(_ult_exclude)) if _ult_exclude else ''
+                _ult_where = f" AND id NOT IN ({_ult_placeholders})" if _ult_exclude else ''
                 try:
                     _dbuf_row = conn.execute(
                         "SELECT id, summary, content, chunk_type, importance, "
                         "COALESCE(access_count,0), created_at, 0.0, COALESCE(lru_gen,0), project "
-                        "FROM memory_chunks WHERE project=? AND chunk_state='ACTIVE' "
+                        f"FROM memory_chunks WHERE project=? AND chunk_state='ACTIVE'{_ult_where} "
                         "ORDER BY importance DESC, access_count ASC LIMIT 1",
-                        (project,)
+                        (project, *_ult_exclude)
                     ).fetchone()
                     if _dbuf_row:
                         top_k = [(0.001, _dbuf_row)]
                         _deferred.log(DMESG_WARN, "retriever_daemon",
-                                      f"iter902_db_ultimate_fallback: "
+                                      f"iter916_db_ultimate_fallback: "
                                       f"id={_dbuf_row[0][:12]} imp={_dbuf_row[4]:.2f} "
-                                      f"bypassed_suppress project={project}",
+                                      f"excluded={len(_ult_exclude)} project={project}",
                                       session_id=session_id, project=project)
                 except Exception:
                     pass
