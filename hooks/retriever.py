@@ -5184,7 +5184,10 @@ def main():
         #   低分 chunk 与用户当前上下文无关，注入后污染 context window、降低 SNR。
         # 修复：score < _score_floor 的 chunk 过滤掉。全部低于阈值时保留最高分 1 条
         #   （宁注入 1 条中低分也不注入 3 条极低分）。micro_db(<=5) 跳过。
-        _score_floor = 0.08
+        # iter913: score_floor_raise — 数据驱动提升阈值
+        # 根因（数据驱动，2026-05-06）：73% 注入 score<0.15，useful feedback 最低=0.15。
+        #   0.08 阈值过低未过滤任何噪声。提升到 0.12 过滤 40% 低相关性注入。
+        _score_floor = 0.12
         if len(top_k) > 0 and _db_chunk_count > 5:
             _sf_above = [(s, c) for s, c in top_k if s >= _score_floor]
             if _sf_above:
