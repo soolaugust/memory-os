@@ -3687,7 +3687,7 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             #   根因：40 chunk × 频繁对话 → 2次/24h 即封锁 → 注入率骤降
             # iter767: tiered_small_db — 分级小库阈值
             _s672_micro = _db_chunk_count <= 5  # iter801: micro_db — suppress 全禁用
-            _s672_tiny = _db_chunk_count < 40  # iter818: 边界 30→40
+            _s672_tiny = _db_chunk_count < 50  # iter848: 边界 40→50
             _s672_small = _db_chunk_count < 100
             # iter806: small_db_suppress_tighten — 24h 4/3→3/2, 7d 7/5→5/4
             # iter801: micro_db (<=5) 跳过 24h/7d/saturation suppress — 唯一知识不可 suppress
@@ -3775,7 +3775,7 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             # iter672: relevance_exempt — 高分 chunk 放宽阈值，防 suppress 过杀
             # iter767: tiered_small_db — 分级小库阈值（同 _score_chunk）
             _s672d_micro = _db_chunk_count <= 5  # iter801: micro_db suppress bypass
-            _s672d_tiny = _db_chunk_count < 40  # iter818: 边界 30→40
+            _s672d_tiny = _db_chunk_count < 50  # iter848: 边界 40→50
             _s672d_small = _db_chunk_count < 100
             # iter806: small_db_suppress_tighten — sync with retriever.py
             # iter801: micro_db (<=5) 跳过 suppress
@@ -4616,7 +4616,7 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     _rt663d_7d[_mk807] = max(_rt663d_7d.get(_mk807, 0), _inmem_7d.get(_mk807, 0))
                 _pre663d = len(top_k)
                 # iter767: tiered_small_db — 分级小库阈值（同 _score_chunk）
-                _sf663d_tiny_db = _db_chunk_count < 40  # iter818: 边界 30→40
+                _sf663d_tiny_db = _db_chunk_count < 50  # iter848: 边界 40→50
                 _sf663d_small_db = _db_chunk_count < 100
                 # iter813+810: short_burst + tiny_db_24h_relax — sync daemon final_gate
                 # iter818: tiny_db_6h_relax — 6h 分级
