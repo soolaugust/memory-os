@@ -1293,7 +1293,13 @@ def _is_quality_chunk(summary: str) -> bool:
                 # iter847: inventory_snapshot_noise — 库存/chunk数量快照逃逸
                 # 数据驱动：2 条 ac=1 噪声 "库存：50 → 42 chunks"/"chunk 总数"
                 #   特征：memory-os 自身库存描述，纯状态快照无决策价值
-                "库存：", "chunk 总数", "chunks（"]
+                "库存：", "chunk 总数", "chunks（",
+                # iter855: iterator_impl_detail_noise — 迭代器修复/验证/阈值变更记录逃逸
+                # 数据驱动（2026-05-05）：7 条 ac=1 噪声在 iter853 gc 后被重新写入，
+                #   包含 NOISE_FLOOR/noise_chunk_rate/constraint 豁免逻辑 等内部实现描述
+                "NOISE_FLOOR", "noise_chunk", "chunk_rate",
+                "豁免逻辑", "_is_global", "constraint 无条件豁免",
+                "修复：移除", "修复：6 处"]
     if any(kw in s for kw in noise_kw):
         return False
     # iter853: internal_var_gate — 含 memory-os 内部变量名/常量名的 summary 拦截
