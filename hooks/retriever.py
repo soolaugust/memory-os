@@ -3162,7 +3162,8 @@ def main():
             # iter771: tiny_db_fallback_relax — 小库 FTS5 词汇覆盖低致 score 偏低，
             #   0.25 门槛导致 score 0.15-0.24 的有用 chunk 落入 dead zone（78% 空召回）。
             #   修复：tiny_db(<30 cands) 降至 0.15，保留大库 0.25 防垃圾。
-            _FALLBACK_NOISE_FLOOR = 0.15 if _db_chunk_count < 30 else 0.25
+            # iter852: sync tiny_db boundary 30→50 (同 iter848/iter819)
+            _FALLBACK_NOISE_FLOOR = 0.15 if _db_chunk_count < 50 else 0.25
             if not positive and final:
                 _sef_hd = max(final, key=lambda x: x[0])
                 if _sef_hd[0] >= _FALLBACK_NOISE_FLOOR:
@@ -3823,7 +3824,8 @@ def main():
         #   score=0.0 → 原 > 0 条件阻止 fallback。空召回 = 系统零价值。
         # iter770: fallback_noise_gate — fallback 也需硬性下限
         # iter771: tiny_db_fallback_relax — 小库降至 0.15（同 hard_deadline 路径）
-        _FALLBACK_NOISE_FLOOR_FULL = 0.15 if _db_chunk_count < 30 else 0.25
+        # iter852: sync tiny_db boundary 30→50 (同 iter848/iter819)
+        _FALLBACK_NOISE_FLOOR_FULL = 0.15 if _db_chunk_count < 50 else 0.25
         if not positive and final:
             _sef_full = max(final, key=lambda x: x[0])
             if _sef_full[0] >= _FALLBACK_NOISE_FLOOR_FULL:

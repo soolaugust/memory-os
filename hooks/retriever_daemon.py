@@ -4090,7 +4090,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             # ── iter689: score_empty_fallback (hard_deadline) ──
             # iter770: fallback_noise_gate — 硬性下限防止低分垃圾注入
             # iter771: tiny_db_fallback_relax — 小库降至 0.15
-            _FALLBACK_NOISE_FLOOR = 0.15 if _db_chunk_count < 30 else 0.25
+            # iter852: sync tiny_db boundary 30→50 (同 iter848/iter819)
+            _FALLBACK_NOISE_FLOOR = 0.15 if _db_chunk_count < 50 else 0.25
             if not top_k and final:
                 _sef_hd = max(final, key=_SORT_KEY)
                 if _sef_hd[0] >= _FALLBACK_NOISE_FLOOR:
@@ -4282,7 +4283,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
         # iter751: suppress 全灭兜底 — score=0 时用 importance 排序选最佳 1 条
         # iter770: fallback_noise_gate — 硬性下限防止低分垃圾注入
         # iter771: tiny_db_fallback_relax — 小库降至 0.15
-        _FALLBACK_NOISE_FLOOR_FULL = 0.15 if _db_chunk_count < 30 else 0.25
+        # iter852: sync tiny_db boundary 30→50 (同 iter848/iter819)
+        _FALLBACK_NOISE_FLOOR_FULL = 0.15 if _db_chunk_count < 50 else 0.25
         if not top_k and final:
             _sef_full = max(final, key=_SORT_KEY)
             if _sef_full[0] >= _FALLBACK_NOISE_FLOOR_FULL:
@@ -4497,7 +4499,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 # 修复：从 final（scoring 后的全量候选）中挑 score 最高且 >0 的降级注入。
                 # iter770: fallback_noise_gate — 硬性下限防止低分垃圾注入
                 # iter771: tiny_db_fallback_relax — 小库降至 0.15
-                _FALLBACK_NOISE_FLOOR_LATE = 0.15 if _db_chunk_count < 30 else 0.25
+                # iter852: sync tiny_db boundary 30→50 (同 iter848/iter819)
+                _FALLBACK_NOISE_FLOOR_LATE = 0.15 if _db_chunk_count < 50 else 0.25
                 if final:
                     _sef_best = max(final, key=_SORT_KEY)
                     if _sef_best[0] >= _FALLBACK_NOISE_FLOOR_LATE:
