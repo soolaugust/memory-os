@@ -4825,8 +4825,9 @@ def main():
                 top_k = [(s, c) for s, c in top_k
                          if sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_6h) < 2  # iter865: 6h_tighten_tiny
                          and sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_24h) < (3 if _sf758_tiny_db else (3 if s >= 0.5 else 2) if _sf758_small_db else (3 if s >= 0.5 else 2))
-                         # iter878: lite_7d_thresh_sync — 7→5 对齐 FULL final_gate + _score_chunk
-                         and sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_7d) < (5 if _sf758_tiny_db else (8 if s >= 0.5 else 6) if _sf758_small_db else (5 if s >= 0.5 else 3))]
+                         # iter885: lite_7d_sync_final_gate — 5/8/6→3/4/3 对齐 FULL suppress_final_gate iter883
+                         #   根因：LITE tiny_db 7d<5 允许 4 次，FULL/daemon 已收紧到 <3
+                         and sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_7d) < (3 if _sf758_tiny_db else (4 if s >= 0.5 else 3) if _sf758_small_db else (5 if s >= 0.5 else 3))]
                 if len(top_k) < _pre758:
                     _deferred.log(DMESG_WARN, "retriever",
                                   f"iter758_suppress_final_gate_lite: filtered "
@@ -4856,7 +4857,8 @@ def main():
         # iter851: suppress_aware_pair — 候选尊重 suppress_final_gate_lite 的 timeline 判定
         def _pair_suppress_ok_lite(cid, score):
             """iter851: LITE 路径检查候选是否被 suppress_final_gate_lite 过滤。
-            iter884: pair_suppress_relax — 配对候选 7d 阈值放宽 +2（同 FULL 路径）。"""
+            iter884: pair_suppress_relax — 配对候选 7d 阈值放宽 +2（同 FULL 路径）。
+            iter885: lite_7d_sync — pair 基础 7d 阈值同步收紧（tiny 5→3 base → pair 5）。"""
             try:
                 _ts_list = _itl758.get(cid, [])
                 _p6 = sum(1 for t in _ts_list if t > _cut758_6h)
@@ -4864,8 +4866,8 @@ def main():
                 _p7d = sum(1 for t in _ts_list if t > _cut758_7d)
                 _p6_lim = 3 if _sf758_tiny_db else 2
                 _p24_lim = 3 if _sf758_tiny_db else (3 if score >= 0.5 else 2) if _sf758_small_db else (3 if score >= 0.5 else 2)
-                # iter884: pair 7d 放宽 +2
-                _p7d_lim = 5 if _sf758_tiny_db else (10 if score >= 0.5 else 8) if _sf758_small_db else (7 if score >= 0.5 else 5)
+                # iter885: pair 7d = base(3/4/3) +2 → tiny=5, small=6/5, large=7/5
+                _p7d_lim = 5 if _sf758_tiny_db else (6 if score >= 0.5 else 5) if _sf758_small_db else (7 if score >= 0.5 else 5)
                 return _p6 < _p6_lim and _p24 < _p24_lim and _p7d < _p7d_lim
             except NameError:
                 return True
