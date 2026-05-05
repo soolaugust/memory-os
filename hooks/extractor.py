@@ -1613,6 +1613,20 @@ def _is_quality_chunk(summary: str) -> bool:
         )
         if _LIFE_KEYWORDS:
             return False
+    # ── iter860: incomplete_sentence_gate — 拦截以冒号/省略号结尾的未完成句 ──
+    # 根因（数据驱动，2026-05-05）：4 条 ac=0/1 碎片 causal_chain 如
+    #   "所以产品化的真正目的是："（14字）— 引导词+冒号，缺少结论体。
+    #   "原因：这个层太薄了——用户自己 100 行代码就能做个够用的版本" 是完整的（有结论）。
+    # 拦截条件：(1) 以冒号/省略号结尾 且 (2) 总长 <30 字（完整句子通常>30字）
+    if len(s) < 30 and re.search(r'[：:…]+\s*$', s):
+        return False
+    # ── iter860: selfref_health_metric_gate — 拦截 memory-os 健康度/自评 chunk ──
+    # 根因：6 条 ac<=1 噪声含 "chunk 库"/"ac="/"注入率 86%"/"P50 延迟" 等自评指标。
+    #   已有 noise_kw 拦截部分，但组合模式逃逸（如 "45 chunk 库，仅 1 条 ac=0"）。
+    # 拦截：同时含 "chunk" + 数字度量的自引用句式
+    if re.search(r'chunk\s*库|ac\s*[=＝]', s, re.I) and re.search(r'\d+\s*(?:条|个|%)', s):
+        if not re.search(r'(?:kernel|sched|Android|feishu|飞书|patch)', s, re.I):
+            return False
     return True
 
 
