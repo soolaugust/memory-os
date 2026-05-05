@@ -2459,7 +2459,13 @@ def main():
                 #   根因（数据驱动，2026-05-06）：_score_chunk 阈值=5 vs final_gate=3，
                 #   14 个 chunk 7d>=4 仍通过评分阶段注入（fallback/pair 可绕过 final_gate）。
                 #   收紧到 4 在评分阶段早期拦截，预计减少 21% 垄断注入。
-                _suppress_7d_thresh = 4 if _tiny_db else (8 if score >= 0.5 else 6) if _small_db else (5 if score >= 0.5 else 3)
+                # iter928: score_7d_full_align — tiny_db 4→3 完全对齐 daemon(3)+final_gate(3)
+                #   根因（数据驱动，2026-05-06）：阈值=4 vs final_gate=3 留 1 的缝隙，
+                #   7d=3 的 chunk 通过评分进入 _pre_suppress_top_k → fallback/pair 逃逸。
+                #   22-chunk 库有 15 个 7d>=3，其中 12 个>=4 被 iter909 拦截，
+                #   但 3 个 7d=3 仍逃逸。统一到 3 堵死评分阶段逃逸口。
+                # iter928: small_db 8/6→4/3 对齐 daemon iter882
+                _suppress_7d_thresh = 3 if _tiny_db else (4 if score >= 0.5 else 3) if _small_db else (5 if score >= 0.5 else 3)
                 if _r7d_cnt >= _suppress_7d_thresh:
                     score = 0.0
                     _hard_suppressed = True
@@ -4724,8 +4730,10 @@ def main():
                                   f"iter663_suppress_final_gate: filtered "
                                   f"{_pre663 - len(top_k)} chunks (24h/7d realtime)",
                                   session_id=session_id, project=project)
-            except Exception:
-                pass  # 兜底查询失败不阻塞
+            except Exception as _e663:
+                _deferred.log(DMESG_WARN, "retriever",
+                              f"iter663_suppress_final_gate_EXCEPTION: {type(_e663).__name__}: {_e663}",
+                              session_id=session_id, project=project)
         # ── iter887: suppress_final_gate_closure_fallback — 闭包快照兜底 ──
         # 根因（数据驱动，2026-05-05）：suppress_final_gate 实时 DB 查询在 try/except
         #   中静默失败时，7d count≥3 的垄断 chunk 逃逸（实测 14 个 chunk 应被 suppress）。
