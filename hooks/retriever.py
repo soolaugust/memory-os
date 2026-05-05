@@ -3246,12 +3246,16 @@ def main():
                          and _recent_24h_counts.get(c["id"], 0) < ((10 if s >= 0.5 else 8) if _hd_tiny_db else (3 if s >= 0.5 else 2) if _hd_small_db else (3 if s >= 0.5 else 2))
                          and _recent_7d_counts.get(c["id"], 0) < ((20 if s >= 0.5 else 15) if _hd_tiny_db else (8 if s >= 0.5 else 6) if _hd_small_db else (5 if s >= 0.5 else 3))]
             # iter842: post_suppress_pair_from_final (hard_deadline path)
+            # iter851: suppress_aware_pair — 候选尊重 suppress_final_gate 阈值
             if len(top_k) == 1 and len(final) >= 3:
                 _ps842_hd_top1_id = top_k[0][1].get("id", "")
                 _ps842_hd_cands = [(float(c.get("importance", 0) or 0), c) for _, c in final
                                    if c.get("id") != _ps842_hd_top1_id
                                    and (c.get("access_count", 0) or 0) < 30
-                                   and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh_hd]
+                                   and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh_hd
+                                   and _recent_6h_counts.get(c.get("id", ""), 0) < (3 if _hd_tiny_db else 2)
+                                   and _recent_24h_counts.get(c.get("id", ""), 0) < ((10 if float(c.get("importance",0) or 0) >= 0.5 else 8) if _hd_tiny_db else 3)
+                                   and _recent_7d_counts.get(c.get("id", ""), 0) < ((20 if float(c.get("importance",0) or 0) >= 0.5 else 15) if _hd_tiny_db else 5)]
                 if _ps842_hd_cands:
                     _ps842_hd_best = max(_ps842_hd_cands, key=lambda x: x[0])
                     if _ps842_hd_best[0] >= 0.3:
@@ -4496,11 +4500,26 @@ def main():
         # 根因（数据驱动，2026-05-05）：FULL 路径 44% 输出单条。iter826 pair_inject
         #   在 positive 阶段添加第 2 条，但 suppress_final_gate 事后砍掉 → 最终仍单条。
         # 修复：suppress 过滤后如果 top_k=1，从 _pre_suppress_top_k 中选不同 chunk 配对。
+        # iter851: suppress_aware_pair — 配对候选尊重 suppress_final_gate 的 24h/7d 判定
+        #   根因（数据驱动，2026-05-05）：iter832 从 _pre_suppress_top_k 恢复候选时不检查
+        #   24h/7d suppress 计数，导致刚被 suppress_final_gate 移除的垄断 chunk 被重新注入。
+        #   修复：候选过滤加入 _rt663_24h/_rt663_7d 检查（与 suppress_final_gate 阈值一致）。
+        def _pair_suppress_ok(cid, score):
+            """iter851: 检查候选是否被 suppress_final_gate 过滤（复用已计算的实时计数）。"""
+            try:
+                _p24 = _rt663_24h.get(cid, 0)
+                _p7d = _rt663_7d.get(cid, 0)
+                _p24_lim = 4 if _sf663_tiny_db else (3 if score >= 0.5 else 2) if _sf663_small_db else (3 if score >= 0.5 else 2)
+                _p7d_lim = 5 if _sf663_tiny_db else (8 if score >= 0.5 else 6) if _sf663_small_db else (5 if score >= 0.5 else 3)
+                return _p24 < _p24_lim and _p7d < _p7d_lim
+            except NameError:
+                return True  # suppress_final_gate 未执行（try 失败），不额外限制
         if len(top_k) == 1 and len(_pre_suppress_top_k) >= 2:
             _ps_top1_id = top_k[0][1].get("id", "")
             _ps_candidates = [(s, c) for s, c in _pre_suppress_top_k
                               if c.get("id", "") != _ps_top1_id and s > 0
-                              and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh]
+                              and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh
+                              and _pair_suppress_ok(c.get("id", ""), s)]
             if _ps_candidates:
                 _ps_best = max(_ps_candidates, key=lambda x: x[0])
                 top_k.append(_ps_best)
@@ -4520,7 +4539,8 @@ def main():
             _ps842_cands = [(float(c.get("importance", 0) or 0), c) for _, c in final
                             if c.get("id") != _ps842_top1_id
                             and (c.get("access_count", 0) or 0) < 30
-                            and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh]
+                            and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh
+                            and _pair_suppress_ok(c.get("id", ""), 0.0)]
             if _ps842_cands:
                 _ps842_best = max(_ps842_cands, key=lambda x: x[0])
                 if _ps842_best[0] >= 0.3:
@@ -4663,11 +4683,26 @@ def main():
         # ── iter832: post_suppress_pair_inject — LITE 路径 suppress 后单条配对 ──
         # 同 FULL 路径逻辑：suppress_final_gate_lite 过滤后如果 top_k=1，
         # 从 _pre_suppress_top_k_lite 快照中选次优配对，确保多知识组合上下文。
+        # iter851: suppress_aware_pair — 候选尊重 suppress_final_gate_lite 的 timeline 判定
+        def _pair_suppress_ok_lite(cid, score):
+            """iter851: LITE 路径检查候选是否被 suppress_final_gate_lite 过滤。"""
+            try:
+                _ts_list = _itl758.get(cid, [])
+                _p6 = sum(1 for t in _ts_list if t > _cut758_6h)
+                _p24 = sum(1 for t in _ts_list if t > _cut758_24h)
+                _p7d = sum(1 for t in _ts_list if t > _cut758_7d)
+                _p6_lim = 3 if _sf758_tiny_db else 2
+                _p24_lim = 4 if _sf758_tiny_db else (3 if score >= 0.5 else 2) if _sf758_small_db else (3 if score >= 0.5 else 2)
+                _p7d_lim = 5 if _sf758_tiny_db else (8 if score >= 0.5 else 6) if _sf758_small_db else (5 if score >= 0.5 else 3)
+                return _p6 < _p6_lim and _p24 < _p24_lim and _p7d < _p7d_lim
+            except NameError:
+                return True
         if len(top_k) == 1 and len(_pre_suppress_top_k_lite) >= 2:
             _ps_lite_top1_id = top_k[0][1].get("id", "")
             _ps_lite_cands = [(s, c) for s, c in _pre_suppress_top_k_lite
                               if c.get("id", "") != _ps_lite_top1_id and s > 0
-                              and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh]
+                              and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh
+                              and _pair_suppress_ok_lite(c.get("id", ""), s)]
             if _ps_lite_cands:
                 _ps_lite_best = max(_ps_lite_cands, key=lambda x: x[0])
                 top_k.append(_ps_lite_best)
@@ -4681,7 +4716,8 @@ def main():
             _ps842_lite_cands = [(float(c.get("importance", 0) or 0), c) for _, c in final
                                  if c.get("id") != _ps842_lite_top1_id
                                  and (c.get("access_count", 0) or 0) < 30
-                                 and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh]
+                                 and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh
+                                 and _pair_suppress_ok_lite(c.get("id", ""), 0.0)]
             if _ps842_lite_cands:
                 _ps842_lite_best = max(_ps842_lite_cands, key=lambda x: x[0])
                 if _ps842_lite_best[0] >= 0.3:

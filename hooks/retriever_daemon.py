@@ -4638,10 +4638,22 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
         # 根因（数据驱动，2026-05-05）：70% 注入为单条。suppress_final_gate 事后砍掉
         #   pair_inject 添加的第 2 条 → 最终仍单条。
         # 修复：suppress 过滤后如果 top_k=1，从 _pre_suppress_top_k 中选不同 chunk 配对。
+        # iter851: suppress_aware_pair — 配对候选尊重 suppress_final_gate 的 24h/7d 判定
+        def _pair_suppress_ok_d(cid, score):
+            """iter851: daemon 侧检查候选是否被 suppress_final_gate 过滤。"""
+            try:
+                _p24 = _rt663d_24h.get(cid, 0)
+                _p7d = _rt663d_7d.get(cid, 0)
+                _p24_lim = 3 if _sf663d_tiny_db else (3 if score >= 0.5 else 2) if _sf663d_small_db else (3 if score >= 0.5 else 2)
+                _p7d_lim = 5 if _sf663d_tiny_db else (5 if score >= 0.5 else 4) if _sf663d_small_db else (5 if score >= 0.5 else 3)
+                return _p24 < _p24_lim and _p7d < _p7d_lim
+            except NameError:
+                return True
         if len(top_k) == 1 and len(_pre_suppress_top_k) >= 2:
             _ps_top1_id = top_k[0][1][_CI_ID]
             _ps_candidates = [(s, c) for s, c in _pre_suppress_top_k
-                              if c[_CI_ID] != _ps_top1_id and s > 0]
+                              if c[_CI_ID] != _ps_top1_id and s > 0
+                              and _pair_suppress_ok_d(c[_CI_ID], s)]
             if _ps_candidates:
                 _ps_best = max(_ps_candidates, key=lambda x: x[0])
                 top_k.append(_ps_best)
@@ -4654,7 +4666,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             _ps842_top1_id = top_k[0][1][_CI_ID]
             _ps842_cands = [(float(c[_CI_IMP] or 0), c) for _, c in final
                             if c[_CI_ID] != _ps842_top1_id
-                            and (c[_CI_AC] or 0) < 30]
+                            and (c[_CI_AC] or 0) < 30
+                            and _pair_suppress_ok_d(c[_CI_ID], 0.0)]
             if _ps842_cands:
                 _ps842_best = max(_ps842_cands, key=lambda x: x[0])
                 if _ps842_best[0] >= 0.3:
