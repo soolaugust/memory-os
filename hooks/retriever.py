@@ -3345,7 +3345,10 @@ def main():
                 # 修复：hard_deadline 对齐——cap 空时不选，让 iter677/db_fallback 接管。
                 _fb_hd_pool = _fb_hd_cap if _fb_hd_cap else None
                 # iter939: fallback_relevance_floor — hard_deadline 路径同步
-                if _fb_hd_pool and max(s for s, _ in _fb_hd_pool) < 0.05:
+                # iter940: floor_raise — 0.05→0.10 对齐 dead_zone_min/gap_bridge_floor
+                #   数据驱动（2026-05-06）：PE chunk score=0.071 逃逸 0.05 floor，24h 被注入 5 次。
+                #   score<0.10 说明 FTS5 词汇重叠极低（<1/10），注入无信息增量。
+                if _fb_hd_pool and max(s for s, _ in _fb_hd_pool) < 0.10:
                     _fb_hd_pool = None
                 if _fb_hd_pool:
                     _fb_hd_sorted = sorted(_fb_hd_pool,
@@ -4912,7 +4915,9 @@ def main():
                 #   suppress 全灭不一定是频率过高，可能是当前 prompt 与库内知识本就无关。
                 #   强制注入 score=0.06 的内容 = 用户感知噪声。
                 # 修复：_fb_pool 最高分 < 0.05 时跳过此路径，落到 db_ultimate_fallback（有轮转多样性）。
-                if _fb_pool and max(s for s, _ in _fb_pool) < 0.05:
+                # iter940: floor_raise — 0.05→0.10 对齐 dead_zone_min/gap_bridge_floor
+                #   数据驱动（2026-05-06）：PE chunk score=0.071 逃逸 0.05 floor，24h 5x 注入。
+                if _fb_pool and max(s for s, _ in _fb_pool) < 0.10:
                     _fb_pool = None  # 全部候选相关性极低，不强制注入
                 if _fb_pool:
                     _fb_sorted = sorted(_fb_pool,
@@ -5275,21 +5280,26 @@ def main():
                                     if sum(1 for t in _itl758.get(c.get("id", ""), []) if t > _cut758_7d) < _fb_lite_ceiling
                                     and sum(1 for t in _itl758.get(c.get("id", ""), []) if t > _cut758_24h) < 3]
                     _fb_lite_pool = _fb_lite_cap if _fb_lite_cap else _pre_suppress_top_k_lite
-                    _fb_lite_sorted = sorted(
-                        _fb_lite_pool,
-                        key=lambda x: x[0] * (0.5 ** (sum(1 for t in _itl758.get(x[1].get("id", ""), []) if t > _cut758_7d) / 2)),
-                        reverse=True)
-                    _fb_lite = _fb_lite_sorted[0]
-                    _last_hash_lite = _read_hash()
-                    if _last_hash_lite and len(_fb_lite_sorted) > 1:
-                        _fb_lite_hash = hashlib.md5(_fb_lite[1].get("id", "").encode()).hexdigest()[:8]
-                        if _fb_lite_hash == _last_hash_lite:
-                            _fb_lite = _fb_lite_sorted[1]
-                    top_k = [_fb_lite]
-                    _deferred.log(DMESG_WARN, "retriever",
-                                  f"iter793_suppress_fallback_lite: all {_pre758} "
-                                  f"suppressed, fallback to best={_fb_lite[1].get('id','')[:12]}",
-                                  session_id=session_id, project=project)
+                    # iter940: fallback_relevance_floor — LITE 路径同步（此前遗漏）
+                    #   数据驱动（2026-05-06）：PE chunk score=0.071 走 LITE fallback 24h 3x 逃逸。
+                    if _fb_lite_pool and max(s for s, _ in _fb_lite_pool) < 0.10:
+                        _fb_lite_pool = None
+                    if _fb_lite_pool:
+                        _fb_lite_sorted = sorted(
+                            _fb_lite_pool,
+                            key=lambda x: x[0] * (0.5 ** (sum(1 for t in _itl758.get(x[1].get("id", ""), []) if t > _cut758_7d) / 2)),
+                            reverse=True)
+                        _fb_lite = _fb_lite_sorted[0]
+                        _last_hash_lite = _read_hash()
+                        if _last_hash_lite and len(_fb_lite_sorted) > 1:
+                            _fb_lite_hash = hashlib.md5(_fb_lite[1].get("id", "").encode()).hexdigest()[:8]
+                            if _fb_lite_hash == _last_hash_lite:
+                                _fb_lite = _fb_lite_sorted[1]
+                        top_k = [_fb_lite]
+                        _deferred.log(DMESG_WARN, "retriever",
+                                      f"iter793_suppress_fallback_lite: all {_pre758} "
+                                      f"suppressed, fallback to best={_fb_lite[1].get('id','')[:12]}",
+                                      session_id=session_id, project=project)
             except Exception:
                 pass  # timeline 读取失败不阻塞
 

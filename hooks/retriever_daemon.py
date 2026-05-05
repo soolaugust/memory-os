@@ -4946,7 +4946,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 # 根因（数据驱动，2026-05-06）：14.8% 注入 score<0.1，全来自 suppress_fallback。
                 #   当前 prompt 与库内知识本就无关时，强制注入 = 用户感知噪声。
                 # 修复：_fb_pool 最高分 < 0.05 时跳过，落到 db_ultimate_fallback（有分钟轮转多样性）。
-                if _fb_pool and max(s for s, _ in _fb_pool) < 0.05:
+                # iter940: floor_raise — 0.05→0.10（sync retriever.py）
+                if _fb_pool and max(s for s, _ in _fb_pool) < 0.10:
                     _fb_pool = None
                 if _fb_pool:
                     _fb_sorted = sorted(_fb_pool,
