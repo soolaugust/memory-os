@@ -4975,10 +4975,19 @@ def main():
         # iter918: 确保 _pre_suppress_top_k 在 common path（FULL+LITE 合并点）有默认值
         # 根因：LITE 路径不经过 line 4606 的 FULL-only 赋值，到达 iter859 时 NameError
         #   被外层 try/except 吞掉 → diversity_probe 也在同一 try 块内 → 全部静默失败。
+        # iter925: lite_rotation_use_pre_suppress — LITE 路径用 suppress 前快照
+        #   根因（数据驱动，2026-05-06）：iter918 赋值 _pre_suppress_top_k = list(top_k)，
+        #   但 LITE 路径此时 top_k 已被 suppress_final_gate_lite 缩减（与 FULL 路径 top_k 不同）。
+        #   导致 len(_pre_suppress_top_k) == len(top_k) → iter859 条件永假 → rotation 零触发。
+        #   实测：5月4日 5 次连续 same_hash 全是 import-90139，diversity_probe 是唯一出路。
+        #   修复：LITE 路径优先用 _pre_suppress_top_k_lite（line 5124 的 suppress 前快照）。
         try:
             _pre_suppress_top_k
         except NameError:
-            _pre_suppress_top_k = list(top_k)
+            try:
+                _pre_suppress_top_k = _pre_suppress_top_k_lite
+            except NameError:
+                _pre_suppress_top_k = list(top_k)
         top_k_ids = sorted([c["id"] for _, c in top_k])
         current_hash = hashlib.md5("|".join(top_k_ids).encode()).hexdigest()[:8]
 
