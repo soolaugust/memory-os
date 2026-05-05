@@ -3344,6 +3344,9 @@ def main():
                 #   FULL 路径已在 iter916 修复（cap 空→None→db_ultimate_fallback）。
                 # 修复：hard_deadline 对齐——cap 空时不选，让 iter677/db_fallback 接管。
                 _fb_hd_pool = _fb_hd_cap if _fb_hd_cap else None
+                # iter939: fallback_relevance_floor — hard_deadline 路径同步
+                if _fb_hd_pool and max(s for s, _ in _fb_hd_pool) < 0.05:
+                    _fb_hd_pool = None
                 if _fb_hd_pool:
                     _fb_hd_sorted = sorted(_fb_hd_pool,
                                            key=lambda x: x[0] * (0.5 ** (_recent_7d_counts.get(x[1].get("id", ""), 0) / 2)),
@@ -4904,6 +4907,13 @@ def main():
                            and _fb_24h.get(c.get("id", ""), 0) < 3]
                 # iter916: fallback_no_unfiltered_pool — 全灭时不回退无过滤池，走 db_ultimate_fallback
                 _fb_pool = _fb_cap if _fb_cap else None
+                # iter939: fallback_relevance_floor — 低相关性时不强制注入噪声
+                # 根因（数据驱动，2026-05-06）：14.8% 注入 score<0.1，全来自 suppress_fallback。
+                #   suppress 全灭不一定是频率过高，可能是当前 prompt 与库内知识本就无关。
+                #   强制注入 score=0.06 的内容 = 用户感知噪声。
+                # 修复：_fb_pool 最高分 < 0.05 时跳过此路径，落到 db_ultimate_fallback（有轮转多样性）。
+                if _fb_pool and max(s for s, _ in _fb_pool) < 0.05:
+                    _fb_pool = None  # 全部候选相关性极低，不强制注入
                 if _fb_pool:
                     _fb_sorted = sorted(_fb_pool,
                                         key=lambda x: x[0] * (0.5 ** (_fb_7d.get(x[1].get("id", ""), 0) / 2)),

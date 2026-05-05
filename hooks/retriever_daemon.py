@@ -4942,6 +4942,12 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                            and _fb_24h_d.get(c[_CI_ID], 0) < 3]
                 # iter916: fallback_no_unfiltered_pool — 全灭时不回退无过滤池，走 db_ultimate_fallback
                 _fb_pool = _fb_cap if _fb_cap else None
+                # iter939: fallback_relevance_floor — 低相关性时不强制注入噪声（sync retriever.py）
+                # 根因（数据驱动，2026-05-06）：14.8% 注入 score<0.1，全来自 suppress_fallback。
+                #   当前 prompt 与库内知识本就无关时，强制注入 = 用户感知噪声。
+                # 修复：_fb_pool 最高分 < 0.05 时跳过，落到 db_ultimate_fallback（有分钟轮转多样性）。
+                if _fb_pool and max(s for s, _ in _fb_pool) < 0.05:
+                    _fb_pool = None
                 if _fb_pool:
                     _fb_sorted = sorted(_fb_pool,
                                         key=lambda x: x[0] * (0.5 ** (_fb_7d_d.get(x[1][_CI_ID], 0) / 2)),
