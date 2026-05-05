@@ -1308,7 +1308,11 @@ def _is_quality_chunk(summary: str) -> bool:
                 # iter890: iterator_param_tuning_noise — 迭代器参数调优/内部机制度量
                 "衰减到", "触发率", "垄断率", "注入位",
                 "diversity_pair", "fallback_rotation", "closure_fallback",
-                "pair_dedup"]
+                "pair_dedup",
+                # iter906: suppress_tuning_noise — 漏网的 suppress 调参/效果记录
+                # 数据驱动（2026-05-05）：6 条 ac=1 噪声逃逸，含 suppress 调参记录
+                #   "修复：阈值 2→4"/"tiny_db (<50"/"7d 内 31% 完整检索返回空结果"
+                "7d>=", "7d >=", "tiny_db", "完整检索返回空", "全被 suppress"]
     if any(kw in s for kw in noise_kw):
         return False
     # iter853: internal_var_gate — 含 memory-os 内部变量名/常量名的 summary 拦截
