@@ -5048,7 +5048,15 @@ def main():
                 _sh_top_k_ids = set(c.get("id", "") if isinstance(c, dict) else c["id"]
                                     for _, c in top_k) if top_k else set()
                 try:
-                    _dp_exclude = ",".join(f"'{x}'" for x in _sh_top_k_ids) if _sh_top_k_ids else "''"
+                    # iter927: diversity_probe_suppress_aware — 排除 7d 高频 chunk
+                    # 根因（数据驱动，2026-05-06）：diversity_probe 选出的候选可能是已被
+                    #   suppress_final_gate 拦截的垄断 chunk（7d>=3），轮转到的知识用户已反复看过。
+                    # 修复：排除 7d >= suppress 阈值的 chunk，确保轮转到真正新鲜的知识。
+                    _dp_7d = _rt663_7d if '_rt663_7d' in dir() and _rt663_7d else {}
+                    _dp_7d_ceil = 3 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
+                    _dp_7d_exclude = set(cid for cid, cnt in _dp_7d.items() if cnt >= _dp_7d_ceil)
+                    _dp_all_exclude = _sh_top_k_ids | _dp_7d_exclude
+                    _dp_exclude = ",".join(f"'{x}'" for x in _dp_all_exclude) if _dp_all_exclude else "''"
                     _dp_rows = conn.execute(
                         f"SELECT id, summary, content, chunk_type, importance, access_count "
                         f"FROM memory_chunks WHERE project=? AND chunk_state='ACTIVE' "
