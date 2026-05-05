@@ -4568,9 +4568,14 @@ def main():
                 _sf663_small_db = _db_chunk_count < 100
                 # iter810: tiny_db_24h_relax — sync FULL final_gate
                 # iter837: tiny_db_24h_relax_v2 — 阈值 3→4（同步 _score_chunk）
+                # iter883: full_final_gate_7d_sync — 对齐 hard_deadline iter882 的 7d 收紧
+                #   根因（数据驱动，2026-05-05）：FULL 路径 tiny_db 7d<5 允许 4 次注入，
+                #   但 hard_deadline 路径已收紧到 <3。top chunk 7d=6 仍可经 FULL 路径逃逸。
+                #   主项目 23 chunk（tiny_db）中 top15 chunk 占 78% 注入位。
+                #   修复：tiny 5→3，small 8/6→4/3（与 hard_deadline line 3268 对齐）。
                 top_k = [(s, c) for s, c in top_k
                          if _rt663_24h.get(c["id"], 0) < (3 if _sf663_tiny_db else (3 if s >= 0.5 else 2) if _sf663_small_db else (3 if s >= 0.5 else 2))
-                         and _rt663_7d.get(c["id"], 0) < (5 if _sf663_tiny_db else (8 if s >= 0.5 else 6) if _sf663_small_db else (5 if s >= 0.5 else 3))]
+                         and _rt663_7d.get(c["id"], 0) < (3 if _sf663_tiny_db else (4 if s >= 0.5 else 3) if _sf663_small_db else (5 if s >= 0.5 else 3))]
                 if len(top_k) < _pre663:
                     _deferred.log(DMESG_WARN, "retriever",
                                   f"iter663_suppress_final_gate: filtered "

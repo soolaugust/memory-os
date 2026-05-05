@@ -4718,11 +4718,12 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 _sf663d_small_db = _db_chunk_count < 100
                 # iter813+810: short_burst + tiny_db_24h_relax — sync daemon final_gate
                 # iter818: tiny_db_6h_relax — 6h 分级
+                # iter883: full_final_gate_7d_sync — 对齐 hard_deadline iter882
                 top_k = [(s, c) for s, c in top_k
                          if _rt663d_6h.get(c[_CI_ID], 0) < 2  # iter865: 6h_tighten_tiny — 统一阈值 2
                          and _rt663d_24h.get(c[_CI_ID], 0) < (3 if _sf663d_tiny_db else (3 if s >= 0.5 else 2) if _sf663d_small_db else (3 if s >= 0.5 else 2))
-                         # iter854: tiny_db_7d_relax_v2 — 阈值 5→7（sync retriever.py）
-                         and _rt663d_7d.get(c[_CI_ID], 0) < (5 if _sf663d_tiny_db else (5 if s >= 0.5 else 4) if _sf663d_small_db else (5 if s >= 0.5 else 3))]
+                         # iter883: tiny 5→3, small 5/4→4/3（sync hard_deadline line 3268）
+                         and _rt663d_7d.get(c[_CI_ID], 0) < (3 if _sf663d_tiny_db else (4 if s >= 0.5 else 3) if _sf663d_small_db else (5 if s >= 0.5 else 3))]
                 if len(top_k) < _pre663d:
                     _deferred.log(DMESG_WARN, "retriever_daemon",
                                   f"iter663_suppress_final_gate: filtered "
