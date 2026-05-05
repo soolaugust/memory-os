@@ -1334,6 +1334,14 @@ def _is_quality_chunk(summary: str) -> bool:
                 "修复（", "score<", "占比从"]
     if any(kw in s for kw in noise_kw):
         return False
+    # iter944: code_expr_gate — 代码条件表达式/数组索引碎片拦截
+    # 数据驱动（2026-05-06）：1 条 ac=0 噪声 "条件：positive[0][0] >= 0.15 — top1 < 0.15 时不配对"
+    #   逃逸所有 gate。特征：含方括号数组索引 [N] + 比较运算符，是代码片段非知识。
+    # 修复：检测 [digit] 数组索引 + 比较运算符共存 → 拒绝。
+    #   豁免：含 kernel/sched 等外部领域关键词的合法代码引用。
+    if re.search(r'\[\d+\]', s) and re.search(r'[><=!]{1,2}\s*\d', s):
+        if not re.search(r'(?:kernel|sched|CPU|task_|rq_|ctx\.|binder|scx_)', s, re.I):
+            return False
     # iter853: internal_var_gate — 含 memory-os 内部变量名/常量名的 summary 拦截
     # 数据驱动（2026-05-05）：2 条截断碎片（"LLBACK_NOISE_FLOOR 的 tiny_db 边界"、
     #   "lobal && importance>=0.9 的 constraint 无条件豁免 _rel == 0"）逃逸所有关键词匹配。
