@@ -4823,8 +4823,14 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
         if not top_k:
             # ── iter670: suppress_fallback — suppress 全灭时降级注入最佳 1 条 ──
             # iter829: fallback_rotation — 排除上次已注入 chunk 避免 same_hash 死循环
+            # iter889: fallback_7d_decay — 按 7d 注入频率衰减排序，打破高频 chunk 垄断轮换
+            #   根因（数据驱动，2026-05-05）：28-chunk 库 top5 占 38% 注入位，
+            #   suppress 全灭后 fallback 按 score 选最佳 → 高频 chunk 反复被选中。
+            #   修复：score/(1+0.5*7d_count) 使低频 chunk 优先，促进注入多样性。
             if _pre_suppress_top_k:
-                _fb_sorted = sorted(_pre_suppress_top_k, key=lambda x: x[0], reverse=True)
+                _fb_sorted = sorted(_pre_suppress_top_k,
+                                    key=lambda x: x[0] / (1 + 0.5 * _recent_7d_counts.get(x[1][_CI_ID], 0)),
+                                    reverse=True)
                 _fb = _fb_sorted[0]
                 if last_hash and len(_fb_sorted) > 1:
                     _fb_hash = '%08x' % zlib.crc32(_fb[1][_CI_ID].encode())

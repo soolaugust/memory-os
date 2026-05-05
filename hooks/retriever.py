@@ -3289,8 +3289,14 @@ def main():
                                       session_id=session_id, project=project)
             # ── iter670: suppress_fallback — hard_deadline suppress 全灭降级 ──
             # iter829: fallback_rotation (hard_deadline path)
+            # iter889: fallback_7d_decay — 按 7d 注入频率衰减排序，打破高频 chunk 垄断轮换
+            #   根因（数据驱动，2026-05-05）：28-chunk 库 top5 chunk 占 38% 注入位，
+            #   suppress 全灭后 fallback 按 score 选最佳 → 高频 chunk 反复被选中。
+            #   修复：score/(1+0.5*7d_count) 使低频 chunk 优先，促进注入多样性。
             if not top_k and _pre_suppress_top_k_hd:
-                _fb_hd_sorted = sorted(_pre_suppress_top_k_hd, key=lambda x: x[0], reverse=True)
+                _fb_hd_sorted = sorted(_pre_suppress_top_k_hd,
+                                       key=lambda x: x[0] / (1 + 0.5 * _recent_7d_counts.get(x[1].get("id", ""), 0)),
+                                       reverse=True)
                 _fb_hd = _fb_hd_sorted[0]
                 _last_hash_hd = _read_hash()
                 if _last_hash_hd and len(_fb_hd_sorted) > 1:
@@ -4697,7 +4703,10 @@ def main():
             # 修复：排除上次已注入的 chunk 组合，选次优候选。若无次优则仍选最佳。
             if _pre_suppress_top_k:
                 _last_hash = _read_hash()
-                _fb_sorted = sorted(_pre_suppress_top_k, key=lambda x: x[0], reverse=True)
+                # iter889: fallback_7d_decay — 同步 hard_deadline path
+                _fb_sorted = sorted(_pre_suppress_top_k,
+                                    key=lambda x: x[0] / (1 + 0.5 * _recent_7d_counts.get(x[1].get("id", ""), 0)),
+                                    reverse=True)
                 _fb = _fb_sorted[0]
                 if _last_hash and len(_fb_sorted) > 1:
                     _fb_hash = hashlib.md5(_fb[1].get("id", "").encode()).hexdigest()[:8]
