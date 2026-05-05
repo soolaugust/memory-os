@@ -4927,21 +4927,29 @@ def main():
                 _ult_placeholders = ','.join(['?'] * len(_ult_exclude)) if _ult_exclude else ''
                 _ult_where = f" AND id NOT IN ({_ult_placeholders})" if _ult_exclude else ''
                 try:
-                    _dbuf_row = conn.execute(
+                    # iter938: ultimate_fallback_rotation — 分钟级轮转打破固定选择
+                    # 根因（数据驱动，2026-05-06）：suppress 全灭后 fallback 按 importance DESC
+                    #   总选同一 chunk（最高 imp），直到 7d 达 ceiling 才换下一个。
+                    #   36-chunk 库中 top3 imp chunk 轮流垄断 fallback 位。
+                    # 修复：LIMIT 5 + minute%N 轮转，确保 fallback 多样性。
+                    _dbuf_rows = conn.execute(
                         "SELECT id, summary, content, chunk_type, importance "
                         f"FROM memory_chunks WHERE project=? AND chunk_state='ACTIVE'{_ult_where} "
-                        "ORDER BY importance DESC, access_count ASC LIMIT 1",
+                        "ORDER BY importance DESC, access_count ASC LIMIT 5",
                         (project, *_ult_exclude)
-                    ).fetchone()
-                    if _dbuf_row:
+                    ).fetchall()
+                    if _dbuf_rows:
+                        import time as _dbuf_time
+                        _dbuf_idx = int(_dbuf_time.time() // 60) % len(_dbuf_rows)
+                        _dbuf_row = _dbuf_rows[_dbuf_idx]
                         _dbuf_chunk = {"id": _dbuf_row[0], "summary": _dbuf_row[1],
                                        "content": _dbuf_row[2], "chunk_type": _dbuf_row[3] or "",
                                        "importance": _dbuf_row[4] or 0.5}
                         top_k = [(0.001, _dbuf_chunk)]
                         _deferred.log(DMESG_WARN, "retriever",
-                                      f"iter916_db_ultimate_fallback: "
+                                      f"iter938_db_ultimate_fallback_rotate: "
                                       f"id={_dbuf_row[0][:12]} imp={_dbuf_row[4]:.2f} "
-                                      f"excluded={len(_ult_exclude)}",
+                                      f"idx={_dbuf_idx}/{len(_dbuf_rows)} excluded={len(_ult_exclude)}",
                                       session_id=session_id, project=project)
                 except Exception:
                     pass

@@ -4967,19 +4967,23 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 _ult_placeholders = ','.join(['?'] * len(_ult_exclude)) if _ult_exclude else ''
                 _ult_where = f" AND id NOT IN ({_ult_placeholders})" if _ult_exclude else ''
                 try:
-                    _dbuf_row = conn.execute(
+                    # iter938: ultimate_fallback_rotation — 分钟级轮转（同步 retriever.py）
+                    _dbuf_rows = conn.execute(
                         "SELECT id, summary, content, chunk_type, importance, "
                         "COALESCE(access_count,0), created_at, 0.0, COALESCE(lru_gen,0), project "
                         f"FROM memory_chunks WHERE project=? AND chunk_state='ACTIVE'{_ult_where} "
-                        "ORDER BY importance DESC, access_count ASC LIMIT 1",
+                        "ORDER BY importance DESC, access_count ASC LIMIT 5",
                         (project, *_ult_exclude)
-                    ).fetchone()
-                    if _dbuf_row:
+                    ).fetchall()
+                    if _dbuf_rows:
+                        import time as _dbuf_time
+                        _dbuf_idx = int(_dbuf_time.time() // 60) % len(_dbuf_rows)
+                        _dbuf_row = _dbuf_rows[_dbuf_idx]
                         top_k = [(0.001, _dbuf_row)]
                         _deferred.log(DMESG_WARN, "retriever_daemon",
-                                      f"iter916_db_ultimate_fallback: "
+                                      f"iter938_db_ultimate_fallback_rotate: "
                                       f"id={_dbuf_row[0][:12]} imp={_dbuf_row[4]:.2f} "
-                                      f"excluded={len(_ult_exclude)} project={project}",
+                                      f"idx={_dbuf_idx}/{len(_dbuf_rows)} excluded={len(_ult_exclude)} project={project}",
                                       session_id=session_id, project=project)
                 except Exception:
                     pass
