@@ -3843,6 +3843,8 @@ def main():
         if len(positive) == 1 and _db_chunk_count < 50:
             _top1_id = positive[0][1].get("id", "")
             try:
+                from datetime import datetime as _dt864, timezone as _tz864
+                _now_ts = _dt864.now(_tz864.utc).isoformat()
                 import sqlite3 as _div_sql
                 _div_conn = _div_sql.connect(str(STORE_DB))
                 # 查同 project 中 importance >= 0.5、非 top1、未被 session 内注入的 chunk
