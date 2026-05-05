@@ -4871,6 +4871,38 @@ def main():
                               session_id=session_id, project=project)
             else:
                 return
+        # ── iter914: post_fallback_pair — suppress_fallback 恢复单条后补配对 ──
+        # 根因（数据驱动，2026-05-06）：52% 单条注入中多数因 suppress 全灭→fallback 恢复 1 条，
+        #   但 iter895 在 fallback 之前执行（top_k=0 时条件不满足）→ 无配对机会。
+        # 修复：fallback 恢复后再次从 DB 选不同类型低频 chunk 配对（复用 iter895 逻辑）。
+        if len(top_k) == 1:
+            _pf914_top1 = top_k[0][1]
+            _pf914_top1_id = _pf914_top1.get("id", "")
+            _pf914_top1_type = _pf914_top1.get("chunk_type", "")
+            try:
+                _pf914_rows = conn.execute(
+                    f"SELECT id, summary, content, chunk_type, importance, access_count "
+                    f"FROM memory_chunks WHERE project=? AND chunk_state='ACTIVE' "
+                    f"AND id != ? AND chunk_type != ? "
+                    f"ORDER BY importance DESC, access_count ASC LIMIT 5",
+                    (project, _pf914_top1_id, _pf914_top1_type)
+                ).fetchall()
+                _pf914_7d = _rt663_7d if '_rt663_7d' in dir() and _rt663_7d else _recent_7d_counts
+                _pf914_lim = 6 if _db_chunk_count < 50 else 8
+                _pf914_ok = [r for r in _pf914_rows if _pf914_7d.get(r[0], 0) < _pf914_lim]
+                if _pf914_ok:
+                    _pf914_pick = _pf914_ok[0]
+                    _pf914_chunk = {"id": _pf914_pick[0], "summary": _pf914_pick[1],
+                                    "content": _pf914_pick[2], "chunk_type": _pf914_pick[3] or "",
+                                    "importance": _pf914_pick[4] or 0.5}
+                    top_k.append((top_k[0][0] * 0.2, _pf914_chunk))
+                    _deferred.log(DMESG_DEBUG, "retriever",
+                                  f"iter914_post_fallback_pair: paired {_pf914_pick[0][:12]} "
+                                  f"type={_pf914_pick[3]} imp={_pf914_pick[4]:.2f} "
+                                  f"with fallback_top1={_pf914_top1_id[:12]}",
+                                  session_id=session_id, project=project)
+            except Exception:
+                pass
         top_k_ids = sorted([c["id"] for _, c in top_k])
         current_hash = hashlib.md5("|".join(top_k_ids).encode()).hexdigest()[:8]
 
