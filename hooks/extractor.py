@@ -1341,7 +1341,12 @@ def _is_quality_chunk(summary: str) -> bool:
                 # iter1012: ceiling_active_noise — 迭代器度量快照逃逸
                 # 数据驱动（2026-05-07）："FTS5 噪声密度降 12%（94→83 active chunks）"
                 #   逃逸原因："active chunks" 是 memory-os 内部度量关键词。
-                "active chunks", "pair 路径"]
+                "active chunks", "pair 路径",
+                # iter1018: daemon_expectation_noise — 迭代器效果预测/内部逻辑缺失描述逃逸
+                # 数据驱动（2026-05-07）：2 条 ac=0 噪声：
+                #   "daemon 路径高 ac chunk 重复注入减少 ~30%" — 效果预测
+                #   "缺少 local_saturated_suppress" — 内部逻辑缺失描述
+                "重复注入减少", "saturated_suppress", "daemon 路径高"]
     if any(kw in s for kw in noise_kw):
         return False
     # iter944: code_expr_gate — 代码条件表达式/数组索引碎片拦截
