@@ -3905,11 +3905,15 @@ def main():
         #   单条注入缺乏上下文组合，用户感知记忆系统只能给"单点"知识。
         # 修复：positive=1 时从 final 中取 score>0 但 < _min_thresh 的次优候选补充 1 条，
         #   确保至少 2 条组合上下文。下限 0.10 防止噪声注入（iter863 从 0.05 提升）。
+        # iter972: pair_suppress_align — 7d/24h 过滤堵逃逸口
+        _pair_7d_ceiling = 3 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
         if len(positive) == 1 and len(final) >= 3:
             _pair_candidates = [(s, c) for s, c in final
                                 if s > 0.10 and s < _min_thresh
                                 and c.get("id") != positive[0][1].get("id")
-                                and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh]
+                                and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh
+                                and _recent_7d_counts.get(c.get("id", ""), 0) < _pair_7d_ceiling
+                                and _recent_24h_counts.get(c.get("id", ""), 0) < 3]
             if _pair_candidates:
                 _pair_best = max(_pair_candidates, key=lambda x: x[0])
                 positive.append(_pair_best)
@@ -3926,7 +3930,9 @@ def main():
                 _imp_pairs = [(float(c.get("importance", 0) or 0), c) for _, c in final
                               if c.get("id") != positive[0][1].get("id")
                               and (c.get("access_count", 0) or 0) < 30
-                              and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh]
+                              and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh
+                              and _recent_7d_counts.get(c.get("id", ""), 0) < _pair_7d_ceiling
+                              and _recent_24h_counts.get(c.get("id", ""), 0) < 3]
                 if _imp_pairs:
                     _imp_best = max(_imp_pairs, key=lambda x: x[0])
                     # iter941: imp_pair_top1_gate — top1 score 过低时不配对
@@ -4047,12 +4053,18 @@ def main():
 
         # ── iter840: fallback_pair_inject (FULL path) ──
         # 根因：iter826 只覆盖 positive=1(score 过阈)。45% 单条来自 positive=0→fallback=1。
+        # iter972: pair_suppress_align — 对齐 suppress_final_gate 7d/24h 阈值堵逃逸
+        #   根因（数据驱动，2026-05-06）：31-chunk 库 15 个 7d>=3 被 suppress_final_gate 拦截，
+        #   但 fallback_pair 不检查 7d/24h → 垄断 chunk 经 pair 路径重新注入。
+        _fb_pair_7d_ceiling = 3 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
         if len(positive) == 1 and len(final) >= 3:
             _fb_pair_top1_id = positive[0][1].get("id", "")
             _fb_pair_cands = [(float(c.get("importance", 0) or 0), c) for _, c in final
                               if c.get("id") != _fb_pair_top1_id
                               and (c.get("access_count", 0) or 0) < 30
-                              and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh]
+                              and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh
+                              and _recent_7d_counts.get(c.get("id", ""), 0) < _fb_pair_7d_ceiling
+                              and _recent_24h_counts.get(c.get("id", ""), 0) < 3]
             if _fb_pair_cands:
                 _fb_pair_best = max(_fb_pair_cands, key=lambda x: x[0])
                 if _fb_pair_best[0] >= 0.3:
