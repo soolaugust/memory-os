@@ -5120,7 +5120,12 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 #   suppress_final_gate 拦截的垄断 chunk（7d>=3），轮转到的知识用户已反复看过。
                 # 修复：排除 7d >= suppress 阈值的 chunk，确保轮转到真正新鲜的知识。
                 _dp_7d = _rt663d_7d if '_rt663d_7d' in dir() and _rt663d_7d else _recent_7d_counts
-                _dp_7d_ceil = 3 if _db_chunk_count < 50 else (5 if _db_chunk_count < 100 else 5)
+                # iter997: daemon_diversity_probe_ceil_sync — 同步 retriever.py iter992 放宽
+                # 根因（数据驱动，2026-05-06）：20-chunk 库 14/21 chunk 7d>=3，
+                #   daemon ceil=3 排除 67% 候选 → diversity_probe 零触发 → 22 次 same_hash skip 全空召回。
+                #   retriever.py 已在 iter992 放宽到 5/7，daemon 未同步。
+                # 修复：对齐 retriever.py（5/7/7），恢复 diversity_probe 候选池。
+                _dp_7d_ceil = 5 if _db_chunk_count < 50 else (7 if _db_chunk_count < 100 else 7)
                 _dp_7d_exclude = set(cid for cid, cnt in _dp_7d.items() if cnt >= _dp_7d_ceil)
                 _dp_all_exclude = _sh_top_k_ids | _dp_7d_exclude
                 _dp_exclude = ",".join(f"'{x}'" for x in _dp_all_exclude) if _dp_all_exclude else "''"
