@@ -3471,6 +3471,9 @@ def main():
                         return max(1, _b - 2)
                     elif _a >= 7:
                         return max(1, _b - 1)
+                    # iter1027: fallback_24h_align — sync iter1023 global_24h_saturated_cap
+                    if c.get("project") == "global" and _a >= 4:
+                        return 1
                     return _b
                 top_k = [(s, c) for s, c in top_k
                          if _recent_6h_counts.get(c["id"], 0) < 2  # iter865: 6h_tighten_tiny — 统一阈值
@@ -3547,9 +3550,10 @@ def main():
                     elif _lac >= 7:
                         return max(2, _fb_hd_ceiling - 1)
                     return _fb_hd_ceiling
+                # iter1027: fallback_24h_align — 对齐 _hd1019_24h_thresh 动态阈值
                 _fb_hd_cap = [(s, c) for s, c in _pre_suppress_top_k_hd
                               if _recent_7d_counts.get(c.get("id", ""), 0) < _fb_hd_chunk_ceiling(c)
-                              and _recent_24h_counts.get(c.get("id", ""), 0) < 3]
+                              and _recent_24h_counts.get(c.get("id", ""), 0) < _hd1019_24h_thresh(s, c)]
                 # iter921: hd_fallback_no_unfiltered_pool — 对齐 FULL 路径 iter916
                 # 根因（数据驱动，2026-05-06）：cap 为空时回退 _pre_suppress_top_k_hd（无过滤），
                 #   7d>=3 的垄断 chunk 经此路径逃逸 suppress_final_gate。
@@ -4179,7 +4183,8 @@ def main():
                                 and c.get("id") != positive[0][1].get("id")
                                 and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh
                                 and _recent_7d_counts.get(c.get("id", ""), 0) < _pair_7d_cap(c)
-                                and _recent_24h_counts.get(c.get("id", ""), 0) < 3]
+                                # iter1027: fallback_24h_align — global ac>=4 阈值=1
+                                and _recent_24h_counts.get(c.get("id", ""), 0) < (1 if c.get("project") == "global" and (c.get("access_count", 0) or 0) >= 4 else 3)]
             if _pair_candidates:
                 _pair_best = max(_pair_candidates, key=lambda x: x[0])
                 positive.append(_pair_best)
@@ -4198,7 +4203,8 @@ def main():
                               and (c.get("access_count", 0) or 0) < 30
                               and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh
                               and _recent_7d_counts.get(c.get("id", ""), 0) < _pair_7d_cap(c)
-                              and _recent_24h_counts.get(c.get("id", ""), 0) < 3]
+                              # iter1027: fallback_24h_align — global ac>=4 阈值=1
+                              and _recent_24h_counts.get(c.get("id", ""), 0) < (1 if c.get("project") == "global" and (c.get("access_count", 0) or 0) >= 4 else 3)]
                 if _imp_pairs:
                     _imp_best = max(_imp_pairs, key=lambda x: x[0])
                     # iter941: imp_pair_top1_gate — top1 score 过低时不配对
@@ -4338,7 +4344,8 @@ def main():
                               and (c.get("access_count", 0) or 0) < 30
                               and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh
                               and _recent_7d_counts.get(c.get("id", ""), 0) < _fb_pair_7d_ceiling
-                              and _recent_24h_counts.get(c.get("id", ""), 0) < 3]
+                              # iter1027: fallback_24h_align — global ac>=4 阈值=1
+                              and _recent_24h_counts.get(c.get("id", ""), 0) < (1 if c.get("project") == "global" and (c.get("access_count", 0) or 0) >= 4 else 3)]
             if _fb_pair_cands:
                 _fb_pair_best = max(_fb_pair_cands, key=lambda x: x[0])
                 if _fb_pair_best[0] >= 0.3:
@@ -5774,9 +5781,10 @@ def main():
                     # iter894: fallback_realtime_align — ceiling 对齐 suppress_final_gate_lite 阈值
                     # iter911: pair_7d_tighten — fallback ceiling 4→3(tiny) 堵逃逸
                     _fb_lite_ceiling = 5 if _db_chunk_count < 50 else (6 if _db_chunk_count < 100 else 5)  # iter1000: tiny 3→5 sync
+                    # iter1027: fallback_24h_align — 对齐 _lt1020_24h_thresh 动态阈值
                     _fb_lite_cap = [(s, c) for s, c in _pre_suppress_top_k_lite
                                     if sum(1 for t in _itl758.get(c.get("id", ""), []) if t > _cut758_7d) < _fb_lite_ceiling
-                                    and sum(1 for t in _itl758.get(c.get("id", ""), []) if t > _cut758_24h) < 3]
+                                    and sum(1 for t in _itl758.get(c.get("id", ""), []) if t > _cut758_24h) < _lt1020_24h_thresh(s, c)]
                     _fb_lite_pool = _fb_lite_cap if _fb_lite_cap else _pre_suppress_top_k_lite
                     # iter940: fallback_relevance_floor — LITE 路径同步（此前遗漏）
                     #   数据驱动（2026-05-06）：PE chunk score=0.071 走 LITE fallback 24h 3x 逃逸。

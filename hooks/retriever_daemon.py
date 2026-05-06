@@ -5093,9 +5093,10 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 _fb_24h_d = _rt663d_24h if '_rt663d_24h' in dir() and _rt663d_24h else _recent_24h_counts
                 # iter911: pair_7d_tighten — fallback ceiling 4→3(tiny) 堵逃逸
                 _fb_ceiling_d = 5 if _db_chunk_count < 50 else (6 if _db_chunk_count < 100 else 5)  # iter1000: tiny 3→5 sync
+                # iter1027: fallback_24h_align — global ac>=4 阈值=1
                 _fb_cap = [(s, c) for s, c in _pre_suppress_top_k
                            if _fb_7d_d.get(c[_CI_ID], 0) < _fb_ceiling_d
-                           and _fb_24h_d.get(c[_CI_ID], 0) < 3]
+                           and _fb_24h_d.get(c[_CI_ID], 0) < (1 if c.get("project") == "global" and (c.get("access_count", 0) or 0) >= 4 else 3)]
                 # iter916: fallback_no_unfiltered_pool — 全灭时不回退无过滤池，走 db_ultimate_fallback
                 _fb_pool = _fb_cap if _fb_cap else None
                 # iter939: fallback_relevance_floor — 低相关性时不强制注入噪声（sync retriever.py）
