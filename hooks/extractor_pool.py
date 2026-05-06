@@ -290,6 +290,7 @@ def _run_extraction_pipeline(payload: dict) -> dict:
             _read_transcript_tail,
         )
         from store import (open_db, ensure_schema, insert_chunk,
+                           already_exists, merge_similar,
                            kswapd_scan, cgroup_throttle_check,
                            dmesg_log, DMESG_INFO, DMESG_DEBUG, DMESG_WARN,
                            aimd_window)
@@ -421,12 +422,20 @@ def _run_extraction_pipeline(payload: dict) -> dict:
                 imp = base_importance
                 if throttle_active:
                     imp = round(imp * importance_factor, 3)
+                # iter950: pool_dedup_gate — 写入前去重（与 extractor.py _write_chunk 对齐）
+                # 根因（数据驱动，2026-05-06）：extractor_pool 路径缺少 already_exists/merge_similar，
+                #   导致同一 session 内相同内容重复写入（实测 3 条重复 conversation_summary）。
+                _summ950 = t[:120]
+                if already_exists(conn, _summ950, chunk_type=chunk_type):
+                    continue
+                if merge_similar(conn, _summ950, chunk_type, imp, project=project):
+                    continue
                 chunk = MemoryChunk(
                     project=project,
                     source_session=session_id,
                     chunk_type=chunk_type,
                     content=t,
-                    summary=t[:120],
+                    summary=_summ950,
                     tags=[chunk_type, project],
                     importance=imp,
                     retrievability=0.5,
