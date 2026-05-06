@@ -1349,6 +1349,20 @@ def _is_quality_chunk(summary: str) -> bool:
                 "重复注入减少", "saturated_suppress", "daemon 路径高"]
     if any(kw in s for kw in noise_kw):
         return False
+    # iter1026: iterator_combo_gate — memory-os 运行时术语组合检测
+    # 数据驱动（2026-05-07）：9 个 ac=0 噪声逃逸所有单关键词 gate，根因是含外部领域词
+    #   （如 "feishu CLI"）作为示例时豁免 metric gate。但这些 summary 同时含 2+
+    #   memory-os 运行时概念（"次注入"/"chunk"/"ac="/"suppress"/"7d"/"per-project"/"候选"）。
+    #   合法用户知识至多偶尔含 1 个（如"chunk"出现在非 memory-os 语境中）。
+    # 修复：检测 ≥3 个运行时术语命中 → 拒绝（无外部领域豁免）。
+    _mos_terms = sum(1 for _t in (
+        '次注入', '注入中', 'chunk', 'suppress', 'per-project',
+        '候选池', '内化', '阈值', 'ac=', 'ac<', 'ac>',
+        '7d ', '24h ', '注入位', 'global chunk', 'supplement',
+        '全路径', 'FTS', 'final_gate', '空召回',
+    ) if _t in s)
+    if _mos_terms >= 3:
+        return False
     # iter944: code_expr_gate — 代码条件表达式/数组索引碎片拦截
     # 数据驱动（2026-05-06）：1 条 ac=0 噪声 "条件：positive[0][0] >= 0.15 — top1 < 0.15 时不配对"
     #   逃逸所有 gate。特征：含方括号数组索引 [N] + 比较运算符，是代码片段非知识。
