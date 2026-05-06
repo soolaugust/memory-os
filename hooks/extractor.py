@@ -1656,7 +1656,12 @@ def _is_quality_chunk(summary: str) -> bool:
         # 数据驱动（2026-05-05）：bee09746 "incomplete_sentence_gate：拦截..."(ac=1)、
         #   ce1fc418 "memory-os v2 = 通用版"(ac=1) 逃逸所有现有模式。
         #   特征：含 _gate 后缀的内部规则名 或 "memory-os" 自引用。
-        r'\w+_gate[：:]|memory.os)',
+        r'\w+_gate[：:]|memory.os|'
+        # iter951: project_id_drift_gate — 拦截 project ID 漂移/内部去重逻辑
+        # 根因（数据驱动，2026-05-06）：5 条 ac=0 reasoning_chain/causal_chain 全关于
+        #   project ID 漂移机制，含 resolve_project/CLAUDE_CWD/insert_chunk 等内部术语。
+        r'project.?ID|resolve_project|CLAUDE_CWD|insert_chunk|already_exists|merge_similar|'
+        r'被动注入|注入覆盖率)',
         s, re.I
     )
     if len(_SELF_REF_TERMS) >= 2:
@@ -1860,6 +1865,14 @@ def _is_tool_insight_noise(text: str) -> bool:
     # 特征：以 "imp=" 开头（chunk metadata 前缀格式）
     if re.match(r'^imp=[\d.]+\s+stab=', text):
         return True
+    # iter951: retriever_perf_gate — 拦截 memory-os 自身性能/实现细节
+    # 根因（数据驱动，2026-05-06）：4 条 ac=0 tool_insight 全是 retriever 性能指标
+    #   如 "P50 从 32ms→10ms"、"lazy import subprocess（节省 ~17ms 冷启动）"、
+    #   "busy-loops 10ms per task to widen the pre-INIT window"。
+    #   特征：含 retriever/extractor 性能术语 + ms/冷启动/FULL/LITE 等度量词。
+    if re.search(r'(?:P50|P95|P99|冷启动|cold.?start|FULL.*ms|LITE.*ms|pre.?INIT|lazy\s*import|busy.?loop)', text, re.I):
+        if not re.search(r'(?:kernel|sched|Android|feishu|飞书|binder|migration)', text, re.I):
+            return True
     return False
 
 
