@@ -2348,14 +2348,20 @@ def main():
             #   同 session 被注入 3 次，*0.40 衰减不够（唯一高分候选仍入选）。
             #   24h suppress 阈值=5 未触发。用户已看过 2 次，第 3 次零信息增量。
             _sess_inj = _session_injection_counts.get(chunk.get("id", ""), 0)
-            _sdg_hard = 3 if _tiny_db else _tmv_session_density_gate
-            if _sess_inj >= _sdg_hard:
-                score = 0.0
-                _hard_suppressed = True
-            elif _sess_inj >= _tmv_session_density_gate:   # >=4: near-suppress (non-tiny)
-                score *= 0.05
-            elif _sess_inj >= 2:                          # >=2: strong decay
-                score *= 0.40
+            # iter989: micro_db_session_density_bypass — <=5 chunk 库跳过 session 衰减
+            # 根因（数据驱动，2026-05-06）：git:78dc99a5695f 仅 2 chunks，session 注入 1 次后
+            #   *0.40 衰减将 score 从 0.25→0.10 < min_thresh(0.18)，后续 6 次连续空召回。
+            #   micro_db 无替代候选，session 衰减等于永久 suppress。
+            # 修复：micro_db 完全跳过 session density gate（与 24h/7d bypass 对齐）。
+            if not _micro_db:
+                _sdg_hard = 3 if _tiny_db else _tmv_session_density_gate
+                if _sess_inj >= _sdg_hard:
+                    score = 0.0
+                    _hard_suppressed = True
+                elif _sess_inj >= _tmv_session_density_gate:   # >=4: near-suppress (non-tiny)
+                    score *= 0.05
+                elif _sess_inj >= 2:                          # >=2: strong decay
+                    score *= 0.40
             # ── iter600+601+612: Effective Bandwidth Throttle ─────────────
             # iter612: graduated_bandwidth_penalty — 线性渐进惩罚 [soft_start, hard_cap]
             #   根因：3192147e（ac=89）在 project 窗口内 util=0.27 恰好低于 hard_cap，
@@ -5416,6 +5422,46 @@ def main():
                                       session_id=session_id, project=project)
             except Exception:
                 pass  # timeline 读取失败不阻塞
+
+        # ── iter988: db_ultimate_fallback_lite — LITE 路径 suppress 全灭兜底 ──
+        # 根因（数据驱动，2026-05-06）：git:78dc99a5695f（2 chunks）连续 6 次 LITE 空召回。
+        #   FULL 路径有 db_ultimate_fallback (line 5048) 兜底，但 LITE 路径遗漏。
+        #   suppress_fallback_lite 因 relevance_floor(<0.10) 或 7d ceiling 全灭后无后续路径。
+        # 修复：复用 FULL 路径逻辑——从 DB 选 importance 最高 + access_count 最低的 chunk，
+        #   带分钟级轮转 + 7d ceiling 排除。消灭 LITE 路径空召回。
+        if not top_k:
+            try:
+                _dbuf_lite_7d = {}
+                try:
+                    _dbuf_lite_7d = {cid: sum(1 for t in ts_list if t > _cut758_7d)
+                                     for cid, ts_list in _itl758.items()}
+                except NameError:
+                    pass
+                _dbuf_lite_ceiling = 4 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
+                _dbuf_lite_exclude = [cid for cid, cnt in _dbuf_lite_7d.items() if cnt >= _dbuf_lite_ceiling]
+                _dbuf_lite_ph = ','.join(['?'] * len(_dbuf_lite_exclude)) if _dbuf_lite_exclude else ''
+                _dbuf_lite_where = f" AND id NOT IN ({_dbuf_lite_ph})" if _dbuf_lite_exclude else ''
+                _dbuf_lite_rows = conn.execute(
+                    "SELECT id, summary, content, chunk_type, importance "
+                    f"FROM memory_chunks WHERE (project=? OR project='global') AND chunk_state='ACTIVE'{_dbuf_lite_where} "
+                    "ORDER BY importance DESC, access_count ASC LIMIT 5",
+                    (project, *_dbuf_lite_exclude)
+                ).fetchall()
+                if _dbuf_lite_rows:
+                    import time as _dbuf_lite_time
+                    _dbuf_lite_idx = int(_dbuf_lite_time.time() // 60) % len(_dbuf_lite_rows)
+                    _dbuf_lite_row = _dbuf_lite_rows[_dbuf_lite_idx]
+                    _dbuf_lite_chunk = {"id": _dbuf_lite_row[0], "summary": _dbuf_lite_row[1],
+                                        "content": _dbuf_lite_row[2], "chunk_type": _dbuf_lite_row[3] or "",
+                                        "importance": _dbuf_lite_row[4] or 0.5}
+                    top_k = [(0.001, _dbuf_lite_chunk)]
+                    _deferred.log(DMESG_WARN, "retriever",
+                                  f"iter988_db_ultimate_fallback_lite: "
+                                  f"id={_dbuf_lite_row[0][:12]} imp={_dbuf_lite_row[4]:.2f} "
+                                  f"idx={_dbuf_lite_idx}/{len(_dbuf_lite_rows)}",
+                                  session_id=session_id, project=project)
+            except Exception:
+                pass
 
         # ── iter832: post_suppress_pair_inject — LITE 路径 suppress 后单条配对 ──
         # 同 FULL 路径逻辑：suppress_final_gate_lite 过滤后如果 top_k=1，
