@@ -2386,6 +2386,11 @@ def _write_chunk(chunk_type: str, summary: str, project: str, session_id: str,
     # 修复：无 content_override 时，summary 以 '|' 开头 → 表格碎片 → 拒绝。
     if not content_override and summary.lstrip().startswith('|'):
         return
+    # iter966: cmdline_fragment_gate — 命令行参数碎片拒绝写入
+    # 数据驱动（2026-05-06）：8d3918ac "-in-reply-to=\"<20260429...\"" 逃逸所有 gate。
+    # 特征：以 - 或 -- 开头的 CLI flag 格式，无知识价值。
+    if not content_override and re.match(r'^-{1,2}[\w-]+=', summary.lstrip()):
+        return
     # iter961: summary_min_density_gate — 无 content_override 时 summary 过短拒绝
     # 根因（数据驱动，2026-05-06）：2 条 design_constraint ac=0（"内核 panic，不需要 counter"
     #   20字 / "- 这是 Tejun 明确要求的，无推断" 16字）通过 <15 门控但检索价值极低。
