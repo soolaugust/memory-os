@@ -5165,6 +5165,12 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 _fb_cap = [(s, c) for s, c in _pre_suppress_top_k
                            if _fb_7d_d.get(c[_CI_ID], 0) < _fb_ceiling_d
                            and _fb_24h_d.get(c[_CI_ID], 0) < (1 if c.get("project") == "global" and (c.get("access_count", 0) or 0) >= 4 else 3)]
+                # iter1032: fallback_relax_24h — sync retriever.py
+                # 根因（数据驱动，2026-05-07）：31% 空召回。24h>=3 排除所有 FTS 候选 → 空召回。
+                # 修复：_fb_cap 全灭时只保留 7d ceiling（去掉 24h 过滤），保持 FTS 相关性。
+                if not _fb_cap:
+                    _fb_cap = [(s, c) for s, c in _pre_suppress_top_k
+                               if _fb_7d_d.get(c[_CI_ID], 0) < _fb_ceiling_d]
                 # iter916: fallback_no_unfiltered_pool — 全灭时不回退无过滤池，走 db_ultimate_fallback
                 _fb_pool = _fb_cap if _fb_cap else None
                 # iter939: fallback_relevance_floor — 低相关性时不强制注入噪声（sync retriever.py）
