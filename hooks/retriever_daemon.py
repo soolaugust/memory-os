@@ -4866,10 +4866,19 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 # iter1015: daemon_micro_db_final_gate_bypass — 对齐 retriever.py line 5052
                 # 根因（数据驱动，2026-05-07）：<=5 chunk 项目经 daemon 路径时 suppress_final_gate
                 #   无 micro_db 豁免 → global chunk 被 7d suppress 全灭。FULL/LITE 已有 bypass。
+                # iter1020: suppress_final_gate_24h_saturated_sync — 同步 retriever.py
+                def _d1020_24h_thresh(s, c):
+                    _b = 3 if _sf663d_tiny_db else (3 if s >= 0.5 else 2) if _sf663d_small_db else (3 if s >= 0.5 else 2)
+                    _a = c[_CI_AC] or 0
+                    if _a >= 10:
+                        return max(1, _b - 2)
+                    elif _a >= 7:
+                        return max(1, _b - 1)
+                    return _b
                 if _db_chunk_count > 5:
                     top_k = [(s, c) for s, c in top_k
                              if _rt663d_6h.get(c[_CI_ID], 0) < 2  # iter865: 6h_tighten_tiny — 统一阈值 2
-                             and _rt663d_24h.get(c[_CI_ID], 0) < (3 if _sf663d_tiny_db else (3 if s >= 0.5 else 2) if _sf663d_small_db else (3 if s >= 0.5 else 2))
+                             and _rt663d_24h.get(c[_CI_ID], 0) < _d1020_24h_thresh(s, c)
                              # iter883: tiny 5→3, small 5/4→4/3（sync hard_deadline line 3268）
                              # iter905: cross_project_suppress_tighten — 跨项目 7d -2
                              and _rt663d_7d.get(c[_CI_ID], 0) < _d905_7d_thresh(s, c)]

@@ -5068,9 +5068,22 @@ def main():
                 #   但 suppress_final_gate 无 micro_db 豁免 → 7d>=4 的 global chunk 全灭。
                 #   唯一知识源被 suppress = 系统对该项目完全无用。
                 # 修复：与 _score_chunk micro_db bypass 对齐，<=5 chunk 库不执行 final_gate。
+                # iter1020: suppress_final_gate_24h_saturated_sync — 同步 hard_deadline iter1019
+                # 根因（数据驱动，2026-05-07）：ac=10 "Android 性能诊断核心规则" 同日注入 3 次。
+                #   hard_deadline 路径 24h 阈值=1（iter1019 ac>=10: max(1,3-2)），
+                #   但 suppress_final_gate FULL 路径 24h 阈值=3（硬编码），形成逃逸。
+                # 修复：FULL 路径 24h 检查同步 iter1019 动态阈值。
+                def _sf1020_24h_thresh(s, c):
+                    _b = 3 if _sf663_tiny_db else (3 if s >= 0.5 else 2) if _sf663_small_db else (3 if s >= 0.5 else 2)
+                    _a = c.get("access_count", 0) or 0
+                    if _a >= 10:
+                        return max(1, _b - 2)
+                    elif _a >= 7:
+                        return max(1, _b - 1)
+                    return _b
                 if _db_chunk_count > 5:
                     top_k = [(s, c) for s, c in top_k
-                             if _rt663_24h.get(c["id"], 0) < (3 if _sf663_tiny_db else (3 if s >= 0.5 else 2) if _sf663_small_db else (3 if s >= 0.5 else 2))
+                             if _rt663_24h.get(c["id"], 0) < _sf1020_24h_thresh(s, c)
                              # iter904: 7d_rebalance_tiny — tiny_db 7d 2→4
                              # iter905: cross_project_suppress_tighten — 跨项目 7d -2
                              and _rt663_7d.get(c["id"], 0) < _sf663_7d_thresh(s, c)]
@@ -5120,9 +5133,18 @@ def main():
                 elif _l_ac >= 7:
                     return max(2, _t - 1)
                 return _t
+            # iter1020: suppress_final_gate_24h_saturated_sync — closure_fallback 同步
+            def _fg1020_24h_thresh(s, c):
+                _b = 3 if _fg887_tiny else (3 if s >= 0.5 else 2) if _fg887_small else (3 if s >= 0.5 else 2)
+                _a = c.get("access_count", 0) or 0
+                if _a >= 10:
+                    return max(1, _b - 2)
+                elif _a >= 7:
+                    return max(1, _b - 1)
+                return _b
             top_k = [(s, c) for s, c in top_k
                      if _recent_6h_counts.get(c["id"], 0) < 2
-                     and _recent_24h_counts.get(c["id"], 0) < (3 if _fg887_tiny else (3 if s >= 0.5 else 2) if _fg887_small else (3 if s >= 0.5 else 2))
+                     and _recent_24h_counts.get(c["id"], 0) < _fg1020_24h_thresh(s, c)
                      # iter904: 7d_rebalance_tiny — tiny_db 7d 2→4
                      # iter905: cross_project_suppress_tighten — 跨项目 7d -2
                      and _recent_7d_counts.get(c["id"], 0) < _fg887_7d_thresh(s, c)]
@@ -5657,10 +5679,19 @@ def main():
                 # 根因（数据驱动，2026-05-06）：git:78dc99a5695f（2 自有 chunk）LITE 路径 5/6 空召回。
                 #   FULL 路径 iter968 已加 micro_db bypass，但 LITE 路径遗漏 → global chunk 被 7d suppress 全灭。
                 # 修复：<=5 chunk 库跳过 suppress_final_gate_lite（与 FULL line 4863 对齐）。
+                # iter1020: suppress_final_gate_24h_saturated_sync — LITE 路径同步
+                def _lt1020_24h_thresh(s, c):
+                    _b = 3 if _sf758_tiny_db else (3 if s >= 0.5 else 2) if _sf758_small_db else (3 if s >= 0.5 else 2)
+                    _a = c.get("access_count", 0) or 0
+                    if _a >= 10:
+                        return max(1, _b - 2)
+                    elif _a >= 7:
+                        return max(1, _b - 1)
+                    return _b
                 if _db_chunk_count > 5:
                     top_k = [(s, c) for s, c in top_k
                              if sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_6h) < 2  # iter865: 6h_tighten_tiny
-                             and sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_24h) < (3 if _sf758_tiny_db else (3 if s >= 0.5 else 2) if _sf758_small_db else (3 if s >= 0.5 else 2))
+                             and sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_24h) < _lt1020_24h_thresh(s, c)
                              # iter885: lite_7d_sync_final_gate — 5/8/6→3/4/3 对齐 FULL suppress_final_gate iter883
                              # iter905: cross_project_suppress_tighten — 跨项目 7d -2
                              and sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_7d) < _lt905_7d_thresh(s, c)]
