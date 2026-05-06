@@ -3368,7 +3368,8 @@ def main():
     #   立即返回（< 5ms），让 extractor_pool 常驻进程异步处理 I/O 密集的 transcript parsing。
     # pool 未运行（首次启动/崩溃）时退化到同步执行（fallback 路径，与旧行为等价）。
     try:
-        project    = resolve_project_id()
+        _hook_cwd  = hook_input.get("cwd", "") or os.environ.get("CLAUDE_CWD", "")
+        project    = resolve_project_id(_hook_cwd if _hook_cwd else None)
         session_id = (hook_input.get("session_id", "")
                       or os.environ.get("CLAUDE_SESSION_ID", "")
                       or "unknown")
@@ -3403,7 +3404,8 @@ def main():
                 filtered_lines.append(line)
         text = '\n'.join(filtered_lines)[:MAX_CHARS]
 
-    project = resolve_project_id()
+    _hook_cwd = hook_input.get("cwd", "") or os.environ.get("CLAUDE_CWD", "")
+    project = resolve_project_id(_hook_cwd if _hook_cwd else None)
     # 迭代66：优先从 hook stdin 获取 session_id（权威来源）
     session_id = (hook_input.get("session_id", "")
                   or os.environ.get("CLAUDE_SESSION_ID", "")
@@ -3720,6 +3722,13 @@ def main():
                     _track_throttled_chunk(summary, "decision")
         for summary in excluded:
             if _is_quality_chunk(summary):
+                # iter953: excluded_path_min_density — 纯符号名无独立检索价值
+                # 根因（数据驱动，2026-05-06）：d9aa66fa "scx_disable_and_exit_task"(ac=0)
+                #   纯函数名无上下文说明，FTS5 无法命中自然语言查询。
+                # 检测：无中文字符 + 无空格描述 → 只是一个标识符，不是排除路径知识。
+                _ep_s = summary.strip()
+                if not re.search(r'[\u4e00-\u9fff]', _ep_s) and ' ' not in _ep_s and len(_ep_s) < 40:
+                    continue
                 imp = _throttled_importance(0.70)
                 _write_chunk("excluded_path", summary, project, session_id, topic, conn,
                              importance_override=imp, _txn_managed=True)
@@ -3803,8 +3812,25 @@ def main():
         #   如 "Claude Code 的持久记忆插件"(13字)、"通用 AI 记忆引擎（SDK + API）"(17字)
         #   信息密度过低，无法独立检索命中。阈值 30 字 ≈ 一个完整中文句子最低要求。
         _cs_min_len = 30
+        # iter953: conv_summary_connective_gate — 推理过渡句拦截
+        # 根因（数据驱动，2026-05-06）：ee97d372 "scx_set_task_sched 移到前面并没有..."(ac=0)
+        #   d3164ed0 "所以跳过 scx_disable_and_exit_task"(ac=0)
+        #   以连接词开头的短句是推理中间步骤，脱离上下文无独立检索价值。
+        # 检测：连接词开头 + 长度<50 → 只是推理过渡句。
+        _CS_CONNECTIVE_RE = re.compile(
+            r'^(?:所以|因此|但是|不过|然而|而且|并且|也就是说|换言之|即)\s*'
+        )
+        def _cs_has_standalone_value(s):
+            _stripped = s.strip()
+            if _CS_CONNECTIVE_RE.match(_stripped) and len(_stripped) < 50:
+                return False
+            # 纯否定句（"X 并没有 Y" / "X 不 Y"）短于 45 字 → 结论碎片
+            if re.match(r'.{3,15}(?:并没有|没有|不会|不能|不是).{3,25}$', _stripped) and len(_stripped) < 45:
+                return False
+            return True
         _qualified_summaries = [s for s in conv_summaries
-                                if _is_quality_chunk(s) and len(s.strip()) >= _cs_min_len]
+                                if _is_quality_chunk(s) and len(s.strip()) >= _cs_min_len
+                                and _cs_has_standalone_value(s)]
         for _cs_idx, summary in enumerate(_qualified_summaries):
             imp = _throttled_importance(0.65)
             # 构建聚合 content：前节点 + 当前 + 后节点（±1 邻居）
