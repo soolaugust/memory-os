@@ -2197,6 +2197,38 @@ def main():
                     pass
             return _live_ac_cache.get(chunk_id, None)
 
+        # iter1004: type_concentration_penalty — 同 chunk_type 群体垄断注入位衰减
+        # 根因（数据驱动，2026-05-06）：PE 相关 6 条 chunk 各 7d=4-6 不触发 suppress，
+        #   但群体占 kernel 项目 7d 注入的 ~48%。单 chunk suppress 无法解决群体垄断。
+        # 修复：预计算 per-type 7d 注入占比，>40% 且该 type 有 >=3 个不同 chunk 时，
+        #   对该 type chunk 的 diversity_penalty factor 额外 x1.5。
+        _type_7d_conc = {}  # {chunk_type: (total_7d, n_chunks)}
+        try:
+            if _recent_7d_counts:
+                import sqlite3 as _tc_sql
+                _tc_conn = _tc_sql.connect(str(STORE_DB))
+                _tc_ids = list(_recent_7d_counts.keys())
+                _tc_type_map = {}  # chunk_id -> chunk_type
+                for _tc_i in range(0, len(_tc_ids), 50):
+                    _tc_batch = _tc_ids[_tc_i:_tc_i+50]
+                    _tc_ph = ",".join("?" for _ in _tc_batch)
+                    for (_tid, _ttype) in _tc_conn.execute(
+                            f"SELECT id, chunk_type FROM memory_chunks WHERE id IN ({_tc_ph})", _tc_batch).fetchall():
+                        _tc_type_map[_tid] = _ttype or ""
+                _tc_conn.close()
+                from collections import defaultdict as _tc_dd
+                _tc_agg = _tc_dd(lambda: [0, set()])  # type -> [total_7d, {chunk_ids}]
+                for _tcid, _tccnt in _recent_7d_counts.items():
+                    _tct = _tc_type_map.get(_tcid, "")
+                    if _tct:
+                        _tc_agg[_tct][0] += _tccnt
+                        _tc_agg[_tct][1].add(_tcid)
+                _tc_total = sum(_recent_7d_counts.values()) or 1
+                for _tct, (_tc_sum, _tc_set) in _tc_agg.items():
+                    _type_7d_conc[_tct] = (_tc_sum / _tc_total, len(_tc_set))
+        except Exception:
+            pass  # 预计算失败不阻塞
+
         def _score_chunk(chunk, relevance):
             _hard_suppressed = False  # iter616: final_hard_gate flag
             # ── B13: Lazy Scoring Early Exit — 极低 relevance 跳过全量计算 ────
@@ -2412,6 +2444,11 @@ def main():
                 if chunk.get("project", "") == "global" and project != "global":
                     _dp_factor *= 2.0
                 score *= 1.0 / (1.0 + _r7d_dp * _dp_factor)
+                # iter1004: type_concentration_penalty — 群体垄断额外衰减
+                _ct = chunk.get("chunk_type", "")
+                _tc_info = _type_7d_conc.get(_ct)
+                if _tc_info and _tc_info[0] > 0.40 and _tc_info[1] >= 3:
+                    score *= 0.6  # 高集中度 type 额外 40% 衰减
             # ── iter614: temporal_burst_suppression — 24h 注入频率 cap ─────────
             # 同一 chunk 在 24h 内注入 >=2 次 → suppress（score=0）
             # iter619: 阈值 3→2，同日看 2 次已足够，第 3 次起 suppress
