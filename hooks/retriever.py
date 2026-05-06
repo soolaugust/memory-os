@@ -3175,11 +3175,16 @@ def main():
             # iter826: single_result_pair_inject (hard_deadline path)
             # iter843: pair_dedup_aware — 配对时排除已达 session dedup 阈值的 chunk
             _pair_dedup_thresh_hd = _sysctl("retriever.session_dedup_threshold") or 2
+            # iter960: hd_pair_7d_gate — hard_deadline pair 加 7d ceiling 防止垄断 chunk 逃逸
+            # 根因（数据驱动，2026-05-06）：hard_deadline pair inject 仅检查 session_dedup，
+            #   7d>=4 的 chunk 被 suppress_final_gate 拦截后经 pair 路径重新注入。
+            _hd_pair_7d_ceiling = 4 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
             if len(positive) == 1 and len(final) >= 3:
                 _pair_cands_hd = [(s, c) for s, c in final
                                   if s > 0.10 and s < _min_thresh
                                   and c.get("id") != positive[0][1].get("id")
-                                  and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh_hd]
+                                  and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh_hd
+                                  and _recent_7d_counts.get(c.get("id", ""), 0) < _hd_pair_7d_ceiling]
                 if _pair_cands_hd:
                     _pair_best_hd = max(_pair_cands_hd, key=lambda x: x[0])
                     positive.append(_pair_best_hd)
@@ -3188,7 +3193,8 @@ def main():
                     _imp_pairs_hd = [(float(c.get("importance", 0) or 0), c) for _, c in final
                                      if c.get("id") != positive[0][1].get("id")
                                      and (c.get("access_count", 0) or 0) < 30
-                                     and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh_hd]
+                                     and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh_hd
+                                     and _recent_7d_counts.get(c.get("id", ""), 0) < _hd_pair_7d_ceiling]
                     if _imp_pairs_hd:
                         _imp_best_hd = max(_imp_pairs_hd, key=lambda x: x[0])
                         # iter941: imp_pair_top1_gate (hard_deadline path)
@@ -4845,7 +4851,10 @@ def main():
                 # iter947: pair_7d_tighten — 对齐 suppress_final_gate 堵 pair 逃逸
                 # 数据驱动（2026-05-06）：7d=4 chunk 中 6/13 全部经 pair 路径逃逸（single=0, pair=4）
                 #   iter946 将 pair 放宽到 5 导致 suppress_final_gate(3) 失效。回退对齐 daemon。
-                _p7d_lim = 5 if _sf663_tiny_db else (4 if score >= 0.5 else 3) if _sf663_small_db else (3 if score >= 0.5 else 3)  # iter952: pair 6→5 对齐 final_gate(4)
+                # iter960: pair_7d_align_final_gate_v2 — tiny_db 5→4 堵 pair 逃逸
+                # 根因（数据驱动，2026-05-06）：7d=4 chunk 被 suppress_final_gate(4) 拦截后
+                #   经 pair 路径逃逸（pair lim=5 > final_gate=4）。对齐消除 1-gap 逃逸窗口。
+                _p7d_lim = 4 if _sf663_tiny_db else (4 if score >= 0.5 else 3) if _sf663_small_db else (3 if score >= 0.5 else 3)
                 return _p24 < _p24_lim and _p7d < _p7d_lim
             except NameError:
                 return True  # suppress_final_gate 未执行（try 失败），不额外限制

@@ -4861,7 +4861,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 _p7d = _rt663d_7d.get(cid, 0)
                 _p24_lim = 3 if _sf663d_tiny_db else (3 if score >= 0.5 else 2) if _sf663d_small_db else (3 if score >= 0.5 else 2)
                 # iter936: pair_7d_align_final_gate — 4/6/5/5→3/4/3/3 对齐 suppress_final_gate
-                _p7d_lim = 5 if _sf663d_tiny_db else (4 if score >= 0.5 else 3) if _sf663d_small_db else (3 if score >= 0.5 else 3)  # iter952: pair 6→5
+                # iter960: pair_7d_align_final_gate_v2 — tiny_db 5→4 堵 pair 逃逸
+                _p7d_lim = 4 if _sf663d_tiny_db else (4 if score >= 0.5 else 3) if _sf663d_small_db else (3 if score >= 0.5 else 3)
                 return _p24 < _p24_lim and _p7d < _p7d_lim
             except NameError:
                 return True
