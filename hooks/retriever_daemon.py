@@ -5672,13 +5672,16 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 #   dmesg extra.top_k_ids（来自 _accessed_ids）始终正确（5 个 ID），
                 #   但 _top_k_data 偶发只有 1 条。tuple freeze（iter857）防止 mutation。
                 # 修复：用 _accessed_ids（已证明可靠）作为 ground truth 校验。
-                # iter907: trace_ids_ground_truth_only — 无条件用 _accessed_ids 构建
-                # 根因（数据驱动，2026-05-05）：10% trace top_k_json='[]' 尽管 _accessed_ids
-                #   正确（dmesg extra.top_k_ids 始终有 3-6 个 ID）。_top_k_data tuple
-                #   在闭包序列化时偶发丢失内容（根因未定，疑 generator/GC 竞争）。
-                #   iter857 的长度比对在 _tkd_len==_aid_len 时不触发 rebuild。
-                # 修复：无条件用 _accessed_ids 重建，消除对 _top_k_data 序列化可靠性的依赖。
-                _effective_top_k = [{"id": cid} for cid in _accessed_ids] if _accessed_ids else _top_k_data
+                # iter907: trace_ids_ground_truth_only — _accessed_ids 为 ground truth
+                # iter1040: trace_score_restore — 恢复 score/summary 可观测性
+                # 根因（数据驱动，2026-05-07）：iter907 无条件丢弃 _top_k_data 中的
+                #   score/summary/chunk_type → 所有 trace 退化为 {"id":...} → 注入质量不可观测。
+                # 修复：优先用 _top_k_data（tuple 不可变，iter857 已保证）；仅当长度不匹配
+                #   或为空时退化为 id-only。_accessed_ids 仍为 ground truth 校验 ID 集合。
+                if _top_k_data and len(_top_k_data) == len(_accessed_ids):
+                    _effective_top_k = list(_top_k_data)
+                else:
+                    _effective_top_k = [{"id": cid} for cid in _accessed_ids] if _accessed_ids else list(_top_k_data or ())
                 # iter721: trace_injected_fix — 用 _top_k_len 决定 injected 标志
                 # 数据驱动（2026-05-04）：dmesg 确认 daemon 注入了 N chunk（_top_k_len>0），
                 #   但闭包捕获的 _top_k_data/_accessed_ids 偶发为空（根因未确定）。
