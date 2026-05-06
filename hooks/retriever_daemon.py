@@ -3713,8 +3713,15 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 if _recent_6h_counts.get(_cid, 0) >= 2:
                     score = 0.0
                 # iter810: tiny_db_24h_relax — 小库统一阈值
-                elif _recent_24h_counts.get(_cid, 0) >= (3 if _s672_tiny else (3 if score >= 0.5 else 2) if _s672_small else (3 if score >= 0.5 else 2)):
-                    score = 0.0
+                # iter1019: saturated_24h_tighten — ac>=7 chunk 24h 阈值 -1（sync retriever.py）
+                else:
+                    _24h_base_d = 3 if _s672_tiny else (3 if score >= 0.5 else 2) if _s672_small else (3 if score >= 0.5 else 2)
+                    if _ac >= 10:
+                        _24h_base_d = max(1, _24h_base_d - 2)
+                    elif _ac >= 7:
+                        _24h_base_d = max(1, _24h_base_d - 1)
+                    if _recent_24h_counts.get(_cid, 0) >= _24h_base_d:
+                        score = 0.0
                 # iter854: tiny_db_7d_relax_v2 — 阈值 5→7（sync retriever.py）
                 # iter882: 7d_tighten_monopoly — tiny_db 5→3, small_db 5/4→4/3
                 #   数据驱动（2026-05-05）：23 chunk DB 中 top chunk inj7d=6，
@@ -3819,8 +3826,16 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 if _recent_6h_counts.get(_cid, 0) >= 2:
                     score = 0.0
                 # iter810: tiny_db_24h_relax — sync
-                elif _recent_24h_counts.get(_cid, 0) >= (3 if _s672d_tiny else (3 if score >= 0.5 else 2) if _s672d_small else (3 if score >= 0.5 else 2)):
-                    score = 0.0
+                # iter1019: saturated_24h_tighten — sync retriever.py
+                else:
+                    _24h_base_d2 = 3 if _s672d_tiny else (3 if score >= 0.5 else 2) if _s672d_small else (3 if score >= 0.5 else 2)
+                    _d2_ac = (chunk.get("access_count", 0) or 0)
+                    if _d2_ac >= 10:
+                        _24h_base_d2 = max(1, _24h_base_d2 - 2)
+                    elif _d2_ac >= 7:
+                        _24h_base_d2 = max(1, _24h_base_d2 - 1)
+                    if _recent_24h_counts.get(_cid, 0) >= _24h_base_d2:
+                        score = 0.0
                 # iter854: tiny_db_7d_relax_v2 — 阈值 5→7（sync retriever.py）
                 # iter882: 7d_tighten_monopoly — sync FTS path
                 # iter971: tiny 4→3 去垄断（sync suppress_final_gate）
@@ -4895,9 +4910,18 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 elif _lac >= 7:
                     return max(2, _t - 1)
                 return _t
+            # iter1019: saturated_24h_tighten — sync suppress_final_gate
+            def _d1019_24h_thresh(s, c):
+                _b = 3 if _fg887d_tiny else (3 if s >= 0.5 else 2) if _fg887d_small else (3 if s >= 0.5 else 2)
+                _a = c[_CI_AC] or 0
+                if _a >= 10:
+                    return max(1, _b - 2)
+                elif _a >= 7:
+                    return max(1, _b - 1)
+                return _b
             top_k = [(s, c) for s, c in top_k
                      if _recent_6h_counts.get(c[_CI_ID], 0) < 2
-                     and _recent_24h_counts.get(c[_CI_ID], 0) < (3 if _fg887d_tiny else (3 if s >= 0.5 else 2) if _fg887d_small else (3 if s >= 0.5 else 2))
+                     and _recent_24h_counts.get(c[_CI_ID], 0) < _d1019_24h_thresh(s, c)
                      # iter905: cross_project_suppress_tighten — 跨项目 7d -2
                      and _recent_7d_counts.get(c[_CI_ID], 0) < _d887_7d_thresh(s, c)]
             if len(top_k) < _pre887d:

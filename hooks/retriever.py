@@ -2515,7 +2515,17 @@ def main():
                 # 根因（数据驱动，2026-05-05）：36-chunk 库 top6 chunk 各 7d 注入 4-6 次，
                 #   24h 阈值=4 导致同一 chunk 一天可注入 3 次仍不 suppress。
                 #   daemon 已用阈值=3（iter810），retriever.py 滞后。同步消除不一致。
-                elif _r24_cnt >= (3 if _tiny_db else (3 if score >= 0.5 else 2) if _small_db else (3 if score >= 0.5 else 2)):
+                # iter1019: saturated_24h_tighten — ac>=7 chunk 24h 阈值 -1
+                # 根因（数据驱动，2026-05-07）：86-chunk 库 15 个高 ac chunk 占 7d 注入 103%。
+                #   ac>=7 表明 agent 已多次内化，24h 阈值=3 允许同一 chunk 日注入 2 次仍不 suppress。
+                #   收紧：ac>=7 阈值 -1（3→2），ac>=10 阈值 -1 再 -1 = max(1, base-2)。
+                _sat_ac = _acc if _acc is not None else (chunk.get("access_count", 0) or 0)
+                _24h_base = 3 if _tiny_db else (3 if score >= 0.5 else 2) if _small_db else (3 if score >= 0.5 else 2)
+                if _sat_ac >= 10:
+                    _24h_base = max(1, _24h_base - 2)
+                elif _sat_ac >= 7:
+                    _24h_base = max(1, _24h_base - 1)
+                if _r24_cnt >= _24h_base:
                     score = 0.0
                     _hard_suppressed = True  # iter616
             # ── iter618: 7d_rolling_suppress — 长期慢性垄断 suppress ────────
@@ -3420,9 +3430,18 @@ def main():
                     elif _l_ac >= 7:
                         return max(2, _t - 1)
                     return _t
+                # iter1019: saturated_24h_tighten — sync suppress_final_gate
+                def _hd1019_24h_thresh(s, c):
+                    _b = 3 if _hd_tiny_db else (3 if s >= 0.5 else 2) if _hd_small_db else (3 if s >= 0.5 else 2)
+                    _a = c.get("access_count", 0) or 0
+                    if _a >= 10:
+                        return max(1, _b - 2)
+                    elif _a >= 7:
+                        return max(1, _b - 1)
+                    return _b
                 top_k = [(s, c) for s, c in top_k
                          if _recent_6h_counts.get(c["id"], 0) < 2  # iter865: 6h_tighten_tiny — 统一阈值
-                         and _recent_24h_counts.get(c["id"], 0) < (3 if _hd_tiny_db else (3 if s >= 0.5 else 2) if _hd_small_db else (3 if s >= 0.5 else 2))
+                         and _recent_24h_counts.get(c["id"], 0) < _hd1019_24h_thresh(s, c)
                          # iter904: 7d_rebalance_tiny — tiny_db 7d 2→4
                          # iter905: cross_project_suppress_tighten — 跨项目 7d -2
                          and _recent_7d_counts.get(c["id"], 0) < _hd905_7d_thresh(s, c)]
