@@ -1183,7 +1183,8 @@ def _is_quality_chunk(summary: str) -> bool:
     if re.match(r'^[-=*`#>]{2,}$', s):
         return False
     # iter753: 移除 '向' — "向 maintainer 报告" 是完整句（动词用法），非截断碎片
-    if re.match(r'^[了的地得把被让从以在对和与或]', s):
+    # iter1036: 移除 '被'/'让' — "被现有...推荐"是被动句/"让 X 有机会"是使役句，非截断碎片
+    if re.match(r'^[了的地得把从以在对和与或]', s):
         return False
     # iter755: 单字母开头截断碎片拦截
     # 数据驱动：2b704212 "k 时会提升 importance" — "look" 被截断只剩 "k"
