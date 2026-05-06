@@ -4202,6 +4202,13 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 top_k_data = [{"id": c[_CI_ID], "summary": c[_CI_SUM], "score": s,
                                "chunk_type": c[_CI_CT] or ""} for s, c in top_k]  # iter235
                 if current_hash != last_hash:  # iter201: reuse pre-read last_hash
+                    # iter975: output_monopoly_filter (hard_deadline path)
+                    if len(top_k) > 1 and _db_chunk_count > 5:
+                        _omf_ceil_hd = 3 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
+                        _omf_filt_hd = [(s, c) for s, c in top_k
+                                        if _recent_7d_counts.get(c[_CI_ID], 0) < _omf_ceil_hd]
+                        if _omf_filt_hd:
+                            top_k = _omf_filt_hd
                     # iter238: _TYPE_PREFIX hoisted to module level (was local dict, 0.356us → 0.128us)
                     inject_lines = ["【相关历史记录（BM25 召回）】"]
                     constraint_items, normal_items = [], []
@@ -5206,6 +5213,20 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                               f"iter910_score_floor_gate: all below floor, kept best "
                               f"s={_sf_best[0]:.3f} id={_sf_best[1][_CI_ID][:12]}",
                               session_id=session_id, project=project)
+
+        # ── iter975: output_monopoly_filter — 最终输出前去垄断（single control point）──
+        # 根因（数据驱动，2026-05-06）：suppress 分散在十余处，垄断 chunk 总能逃逸。
+        # 修复：inject_lines 构建前最终过滤——7d >= ceiling 移除，至少保留 1 条。
+        if top_k and len(top_k) > 1 and _db_chunk_count > 5:
+            _omf_ceiling = 3 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
+            _omf_filtered = [(s, c) for s, c in top_k
+                             if _recent_7d_counts.get(c[_CI_ID], 0) < _omf_ceiling]
+            if _omf_filtered:
+                if len(top_k) != len(_omf_filtered):
+                    _deferred.log(DMESG_DEBUG, "retriever_daemon",
+                                  f"iter975_output_monopoly_filter: {len(top_k)}->{len(_omf_filtered)}",
+                                  session_id=session_id, project=project)
+                top_k = _omf_filtered
 
         # ── Build context text ──
         # iter238: _TYPE_PREFIX now module-level constant (see definition near _CONSTRAINT_RE)

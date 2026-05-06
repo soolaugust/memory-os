@@ -3423,6 +3423,13 @@ def main():
                 current_hash = hashlib.md5("|".join(top_k_ids).encode()).hexdigest()[:8]
                 top_k_data = [{"id": c["id"], "summary": c["summary"], "score": round(s, 4), "chunk_type": c.get("chunk_type", "")} for s, c in top_k]
                 if current_hash != _read_hash():
+                    # iter975: output_monopoly_filter (hard_deadline path)
+                    if len(top_k) > 1 and not _micro_db:
+                        _omf_ceil_hd = 3 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
+                        _omf_filt_hd = [(s, c) for s, c in top_k
+                                        if _recent_7d_counts.get(c.get("id", ""), 0) < _omf_ceil_hd]
+                        if _omf_filt_hd:
+                            top_k = _omf_filt_hd
                     _TYPE_PREFIX = {"decision": "[决策]", "excluded_path": "[排除]",
                                     "reasoning_chain": "[推理]", "conversation_summary": "[摘要]",
                                     "task_state": "", "design_constraint": "⚠️ [约束]"}
@@ -5698,6 +5705,23 @@ def main():
                                       session_id=session_id, project=project)
             except Exception:
                 pass  # serial position 失败不阻塞主流程
+
+        # ── iter975: output_monopoly_filter — 最终输出前去垄断（single control point）──
+        # 根因（数据驱动，2026-05-06）：suppress 分散在 _score_chunk/final_gate/fallback/pair
+        #   十余处，每处阈值不同，垄断 chunk 总能通过某条路径逃逸。
+        #   实测：top chunk 占 19.4% 注入（7d=7），前5占 74.2%。
+        # 修复：在 inject_lines 构建前做最终过滤——7d >= ceiling 的 chunk 移除，
+        #   但至少保留 1 条（防空召回）。这是所有逃逸路径的唯一汇聚点。
+        if top_k and len(top_k) > 1 and not _micro_db:
+            _omf_ceiling = 3 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
+            _omf_filtered = [(s, c) for s, c in top_k
+                             if _recent_7d_counts.get(c.get("id", ""), 0) < _omf_ceiling]
+            if _omf_filtered:
+                if len(top_k) != len(_omf_filtered):
+                    _deferred.log(DMESG_DEBUG, "retriever",
+                                  f"iter975_output_monopoly_filter: {len(top_k)}->{len(_omf_filtered)}",
+                                  session_id=session_id, project=project)
+                top_k = _omf_filtered
 
         constraint_items = []
         normal_items = []
