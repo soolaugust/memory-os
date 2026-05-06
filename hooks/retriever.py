@@ -4902,10 +4902,15 @@ def main():
                 #   suppress/gate 清空，iter792 依赖 in-memory final（也被清空）无法触发。
                 # 修复：绕过 suppress，直接 DB 查最高 importance + 最低 access_count 的 chunk。
                 #   空召回=系统零价值；注入 1 条有用知识远优于零注入。
+                # iter1037: ultimate_fallback_global — 扩展查询范围到 global chunk
+                # 根因（数据驱动，2026-05-07）：28 次空召回中 gitroot:ac59b4b36b2b(0 chunk)
+                #   和 abspath:51963532bc1b(1 chunk 被 suppress) 无法兜底，因只查 project=?。
+                #   constraint_fallback 已查 global 但限 design_constraint 类型。
+                # 修复：IN (?, 'global') 扩展搜索范围，优先本项目，global 作兜底。
                 try:
                     _dbuf_row = conn.execute(
                         "SELECT id, summary, content, chunk_type, importance "
-                        "FROM memory_chunks WHERE project=? AND chunk_state='ACTIVE' "
+                        "FROM memory_chunks WHERE project IN (?, 'global') AND chunk_state='ACTIVE' "
                         "ORDER BY importance DESC, access_count ASC LIMIT 1",
                         (project,)
                     ).fetchone()
