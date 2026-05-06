@@ -1880,8 +1880,10 @@ def main():
                 _rt_24h = {}
                 _rt_6h = {}  # iter813
                 # iter835: suppress_final_gate_project_scope — per-project 计数
-                for (_tk_json, _tk_ts) in _fb_conn.execute(
-                        "SELECT top_k_json, timestamp FROM recall_traces WHERE injected=1 AND project=? AND timestamp>?",
+                # iter957: session_dedup_suppress — 7d count 按 unique session 去重
+                _rt_7d_sessions = {}  # {chunk_id: set(session_ids)}
+                for (_tk_json, _tk_ts, _tk_sid) in _fb_conn.execute(
+                        "SELECT top_k_json, timestamp, session_id FROM recall_traces WHERE injected=1 AND project=? AND timestamp>?",
                         (project, _cut_7d,)).fetchall():
                     if not _tk_json: continue
                     try:
@@ -1892,14 +1894,16 @@ def main():
                     for _it in (_ids if isinstance(_ids, list) else []):
                         _c = _it.get("id","") if isinstance(_it, dict) else (_it if isinstance(_it, str) else "")
                         if _c:
-                            _rt_7d[_c] = _rt_7d.get(_c, 0) + 1
+                            _rt_7d_sessions.setdefault(_c, set()).add(_tk_sid or "")
                             if _is_24h:
                                 _rt_24h[_c] = _rt_24h.get(_c, 0) + 1
                             if _is_6h:
                                 _rt_6h[_c] = _rt_6h.get(_c, 0) + 1  # iter813
-                # merge max: timeline 和 recall_traces 取大值
+                _rt_7d = {k: len(v) for k, v in _rt_7d_sessions.items()}
+                # merge: 7d 用 session-dedup 值覆盖 timeline raw count（更准确）
+                # iter957: timeline 无 session 信息，DB session-dedup 更可靠
                 for _mc, _mv in _rt_7d.items():
-                    _recent_7d_counts[_mc] = max(_recent_7d_counts.get(_mc, 0), _mv)
+                    _recent_7d_counts[_mc] = _mv  # 覆盖而非 max
                 for _mc, _mv in _rt_24h.items():
                     _recent_24h_counts[_mc] = max(_recent_24h_counts.get(_mc, 0), _mv)
                 # iter813: 6h merge
@@ -4696,19 +4700,27 @@ def main():
                 # 根因（数据驱动，2026-05-05）：global chunk 跨多项目被注入时计数累加，
                 #   如 a8f13757 在 2 个项目各注入 1-2 次 → 总计 3 次 → 达到 tiny_db 24h 阈值=3。
                 #   同一 global constraint 在不同项目上下文中有独立价值，不应跨项目累加 suppress。
-                for (_tk663, _ts663) in _sf663_conn.execute(
-                        "SELECT top_k_json, timestamp FROM recall_traces "
+                # iter957: session_dedup_suppress — 7d count 按 unique session 去重
+                # 根因（数据驱动，2026-05-06）：24-chunk 库 14/24=58% 被 7d suppress，
+                #   因为同一 session 多次检索同一 chunk 重复计入 7d count。
+                #   实测：session-dedup 后仅 5/24=20% 被 suppress，空召回率预期降 38%→20%。
+                # 修复：7d count = unique sessions（同 session 多次触发只算 1 次暴露）。
+                #   24h 保留 raw count（短窗口内重复即 burst，仍需 suppress）。
+                _rt663_7d_sessions = {}  # {chunk_id: set(session_ids)}
+                for (_tk663, _ts663, _sid663) in _sf663_conn.execute(
+                        "SELECT top_k_json, timestamp, session_id FROM recall_traces "
                         "WHERE injected=1 AND project=? AND timestamp>?", (project, _cut663_7d,)).fetchall():
                     if not _tk663: continue
                     try:
                         for _it663 in json.loads(_tk663):
                             _c663 = _it663.get("id", "") if isinstance(_it663, dict) else ""
                             if _c663:
-                                _rt663_7d[_c663] = _rt663_7d.get(_c663, 0) + 1
+                                _rt663_7d_sessions.setdefault(_c663, set()).add(_sid663 or "")
                                 if _ts663 and _ts663 > _cut663_24h:
                                     _rt663_24h[_c663] = _rt663_24h.get(_c663, 0) + 1
                     except Exception:
                         continue
+                _rt663_7d = {k: len(v) for k, v in _rt663_7d_sessions.items()}
                 # iter888: global_chunk_cross_project_suppress — global chunk 用全局计数
                 # 根因（数据驱动，2026-05-05）：iter835 per-project 过滤导致 global chunk 逃逸。
                 #   如 feishu-CLI constraint 在 3 个项目各注入 1-2 次 → per-project 计数不触发
@@ -4718,20 +4730,22 @@ def main():
                     "SELECT id FROM memory_chunks WHERE project='global'").fetchall())
                 if _g888_ids:
                     _g888_24h_c = {}
-                    _g888_7d_c = {}
-                    for (_tk888, _ts888) in _sf663_conn.execute(
-                            "SELECT top_k_json, timestamp FROM recall_traces "
+                    _g888_7d_c = {}  # iter957: session-dedup for global chunks too
+                    _g888_7d_sessions = {}
+                    for (_tk888, _ts888, _sid888) in _sf663_conn.execute(
+                            "SELECT top_k_json, timestamp, session_id FROM recall_traces "
                             "WHERE injected=1 AND timestamp>?", (_cut663_7d,)).fetchall():
                         if not _tk888: continue
                         try:
                             for _it888 in json.loads(_tk888):
                                 _c888id = _it888.get("id", "") if isinstance(_it888, dict) else ""
                                 if _c888id in _g888_ids:
-                                    _g888_7d_c[_c888id] = _g888_7d_c.get(_c888id, 0) + 1
+                                    _g888_7d_sessions.setdefault(_c888id, set()).add(_sid888 or "")
                                     if _ts888 and _ts888 > _cut663_24h:
                                         _g888_24h_c[_c888id] = _g888_24h_c.get(_c888id, 0) + 1
                         except Exception:
                             continue
+                    _g888_7d_c = {k: len(v) for k, v in _g888_7d_sessions.items()}
                     for _gid888 in _g888_ids:
                         _rt663_24h[_gid888] = max(_rt663_24h.get(_gid888, 0), _g888_24h_c.get(_gid888, 0))
                         _rt663_7d[_gid888] = max(_rt663_7d.get(_gid888, 0), _g888_7d_c.get(_gid888, 0))
