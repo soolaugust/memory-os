@@ -4518,7 +4518,15 @@ def main():
                 # iter903: constraint_7d_tighten — tiny 3→2（与 24h 联动）
                 #   7d=3 允许不相关 constraint 一周注入 2 次，降到 2 限制为 1 次/周。
                 # iter949: tiny_db_7d_relax — constraint 通道 2→3
-                if _recent_7d_counts.get(_cid, 0) >= ((3 if _cst_tiny_db else 4) if _cst_small_db else 3):
+                # iter1028: constraint_global_saturated_7d — global ac>=4 constraint 7d 阈值 -1
+                # 根因（数据驱动，2026-05-07）：feishu CLI(ac=4,7d=4)、git commit(ac=9,7d=4)
+                #   经 constraint 通道注入时 7d 阈值=4(small_db)，主路径 iter1006 已收紧(-2)
+                #   但 constraint 通道未同步，形成逃逸。ac>=4 的 global 约束用户已内化。
+                # 修复：global ac>=4 → 7d 阈值 -1（constraint 通道比主路径保守，仅 -1）。
+                _cst_7d_thresh = (3 if _cst_tiny_db else 4) if _cst_small_db else 3
+                if c.get("project") == "global" and _ac_abs >= 4:
+                    _cst_7d_thresh = max(2, _cst_7d_thresh - 1)
+                if _recent_7d_counts.get(_cid, 0) >= _cst_7d_thresh:
                     return False
                 # iter608: session-level constraint dedup — 早于全局 cap 拦截
                 _sinj = _session_injection_counts.get(_cid, 0)

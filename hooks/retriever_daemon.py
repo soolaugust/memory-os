@@ -4607,7 +4607,12 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 _cst_tiny = _db_chunk_count < 50
                 if _recent_24h_counts.get(_cid, 0) >= 2:
                     return False
-                if _recent_7d_counts.get(_cid, 0) >= (4 if _cst_tiny else 3):
+                # iter1028: constraint_global_saturated_7d — sync retriever.py
+                # global ac>=4 constraint 7d 阈值 -1，堵 constraint 通道逃逸
+                _cst_7d_thresh = 4 if _cst_tiny else 3
+                if c[_CI_CP] == "global" and (c[_CI_AC] or 0) >= 4:
+                    _cst_7d_thresh = max(2, _cst_7d_thresh - 1)
+                if _recent_7d_counts.get(_cid, 0) >= _cst_7d_thresh:
                     return False
                 # iter608: session-level constraint dedup
                 if _d_session_inj_counts.get(_cid, 0) >= _d_session_cap:
