@@ -2558,6 +2558,17 @@ def main():
                 if chunk.get("project", "") == "global":
                     _g_ac = _acc if _acc is not None else (chunk.get("access_count", 0) or 0)
                     _suppress_7d_thresh = max(2, _suppress_7d_thresh - (2 if _g_ac >= 4 else 1))
+                # iter1009: local_saturated_suppress — 本项目高 ac chunk 7d 阈值收紧
+                # 根因（数据驱动，2026-05-06）：25-chunk 库中 PE分析(ac=7,7d=6)、
+                #   Android诊断(ac=10,7d=5) 等高 ac 本项目 chunk 7d 阈值=5 仍逃逸。
+                #   ac>=7 表明 agent 已充分内化，继续注入浪费 context window。
+                # 修复：ac>=10 → -2，ac>=7 → -1（仅非 global 本项目 chunk）。
+                elif chunk.get("project", "") != "global":
+                    _l_ac = _acc if _acc is not None else (chunk.get("access_count", 0) or 0)
+                    if _l_ac >= 10:
+                        _suppress_7d_thresh = max(2, _suppress_7d_thresh - 2)
+                    elif _l_ac >= 7:
+                        _suppress_7d_thresh = max(2, _suppress_7d_thresh - 1)
                 if _r7d_cnt >= _suppress_7d_thresh:
                     score = 0.0
                     _hard_suppressed = True
@@ -3402,6 +3413,12 @@ def main():
                     elif _is_global:
                         _g_ac = c.get("access_count", 0) or 0
                         return max(2, _t - (2 if _g_ac >= 4 else 1))
+                    # iter1009: local_saturated_suppress — sync hard_deadline
+                    _l_ac = c.get("access_count", 0) or 0
+                    if _l_ac >= 10:
+                        return max(2, _t - 2)
+                    elif _l_ac >= 7:
+                        return max(2, _t - 1)
                     return _t
                 top_k = [(s, c) for s, c in top_k
                          if _recent_6h_counts.get(c["id"], 0) < 2  # iter865: 6h_tighten_tiny — 统一阈值
@@ -3451,6 +3468,12 @@ def main():
                 def _fb_hd_chunk_ceiling(c):
                     if c.get("project", "") == "global" and (c.get("access_count", 0) or 0) >= 4:
                         return max(2, _fb_hd_ceiling - 2)
+                    # iter1009: local_saturated_suppress — fallback ceiling sync
+                    _lac = c.get("access_count", 0) or 0
+                    if _lac >= 10:
+                        return max(2, _fb_hd_ceiling - 2)
+                    elif _lac >= 7:
+                        return max(2, _fb_hd_ceiling - 1)
                     return _fb_hd_ceiling
                 _fb_hd_cap = [(s, c) for s, c in _pre_suppress_top_k_hd
                               if _recent_7d_counts.get(c.get("id", ""), 0) < _fb_hd_chunk_ceiling(c)
@@ -3496,6 +3519,12 @@ def main():
                 def _pebf_chunk_ceiling_hd(c):
                     if c.get("project", "") == "global" and (c.get("access_count", 0) or 0) >= 4:
                         return max(2, _pebf_ceiling_hd - 2)
+                    # iter1009: local_saturated_suppress — iter677 hd ceiling sync
+                    _lac = c.get("access_count", 0) or 0
+                    if _lac >= 10:
+                        return max(2, _pebf_ceiling_hd - 2)
+                    elif _lac >= 7:
+                        return max(2, _pebf_ceiling_hd - 1)
                     return _pebf_ceiling_hd
                 _pebf_cands_hd = [(s, c) for s, c in final
                                   if _recent_7d_counts.get(c.get("id", ""), 0) < _pebf_chunk_ceiling_hd(c)
@@ -4620,8 +4649,18 @@ def main():
             #   与 hard_deadline 路径对齐。排除 7d >= ceiling 后取最佳。
             if not top_k and final:
                 _pebf_ceiling = 4 if _db_chunk_count < 50 else (5 if _db_chunk_count < 100 else 5)  # iter952: sync 5→4
+                # iter1009: local_saturated_suppress — FULL iter677 ceiling sync
+                def _pebf_chunk_ceil(c):
+                    _lac = c.get("access_count", 0) or 0
+                    if c.get("project", "") == "global" and _lac >= 4:
+                        return max(2, _pebf_ceiling - 2)
+                    if _lac >= 10:
+                        return max(2, _pebf_ceiling - 2)
+                    elif _lac >= 7:
+                        return max(2, _pebf_ceiling - 1)
+                    return _pebf_ceiling
                 _pebf_cands = [(s, c) for s, c in final
-                               if _recent_7d_counts.get(c.get("id", ""), 0) < _pebf_ceiling
+                               if _recent_7d_counts.get(c.get("id", ""), 0) < _pebf_chunk_ceil(c)
                                and s >= 0.20]
                 if _pebf_cands:
                     _pebf_best = _pebf_cands[0]  # final 已按 score desc 排序
@@ -4928,6 +4967,12 @@ def main():
                     elif _is_global:
                         _g_ac = c.get("access_count", 0) or 0
                         return max(2, _t - (2 if _g_ac >= 4 else 1))
+                    # iter1009: local_saturated_suppress — sync suppress_final_gate
+                    _l_ac = c.get("access_count", 0) or 0
+                    if _l_ac >= 10:
+                        return max(2, _t - 2)
+                    elif _l_ac >= 7:
+                        return max(2, _t - 1)
                     return _t
                 # iter968: micro_db_final_gate_bypass — <=5 自有 chunk 库跳过 final_gate
                 # 根因（数据驱动，2026-05-06）：git:78dc99a5695f（2 自有 chunk）空注入率 86%（6/7）。
@@ -4980,6 +5025,12 @@ def main():
                 elif _is_global:
                     _g_ac = c.get("access_count", 0) or 0
                     return max(2, _t - (2 if _g_ac >= 4 else 1))
+                # iter1009: local_saturated_suppress — sync closure_fallback
+                _l_ac = c.get("access_count", 0) or 0
+                if _l_ac >= 10:
+                    return max(2, _t - 2)
+                elif _l_ac >= 7:
+                    return max(2, _t - 1)
                 return _t
             top_k = [(s, c) for s, c in top_k
                      if _recent_6h_counts.get(c["id"], 0) < 2
@@ -5130,6 +5181,12 @@ def main():
                 def _fb_chunk_ceiling(c):
                     if c.get("project", "") == "global" and (c.get("access_count", 0) or 0) >= 4:
                         return max(2, _fb_ceiling - 2)
+                    # iter1009: local_saturated_suppress — FULL fallback ceiling sync
+                    _lac = c.get("access_count", 0) or 0
+                    if _lac >= 10:
+                        return max(2, _fb_ceiling - 2)
+                    elif _lac >= 7:
+                        return max(2, _fb_ceiling - 1)
                     return _fb_ceiling
                 _fb_cap = [(s, c) for s, c in _pre_suppress_top_k
                            if _fb_7d.get(c.get("id", ""), 0) < _fb_chunk_ceiling(c)
