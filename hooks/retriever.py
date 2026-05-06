@@ -3424,6 +3424,7 @@ def main():
                 top_k_data = [{"id": c["id"], "summary": c["summary"], "score": round(s, 4), "chunk_type": c.get("chunk_type", "")} for s, c in top_k]
                 if current_hash != _read_hash():
                     # iter975: output_monopoly_filter (hard_deadline path)
+                    # iter977: hard_deadline 无 _rt663_7d（无 DB 查询预算），用闭包 _recent_7d_counts
                     if len(top_k) > 1 and not _micro_db:
                         _omf_ceil_hd = 3 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
                         _omf_filt_hd = [(s, c) for s, c in top_k
@@ -5712,10 +5713,13 @@ def main():
         #   实测：top chunk 占 19.4% 注入（7d=7），前5占 74.2%。
         # 修复：在 inject_lines 构建前做最终过滤——7d >= ceiling 的 chunk 移除，
         #   但至少保留 1 条（防空召回）。这是所有逃逸路径的唯一汇聚点。
+        # iter977: omf_realtime_source — 优先用 _rt663_7d（实时 DB + session-dedup），
+        #   解决闭包快照 _recent_7d_counts 在 session 内不更新 + 无 session-dedup 的问题。
         if top_k and len(top_k) > 1 and not _micro_db:
+            _omf_7d_src = _rt663_7d if '_rt663_7d' in dir() and _rt663_7d else _recent_7d_counts
             _omf_ceiling = 3 if _db_chunk_count < 50 else (4 if _db_chunk_count < 100 else 5)
             _omf_filtered = [(s, c) for s, c in top_k
-                             if _recent_7d_counts.get(c.get("id", ""), 0) < _omf_ceiling]
+                             if _omf_7d_src.get(c.get("id", ""), 0) < _omf_ceiling]
             if _omf_filtered:
                 if len(top_k) != len(_omf_filtered):
                     _deferred.log(DMESG_DEBUG, "retriever",
