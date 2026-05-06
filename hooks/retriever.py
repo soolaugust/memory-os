@@ -5090,7 +5090,11 @@ def main():
                 # 根因（数据驱动，2026-05-06）：tiny_db ceiling=3 比 suppress_final_gate(4) 更严格，
                 #   导致主门禁放过的 7d=3 chunk 被 fallback 排除 → 21 次/7d 空召回（41%）。
                 # 修复：ceiling 对齐 final_gate（tiny 3→4），fallback 不应比主门禁更紧。
-                _ult_ceiling = 4 if _db_chunk_count < 50 else (5 if _db_chunk_count < 100 else 5)
+                # iter1001: ult_ceiling_align_7d_thresh — tiny_db 4→5 对齐 _score_chunk 7d 阈值
+                # 根因（数据驱动，2026-05-06）：26-chunk 库 _suppress_7d_thresh=5（iter1000），
+                #   但 ult_ceiling=4 排除 7d=4 的 chunk → fallback 比主评分更严格 → 空召回。
+                # 修复：ceiling 对齐 _suppress_7d_thresh（tiny 4→5）。
+                _ult_ceiling = 5 if _db_chunk_count < 50 else (5 if _db_chunk_count < 100 else 5)
                 _ult_exclude = [cid for cid, cnt in _fb_7d_ult.items() if cnt >= _ult_ceiling]
                 _ult_placeholders = ','.join(['?'] * len(_ult_exclude)) if _ult_exclude else ''
                 _ult_where = f" AND id NOT IN ({_ult_placeholders})" if _ult_exclude else ''

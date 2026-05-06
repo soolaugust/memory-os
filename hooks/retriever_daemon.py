@@ -5000,7 +5000,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 # 根因（2026-05-06）：原 iter902 无 7d 限制，最高 imp chunk 被反复选中(6次/7d)。
                 # 修复：排除 7d >= ceiling 的 chunk，选低频+高 importance 的。
                 _fb_7d_ult = _rt663d_7d if '_rt663d_7d' in dir() and _rt663d_7d else _recent_7d_counts
-                _ult_ceiling = 4 if _db_chunk_count < 50 else (5 if _db_chunk_count < 100 else 5)  # iter952: sync 5→4
+                # iter1001: ult_ceiling_align_7d_thresh — tiny_db 4→5 对齐 _suppress_7d_thresh
+                _ult_ceiling = 5 if _db_chunk_count < 50 else (5 if _db_chunk_count < 100 else 5)
                 _ult_exclude = [cid for cid, cnt in _fb_7d_ult.items() if cnt >= _ult_ceiling]
                 _ult_placeholders = ','.join(['?'] * len(_ult_exclude)) if _ult_exclude else ''
                 _ult_where = f" AND id NOT IN ({_ult_placeholders})" if _ult_exclude else ''
