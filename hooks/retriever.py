@@ -5668,13 +5668,25 @@ def main():
                 def _lt905_7d_thresh(s, c):
                     _cp = c.get("project", "")
                     _cross = (_cp != project and _cp != "global")
+                    _is_global = (_cp == "global")
                     if _sf758_tiny_db:
                         _t = 3
                     elif _sf758_small_db:
                         _t = 6 if s >= 0.5 else 4  # iter990: 4/3→6/4
                     else:
                         _t = 5 if s >= 0.5 else 3
-                    return max(2, _t - 2) if _cross else _t
+                    if _cross:
+                        return max(2, _t - 2)
+                    elif _is_global:
+                        _g_ac = c.get("access_count", 0) or 0
+                        return max(2, _t - (2 if _g_ac >= 4 else 1))
+                    # iter1021: lite_local_saturated_suppress — sync FULL/hd iter1009
+                    _l_ac = c.get("access_count", 0) or 0
+                    if _l_ac >= 10:
+                        return max(2, _t - 2)
+                    elif _l_ac >= 7:
+                        return max(2, _t - 1)
+                    return _t
                 # iter1002: lite_micro_db_bypass — LITE 路径同步 FULL 的 micro_db bypass(line 4863)
                 # 根因（数据驱动，2026-05-06）：git:78dc99a5695f（2 自有 chunk）LITE 路径 5/6 空召回。
                 #   FULL 路径 iter968 已加 micro_db bypass，但 LITE 路径遗漏 → global chunk 被 7d suppress 全灭。
