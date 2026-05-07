@@ -5547,6 +5547,31 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                               session_id=session_id, project=project)
                 top_k = _tgc_new if _tgc_new else top_k[:1]
 
+        # ── iter1050: diversity_inject_cap — 跨类型总量硬限 ─────────────────
+        _dic_cap = 4 if has_page_fault else 3
+        if top_k and len(top_k) > _dic_cap and not _micro_db:
+            _dic_by_type = {}
+            for _dic_s, _dic_c in top_k:
+                _dic_t = _dic_c.get("chunk_type", "")
+                _dic_by_type.setdefault(_dic_t, []).append((_dic_s, _dic_c))
+            _dic_result = []
+            _dic_used = set()
+            for _dic_t in sorted(_dic_by_type, key=lambda t: _dic_by_type[t][0][0], reverse=True):
+                if len(_dic_result) >= _dic_cap:
+                    break
+                _dic_best = _dic_by_type[_dic_t][0]
+                _dic_result.append(_dic_best)
+                _dic_used.add(_dic_best[1].get("id", ""))
+            if len(_dic_result) < _dic_cap:
+                _dic_rest = [(s, c) for s, c in top_k if c.get("id", "") not in _dic_used]
+                _dic_rest.sort(key=lambda x: x[0], reverse=True)
+                for _dic_r in _dic_rest[:_dic_cap - len(_dic_result)]:
+                    _dic_result.append(_dic_r)
+            _deferred.log(DMESG_DEBUG, "retriever_daemon",
+                          f"iter1050_diversity_inject_cap: {len(top_k)}->{len(_dic_result)}",
+                          session_id=session_id, project=project)
+            top_k = _dic_result
+
         # ── Build context text ──
         # iter238: _TYPE_PREFIX now module-level constant (see definition near _CONSTRAINT_RE)
         # iter238: _conf_tag removed — dead code (inlined at usage site since iter214)
