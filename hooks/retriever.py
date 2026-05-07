@@ -3949,6 +3949,28 @@ def main():
                                         _tgd_np_hd[_hmi] = (_hcid, _hct, _htoks)
                         if _tgd_res_hd and len(_tgd_res_hd) < len(top_k):
                             top_k = _tgd_res_hd
+                    # iter1106: output_cooldown_gate — 最终输出前 timeline 实时 cooldown 兜底
+                    # 根因（数据驱动，2026-05-07）：9a2692fd(ac=10) 经 micro_db bypass + fallback
+                    #   逃逸所有 suppress（7d=3, cooldown=14d 但跨项目 timeline 不可见）。
+                    #   上游 suppress 路径 >10 条，逃逸组合爆炸无法逐一堵。
+                    # 修复：在 print 输出前对 top_k 做最终 timeline cooldown 过滤。
+                    #   ac>=7 且 timeline 最近注入在 cooldown 窗口内 → 移除。
+                    #   这是所有 fallback/pair/escalate 之后的 last line of defense。
+                    if top_k and _injection_timeline and _cutoff_48h:
+                        def _ocg_pass_hd(c):
+                            _oa = c.get("access_count", 0) or 0
+                            if _oa < 7:
+                                return True
+                            _oid = c.get("id", "")
+                            _ots = _injection_timeline.get(_oid)
+                            _olast = max(_ots) if _ots else (c.get("last_accessed", "") if _oa >= 7 else "")
+                            if not _olast:
+                                return True
+                            _ocut = _cutoff_14d if _oa >= 10 else _cutoff_10d
+                            return _olast <= _ocut
+                        _ocg_filtered_hd = [(s, c) for s, c in top_k if _ocg_pass_hd(c)]
+                        if _ocg_filtered_hd:
+                            top_k = _ocg_filtered_hd
                     _TYPE_PREFIX = {"decision": "[决策]", "excluded_path": "[排除]",
                                     "reasoning_chain": "[推理]", "conversation_summary": "[摘要]",
                                     "task_state": "", "design_constraint": "⚠️ [约束]"}
@@ -6774,6 +6796,24 @@ def main():
                           f"iter1050_diversity_inject_cap: {len(top_k)}->{len(_dic_result)}",
                           session_id=session_id, project=project)
             top_k = _dic_result
+
+        # iter1106: output_cooldown_gate — FULL path 最终输出前 timeline 实时 cooldown 兜底
+        # 与 hard_deadline path 对齐：ac>=7 且 timeline 最近注入在 cooldown 窗口内 → 移除。
+        if top_k and _injection_timeline and _cutoff_48h:
+            def _ocg_pass(c):
+                _oa = c.get("access_count", 0) or 0
+                if _oa < 7:
+                    return True
+                _oid = c.get("id", "")
+                _ots = _injection_timeline.get(_oid)
+                _olast = max(_ots) if _ots else (c.get("last_accessed", "") if _oa >= 7 else "")
+                if not _olast:
+                    return True
+                _ocut = _cutoff_14d if _oa >= 10 else _cutoff_10d
+                return _olast <= _ocut
+            _ocg_filtered = [(s, c) for s, c in top_k if _ocg_pass(c)]
+            if _ocg_filtered:
+                top_k = _ocg_filtered
 
         constraint_items = []
         normal_items = []
