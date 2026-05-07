@@ -8,9 +8,9 @@
 
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![SQLite](https://img.shields.io/badge/storage-SQLite%20WAL-lightgrey?logo=sqlite)](https://sqlite.org/)
-[![Tests](https://img.shields.io/badge/tests-44%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-3543%20passing-brightgreen)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Iterations](https://img.shields.io/badge/iterations-374%2B-orange)](#roadmap)
+[![Iterations](https://img.shields.io/badge/iterations-1051%2B-orange)](#roadmap)
 
 [English](./README.md) · [中文](./README.zh.md)
 
@@ -74,7 +74,7 @@ The entire pipeline runs inside **Claude Code hooks**. Zero manual memory manage
 | Cross-session recall | **94.2%** |
 | Knowledge base size | **427 chunks / 8 types** |
 | Hot-path retrieval | **1.74 µs/op** (iter 258, −84.7% from baseline) |
-| Total iterations | **374+** |
+| Total iterations | **1051+** |
 | **Token injection per call** | **~44 tokens** (avg 178 chars) |
 | **Token net ROI per call** | **~+256 tokens** saved (inject 44, save ~300 re-explanation) |
 | FULL→LITE demotion savings (iter 361) | **~62 tokens/repeat** (69.6% reduction on re-injection) |
@@ -147,6 +147,33 @@ Every subsystem maps to a Linux kernel mechanism:
 | Attention focus stack | CPU register file | iter 368 |
 | Soft forgetting | DAMON cold page detection | iter 369 |
 | Uncertainty signal extraction | MMU soft page fault | iter 370 |
+| Conflict detection + chunk coalescing | ext4 fsck + block merge | iter 371–374 |
+| Emotional salience boost | DRD4 dopamine reward signal | iter 376 |
+| Schema spreading activation | Bartlett schema theory | iter 380 |
+| Spacing effect scheduler | Ebbinghaus forgetting curve | iter 383 |
+| Inhibition of return (IOR) | Posner (1980) attention shift | iter 391 |
+| Contextual similarity boost | Context-dependent encoding | iter 394 |
+| Tip-of-the-tongue (TOT) recovery | FTS5 zero-hit edge activation | iter 425 |
+| Serial position effect ordering | Murdock (1962) primacy/recency | iter 427 |
+| Second-chance diversity sampling | Clock page replacement | iter 471 |
+| Token-budget aware summary truncation | Memory pressure tiering | iter 474 |
+| Loader page table dedup (vm_flags) | MMU page table walk | iter 526 |
+| CFS per-chunk bandwidth throttle | CFS bandwidth controller | iter 560 |
+| Graduated bandwidth penalty | TCP congestion window | iter 600–612 |
+| Temporal burst suppression (24h/7d) | Token bucket rate limiter | iter 614–618 |
+| WAL-immune injection timeline | Journal WAL barrier | iter 647–648 |
+| Timeline ghost GC | rmap reverse mapping reclaim | iter 659–660 |
+| Suppress final gate | OOM kill final adjuster | iter 663 |
+| Cross-project recall accounting | cgroups memcg cross-ns stat | iter 566 |
+| Long-query generic classifier bypass | TLB miss fast-path | iter 710 |
+| CJK/EN bilingual signal expansion | iconv charset normalization | iter 722 |
+| Session-first inject guard | exec() address space reset | iter 804 |
+| Short burst suppress (6h window) | Swap token fairness | iter 813 |
+| Diversity counter round-robin | CFS group scheduling | iter 872 |
+| Small-DB diversity boost | NUMA local allocation | iter 898 |
+| Global cross-project suppress | cgroup v2 unified hierarchy | iter 1024 |
+| Project concentration penalty | NUMA topology distance | iter 1029 |
+| Cross-type total hard cap | memcg hard limit | iter 1050 |
 
 ---
 
@@ -255,7 +282,10 @@ Context cap enforced:     ≤ 800 chars (max_context_chars sysctl)
 | Cognitive memory systems — episodes, workspace todos, knowledge graph spreading activation (iter 364–366) | ✅ Done |
 | Temporal proximity, attention focus, soft forgetting, uncertainty signals (iter 367–370) | ✅ Done |
 | Conflict detection, context-aware boost, timeline, chunk coalescing (iter 371–374) | ✅ Done |
-| Distributed multi-agent shared memory — NUMA/RDMA analogy (iter 375+) | 🔜 Planned |
+| Cognitive retrieval models — emotional salience, schema activation, IOR, TOT, spacing effect (iter 375–482) | ✅ Done |
+| Retrieval precision — bandwidth throttle, burst suppress, WAL-immune timeline, ghost GC (iter 526–700) | ✅ Done |
+| Multi-layer diversity suppress — cross-project accounting, project concentration penalty, hard cap (iter 700–1051) | ✅ Done |
+| Distributed multi-agent shared memory — NUMA/RDMA analogy (iter 1052+) | 🔜 Planned |
 
 ---
 
