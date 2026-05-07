@@ -4522,12 +4522,15 @@ def main():
                 _cap = min(_cap, max(2, _pair_7d_ceiling - 2))
             else:
                 # iter1034: pair_context_relax — 本项目 pair cap 放宽
-                # 根因（数据驱动，2026-05-07）：24-chunk 库 10/24 chunk 因 ac>=7/10 → cap=4/3
-                #   被 pair 排除，导致 48% 注入为单条。本项目知识作为配对上下文有价值，
-                #   suppress_final_gate 已控制垄断（score=0 不可能进 pair_candidates s>0.10）。
-                # 修复：本项目 ac>=10 惩罚 -2→-1，ac>=7 移除惩罚。
+                # iter1122: pair_deep_saturated_sync — ac>=7 对齐主路径 suppress thresh=2
+                # 根因（数据驱动，2026-05-08）：imp_pair 从 final 按 importance 选取，
+                #   不检查 score=0（被 suppress），ac=10/7d=4 chunk 经 imp_pair 逃逸注入。
+                #   主路径 iter1051 对 ac>=7 用 thresh=2，pair 路径应对齐。
+                # 修复：ac>=7 → cap=2（与 local_deep_saturated_7d 统一）。
                 _l_ac = c.get("access_count", 0) or 0
-                if _l_ac >= 10:
+                if _l_ac >= 7:
+                    _cap = 2
+                elif _l_ac >= 5:
                     _cap = min(_cap, max(2, _pair_7d_ceiling - 1))
             return _cap
         if len(positive) == 1 and len(final) >= 3:
@@ -4609,10 +4612,15 @@ def main():
                     # iter1011: per-chunk saturated cap for diversity pair
                     # Note: _dr from query WHERE project=?, so always local project
                     # iter1034: pair_context_relax — 同步放宽（同 _pair_7d_cap 本项目逻辑）
+                    # iter1122: diversity_pair_deep_saturated_cap — ac>=7 对齐主路径 thresh=2
+                    # 根因（数据驱动，2026-05-08）：9a2692fd(ac=10,7d=4) 经 diversity_pair
+                    #   以 score=0.05 搭车注入。主路径 iter1051 已对 ac>=7 用 thresh=2 suppress，
+                    #   但 diversity_pair cap=4（仅 ac>=10 时 -1=4），形成逃逸口。
+                    # 修复：ac>=7 → cap=2（与 local_deep_saturated_7d 统一）。
                     _dr_ac = _dr[5]  # access_count from query
                     _dr_cap = _div_7d_ceiling
-                    if _dr_ac >= 10:
-                        _dr_cap = min(_dr_cap, max(2, _div_7d_ceiling - 1))
+                    if _dr_ac >= 7:
+                        _dr_cap = 2
                     if _div_7d.get(_dr_id, 0) >= _dr_cap:
                         continue
                     _tl_24h = sum(1 for t in _injection_timeline.get(_dr_id, [])
