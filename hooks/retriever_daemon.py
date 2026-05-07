@@ -3823,12 +3823,12 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                             _7d_base = max(2, _7d_base - 1)
                     if _recent_7d_counts.get(_cid, 0) >= _7d_base:
                         score = 0.0
-                # iter1071: injection_cooldown — ac>=7 上次注入后 cooldown 内不再注入
+                # iter1072: cooldown_widen — ac>=10 cooldown 72h→7d, ac>=7 48h→5d
                 if score > 0 and (chunk[_CI_AC] or 0) >= 7 and _cutoff_48h and _last_inject_ts:
                     _cd_id = chunk[_CI_ID]
                     _cd_last = _last_inject_ts.get(_cd_id)
                     if _cd_last:
-                        _cd_cut = _cutoff_72h if (chunk[_CI_AC] or 0) >= 10 else _cutoff_48h
+                        _cd_cut = _cutoff_7d if (chunk[_CI_AC] or 0) >= 10 else _cutoff_72h
                         if _cd_last > _cd_cut:
                             score = 0.0
                 # iter989: saturation_widen — ac>=5 渐进衰减，ac>=12 suppress
@@ -3964,11 +3964,11 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                             _7d_base_d2 = max(2, _7d_base_d2 - 1)
                     if _recent_7d_counts.get(_cid, 0) >= _7d_base_d2:
                         score = 0.0
-                # iter1071: injection_cooldown — ac>=7 cooldown suppress (dict path)
+                # iter1072: cooldown_widen — ac>=10 cooldown 72h→7d, ac>=7 48h→5d (dict path)
                 if score > 0 and (chunk.get("access_count", 0) or 0) >= 7 and _cutoff_48h and _last_inject_ts:
                     _cd_last_d2 = _last_inject_ts.get(_cid)
                     if _cd_last_d2:
-                        _cd_cut_d2 = _cutoff_72h if (chunk.get("access_count", 0) or 0) >= 10 else _cutoff_48h
+                        _cd_cut_d2 = _cutoff_7d if (chunk.get("access_count", 0) or 0) >= 10 else _cutoff_72h
                         if _cd_last_d2 > _cd_cut_d2:
                             score = 0.0
                 # iter989: saturation_widen — ac>=5 渐进衰减，ac>=12 suppress

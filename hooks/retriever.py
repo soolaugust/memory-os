@@ -2437,12 +2437,18 @@ def main():
             #   Top13 chunk 占 7d 注入 42%，全是 ac>=4 的高频知识。
             # 修复：基于上次注入时间间隔（而非次数），ac>=10 需间隔 72h，ac>=7 需间隔 48h。
             #   timeline 中无记录或记录过期不影响（仅有记录且在 cooldown 内才 suppress）。
+            # iter1072: cooldown_widen — ac>=10 cooldown 72h→7d, ac>=7 48h→5d
+            # 根因（数据驱动，2026-05-07）：368cb071(ac=10) 5月5日注入后 cooldown 72h 过期，
+            #   5月7日重新注入。7d suppress 需 count>=2 才生效，第 1 次 always 通过。
+            #   高 ac chunk 边际信息=0，7d 内重复注入 = 纯噪声。
+            # 修复：ac>=10 cooldown=7d（timeline GC 保留窗口内），ac>=7 cooldown=5d。
+            #   确保 7d 内最多 1 次注入（首次注入后立即进入 cooldown，不等 suppress count 累积）。
             if not _micro_db and _acc >= 7 and _injection_timeline and _cutoff_48h:
                 _cd_id = chunk.get("id", "")
                 _cd_ts_list = _injection_timeline.get(_cd_id)
                 if _cd_ts_list:
                     _cd_last = max(_cd_ts_list)
-                    _cd_cutoff = _cutoff_72h if _acc >= 10 else _cutoff_48h
+                    _cd_cutoff = _cutoff_7d if _acc >= 10 else _cutoff_72h
                     if _cd_last > _cd_cutoff:
                         score = 0.0
                         _hard_suppressed = True
