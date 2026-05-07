@@ -1168,7 +1168,13 @@ def _is_selfref_noise(summary: str, chunk_type: str) -> bool:
         r'token.?overlap|子串检测|LCS|dedup|去重|碎片拦截|写入门控|拦截率|'
         # iter1127: chunk_type_ref_gate — chunk 类型名/内部字段名作为讨论主题时拦截
         r'causal_chain|reasoning_chain|excluded_path|design_constraint|'
-        r'zero.access|access.count|拒绝写入|一律拒绝|chunk\s*数)',
+        r'zero.access|access.count|拒绝写入|一律拒绝|chunk\s*数|'
+        # iter1141: iteration_report_gate — 迭代器自检/量化报告拦截
+        # 根因（数据驱动，2026-05-08）："量化：zero_access 0%…PA 10/10 HEALTHY…8/8 pass"
+        #   selfref hits=1（仅 zero_access），不足 2 阈值逃逸。
+        #   "PA"/"HEALTHY"/"pass"/"production_assert" 是典型迭代器自检输出。
+        r'PA\s+\d+/\d+|HEALTHY|production.?assert|tests?\s+\d+/\d+\s*pass|'
+        r'extractor\s+tests?|闭包快照|closure.?snapshot)',
         summary
     ))
     if hits < 2:
