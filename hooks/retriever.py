@@ -2449,7 +2449,13 @@ def main():
             #   ac=4-6 的 global constraint 已被用户充分内化但无 cooldown 保护。
             # 修复：global chunk ac>=4 → cooldown 72h；local 保持 ac>=7。
             _cd_acc_floor = 4 if chunk.get("project") == "global" else 7
-            if not _micro_db and _acc >= _cd_acc_floor and _injection_timeline and _cutoff_48h:
+            # iter1075: cooldown_cross_project_sync — micro_db bypass 不保护跨项目 chunk
+            # 根因（数据驱动，2026-05-07）：9a2692fd(ac=10,proj=git:a0ab16e8cafc) 在
+            #   abspath:7e3095aef7a6(cands=5,micro_db) 被注入，cooldown 被 micro_db bypass 跳过。
+            #   与 iter1049 同理：micro_db 保护本项目唯一知识，跨项目 chunk 不应享受此免疫。
+            _cd_chunk_proj = chunk.get("project", "")
+            _cd_is_cross_project = _cd_chunk_proj != "" and _cd_chunk_proj != project
+            if (not _micro_db or _cd_is_cross_project) and _acc >= _cd_acc_floor and _injection_timeline and _cutoff_48h:
                 _cd_id = chunk.get("id", "")
                 _cd_ts_list = _injection_timeline.get(_cd_id)
                 if _cd_ts_list:
@@ -2458,10 +2464,10 @@ def main():
                     if _cd_last > _cd_cutoff:
                         score = 0.0
                         _hard_suppressed = True
-            if not _micro_db and _acc >= 12:
+            if (not _micro_db or _cd_is_cross_project) and _acc >= 12:
                 score = 0.0
                 _hard_suppressed = True
-            elif not _micro_db and _acc >= 5:
+            elif (not _micro_db or _cd_is_cross_project) and _acc >= 5:
                 # iter1070: deep_saturated_floor — ac>=10 衰减加速
                 # 根因（数据驱动，2026-05-07）：ac=10/11 chunk（Android诊断/PE分析/git commit）
                 #   衰减 *0.3/*0.2，FTS base=0.6 时得 0.18/0.12→仍通过 min_thresh(0.10-0.18)。
