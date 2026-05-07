@@ -1826,9 +1826,11 @@ def main():
                 _cutoff_72h = (_now647 - _td647(hours=72)).isoformat()  # iter1071: cooldown
                 _cutoff_5d = (_now647 - _td647(days=5)).isoformat()    # iter1077: cooldown_5d_fix
                 _cutoff_7d = (_now647 - _td647(days=7)).isoformat()
-                _pruned = {}  # GC: 丢弃 >7d 的条目
+                _cutoff_10d = (_now647 - _td647(days=10)).isoformat()  # iter1089: cooldown_escalate
+                _cutoff_14d = (_now647 - _td647(days=14)).isoformat()  # iter1089: cooldown_escalate
+                _pruned = {}  # GC: 丢弃 >14d 的条目 (iter1089: 从 7d 扩展到 14d 支持长 cooldown)
                 for _cid647, _ts_list in _injection_timeline.items():
-                    _kept = [t for t in _ts_list if t > _cutoff_7d]
+                    _kept = [t for t in _ts_list if t > _cutoff_14d]
                     if _kept:
                         _pruned[_cid647] = _kept
                         _recent_7d_counts[_cid647] = len(_kept)
@@ -2484,10 +2486,16 @@ def main():
                     #   天然高于 per-project chunk，48h cooldown 不够——每48h可合法注入1次→7d=3-4次。
                     #   6 个 global chunk 全是 design_constraint(ac=2~9)，agent 已内化，边际信息≈0。
                     # 修复：global chunk cooldown 统一 5d（无论 ac），7d 内最多 1-2 次注入。
+                    # iter1089: cooldown_escalate — 高 ac chunk 延长 cooldown 窗口
+                    # 根因（数据驱动，2026-05-07）：timeline GC=7d + cooldown=7d 完全重合，
+                    #   GC 清除记录后 cooldown 过期→chunk 立即重获注入资格→周期性垄断。
+                    #   Top15 chunk 占 7d 注入 62%，全是 ac>=7 的"已内化"知识。
+                    # 修复：GC 扩展到 14d，cooldown 升级：ac>=10→14d, ac>=7→10d, global→10d。
+                    #   用户体验：高饱和知识从每周重复→每两周最多 1 次，垄断频率降 50%+。
                     if _cd_is_global:
-                        _cd_cutoff = _cutoff_7d if _acc >= 10 else _cutoff_5d
+                        _cd_cutoff = _cutoff_14d if _acc >= 10 else _cutoff_10d
                     else:
-                        _cd_cutoff = _cutoff_7d if _acc >= 10 else (_cutoff_5d if _acc >= 7 else _cutoff_48h)
+                        _cd_cutoff = _cutoff_14d if _acc >= 10 else (_cutoff_10d if _acc >= 7 else _cutoff_48h)
                     if _cd_last > _cd_cutoff:
                         score = 0.0
                         _hard_suppressed = True
