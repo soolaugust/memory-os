@@ -3838,8 +3838,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 if score > 0 and (_cd_is_global_d or (chunk[_CI_AC] or 0) >= _cd_floor_d) and _cutoff_48h and _last_inject_ts:
                     _cd_id = chunk[_CI_ID]
                     _cd_last = _last_inject_ts.get(_cd_id)
-                    # iter1091: cooldown_daemon_sync — db_fallback 同步 retriever.py iter1090
-                    if not _cd_last and (chunk[_CI_AC] or 0) >= 7:
+                    # iter1110: fallback_floor_align — ac>=_cd_floor_d 统一 fallback（原 ac>=7 漏洞）
+                    if not _cd_last and (chunk[_CI_AC] or 0) >= _cd_floor_d:
                         _cd_la_d = chunk[_CI_LA] or ""
                         if _cd_la_d:
                             _cd_last = _cd_la_d
@@ -3993,8 +3993,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 _cd_is_global_d2 = (chunk.get("project", "") == "global")
                 if score > 0 and (_cd_is_global_d2 or (chunk.get("access_count", 0) or 0) >= _cd_floor_d2) and _cutoff_48h and _last_inject_ts:
                     _cd_last_d2 = _last_inject_ts.get(_cid)
-                    # iter1091: cooldown_daemon_sync — db_fallback (dict path)
-                    if not _cd_last_d2 and (chunk.get("access_count", 0) or 0) >= 7:
+                    # iter1110: fallback_floor_align — ac>=_cd_floor_d2 统一 fallback（原 ac>=7 漏洞）
+                    if not _cd_last_d2 and (chunk.get("access_count", 0) or 0) >= _cd_floor_d2:
                         _cd_la_d2 = chunk.get("last_accessed", "")
                         if _cd_la_d2:
                             _cd_last_d2 = _cd_la_d2

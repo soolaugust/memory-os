@@ -1828,9 +1828,10 @@ def main():
                 _cutoff_7d = (_now647 - _td647(days=7)).isoformat()
                 _cutoff_10d = (_now647 - _td647(days=10)).isoformat()  # iter1089: cooldown_escalate
                 _cutoff_14d = (_now647 - _td647(days=14)).isoformat()  # iter1089: cooldown_escalate
-                _pruned = {}  # GC: 丢弃 >14d 的条目 (iter1089: 从 7d 扩展到 14d 支持长 cooldown)
+                _cutoff_21d = (_now647 - _td647(days=21)).isoformat()  # iter1110: gc_window_extend
+                _pruned = {}  # GC: 丢弃 >21d 的条目 (iter1110: 从 14d→21d 消除 GC/cooldown 重合)
                 for _cid647, _ts_list in _injection_timeline.items():
-                    _kept = [t for t in _ts_list if t > _cutoff_14d]
+                    _kept = [t for t in _ts_list if t > _cutoff_21d]
                     if _kept:
                         _pruned[_cid647] = _kept
                         # iter1095: timeline_7d_count_fix — 只计 7d 内条目
@@ -2491,7 +2492,10 @@ def main():
                 _cd_last = None
                 if _cd_ts_list:
                     _cd_last = max(_cd_ts_list)
-                elif _acc >= 7:
+                elif _acc >= _cd_acc_floor:
+                    # iter1110: fallback_floor_align — ac>=4 统一 fallback（原 ac>=7 漏洞）
+                    # 根因：GC 清除 timeline 后 ac=4-6 chunk 无 fallback → cooldown 失效
+                    #   c9accb7b(飞书CLI,ac=4) 每 14d 周期性逃逸。
                     _cd_la = chunk.get("last_accessed", "")
                     if _cd_la:
                         _cd_last = _cd_la
