@@ -1355,7 +1355,12 @@ def _is_quality_chunk(summary: str) -> bool:
                 # 数据驱动（2026-05-07）：2 条 ac=0 噪声：
                 #   "daemon 路径高 ac chunk 重复注入减少 ~30%" — 效果预测
                 #   "缺少 local_saturated_suppress" — 内部逻辑缺失描述
-                "重复注入减少", "saturated_suppress", "daemon 路径高"]
+                "重复注入减少", "saturated_suppress", "daemon 路径高",
+                # iter1100: iterator_metric_residual_gate — 漏网的迭代器度量快照
+                # 数据驱动（2026-05-07）：5 条 ac=0 噪声：
+                #   "活跃 chunk: 79→63" / "session 内重复注入极低" / "跨项目注入 8%"
+                #   逃逸原因："活跃 chunk"(中文) ≠ "active chunks"(英文)；"重复注入"无完整匹配。
+                "活跃 chunk", "重复注入极", "跨项目注入"]
     if any(kw in s for kw in noise_kw):
         return False
     # iter1026: iterator_combo_gate — memory-os 运行时术语组合检测
