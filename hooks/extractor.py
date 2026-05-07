@@ -1469,6 +1469,10 @@ def _is_quality_chunk(summary: str) -> bool:
         #   skipped_same_hash/7d_exclude/fallback escalate/cands= 等内部实现标识。
         'diversity_probe', 'skipped_same_hash', '7d_exclude',
         'fallback escalate', 'cands=', '候选枯竭', '注入率',
+        # iter1137: retriever_fn_name_gate — retriever 内部函数名逃逸 combo gate
+        # 数据驱动（2026-05-08）：2 条 ac=0 噪声含 diversity_pair_from_db/fallback_pair/
+        #   _pre_suppress_top_k 等内部函数名，combo hits=2 未达阈值 3。
+        'diversity_pair', 'fallback_pair', '_pre_suppress', 'positive=0',
     ) if _t in s)
     # iter1114: regex 补充 — iter+4位数字是迭代器自引用标识
     if re.search(r'iter\d{4}', s):
