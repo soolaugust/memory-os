@@ -2817,11 +2817,16 @@ def _write_chunk(chunk_type: str, summary: str, project: str, session_id: str,
         # 根因（数据驱动，2026-05-06）：5 条 zero-access chunk 中 3 条是库内已有 chunk
         #   的子串片段。already_exists/merge_similar 无法捕获子串关系。
         # 修复：新 summary 与已有 chunk summary 存在子串包含关系（≥30字）→ 拒绝写入。
+        # iter1104: cross_type_substring_dedup — 跨 chunk_type 子串去重
+        # 根因（数据驱动，2026-05-07）：12 对重复 chunk 中 5 对 100% token overlap，
+        #   3/5 对因不同 chunk_type（reasoning_chain vs causal_chain）逃逸 iter964。
+        #   extractor 对同一事实常分配不同 type，type 隔离导致子串去重失效。
+        # 修复：查询范围从 chunk_type=? 改为 project 范围（本项目+global），跨 type 去重。
         _s_norm = re.sub(r'\s+', '', summary)
         if len(_s_norm) >= 30:
             _existing_summaries = conn.execute(
-                "SELECT summary FROM memory_chunks WHERE chunk_type=? LIMIT 200",
-                (chunk_type,)
+                "SELECT summary FROM memory_chunks WHERE (project=? OR project='global') LIMIT 200",
+                (project,)
             ).fetchall()
             for (_es,) in _existing_summaries:
                 _es_norm = re.sub(r'\s+', '', _es)
