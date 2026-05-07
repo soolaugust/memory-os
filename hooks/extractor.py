@@ -2412,6 +2412,7 @@ def _vma_validate(summary: str) -> bool:
 
 
 _write_chunk_seen: set = set()  # iter963: in-process dedup — 防止同 batch 重复写入
+_write_chunk_token_sets: list = []  # iter1066: semantic_overlap_gate token 缓存
 
 
 def _write_chunk(chunk_type: str, summary: str, project: str, session_id: str,
@@ -2442,6 +2443,27 @@ def _write_chunk(chunk_type: str, summary: str, project: str, session_id: str,
     if len(_write_chunk_seen) > 500:
         _write_chunk_seen.clear()
     _write_chunk_seen.add(_dedup_key)
+    # iter1066: semantic_overlap_gate — 同 batch 内 token 重叠度 >60% 视为碎片重复
+    # 根因（数据驱动，2026-05-07）：同一 session 对同一教训产生 5-10 条碎片 chunk，
+    #   精确去重无法拦截（"没有沿调用链验证" vs "写回复时没有grep确认"语义相同字符串不同）。
+    #   82 chunk 库中 25 条来自同一事件的碎片化记录，稀释检索精度。
+    # 修复：token-overlap >60%（基于较短方 token 数）跳过，保留最先写入的完整表述。
+    global _write_chunk_token_sets
+    # 中英混合 tokenize：英文按 word，中文按 bigram（单字太碎、长串不切分则太粗）
+    _words1066 = _re963.findall(r'[a-z_][a-z0-9_]*', summary.lower())
+    _cjk1066 = _re963.findall(r'[\u4e00-\u9fff]', summary)
+    _bigrams1066 = [_cjk1066[i] + _cjk1066[i+1] for i in range(len(_cjk1066)-1)] if len(_cjk1066) >= 2 else _cjk1066
+    _tok1066 = set(_words1066 + _bigrams1066)
+    if len(_tok1066) >= 3:
+        for _prev_toks in _write_chunk_token_sets:
+            if len(_prev_toks) < 3:
+                continue
+            _overlap = len(_tok1066 & _prev_toks) / min(len(_tok1066), len(_prev_toks))
+            if _overlap > 0.60:
+                return
+    _write_chunk_token_sets.append(_tok1066)
+    if len(_write_chunk_token_sets) > 500:
+        _write_chunk_token_sets = _write_chunk_token_sets[-200:]
     # iter596: ephemeral_type_gate — 拒绝写入临时/无跨会话价值的 chunk 类型
     # 根因（数据驱动）：38% chunk 零访问，其中 4 条 conversation_summary/prompt_context
     # 是迭代器自身写入的噪声（重复提示词、轮次计数），从未被用户召回。
