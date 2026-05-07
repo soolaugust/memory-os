@@ -3768,11 +3768,16 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 _dp_factor = 0.55 if _db_chunk_count < 100 else 0.35
                 score *= 1.0 / (1.0 + _r7d_sc * _dp_factor)
                 # iter1029: project_concentration_penalty — 同项目群体垄断衰减
+                # iter1123: proj_conc_threshold_lower — 阈值 0.45→0.38, 衰减 0.75→0.70
                 _cp_proj_d = chunk[_CI_CP] or ""
                 _pc_info_d = _proj_7d_conc.get(_cp_proj_d)
-                if _pc_info_d and _pc_info_d[0] > 0.45 and _pc_info_d[1] >= 4:
+                if _pc_info_d and _pc_info_d[0] > 0.38 and _pc_info_d[1] >= 4:
                     if _r7d_sc > 1:
-                        score *= 0.75 ** (_r7d_sc - 1)
+                        score *= 0.70 ** (_r7d_sc - 1)
+                    # iter1131: proj_conc_saturated_suppress — 高浓度项目内已内化 chunk hard suppress
+                    # 同步 retriever.py: project_concentrated + 7d>=4 + ac>=7 → hard suppress
+                    if _r7d_sc >= 4 and (chunk[_CI_AC] or 0) >= 7:
+                        score = 0.0
             # iter618: 24h + 7d burst suppress（daemon 此前完全缺失）
             # iter619: 阈值收紧 24h:3→2, 7d:8→5
             # iter672: relevance_exempt — 高分 chunk 放宽阈值，防 suppress 过杀
