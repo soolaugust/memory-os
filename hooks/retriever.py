@@ -2584,6 +2584,13 @@ def main():
             #   iter670 suppress_fallback 已解决 suppress 过杀（全灭时降级注入最佳 1 条），
             #   不再需要放宽阈值来防过杀。
             _r24_cnt = _recent_24h_counts.get(chunk.get("id", ""), 0)
+            # iter1074: timeline_24h_boost — 同 6h，用 timeline 补充 24h 计数
+            if _injection_timeline and _cutoff_24h:
+                _tl_24h_list = _injection_timeline.get(chunk.get("id", ""), [])
+                if _tl_24h_list:
+                    _tl_24h_cnt = sum(1 for _t in _tl_24h_list if _t > _cutoff_24h)
+                    if _tl_24h_cnt > _r24_cnt:
+                        _r24_cnt = _tl_24h_cnt
             # iter764: sync_small_db_relax — 同步 daemon iter703 小库放宽
             # 根因（数据驱动，2026-05-04）：retriever.py FULL 路径 68% 空注入（39/57），
             #   daemon 已有 iter703 小库放宽（24h:5/6, 7d:8/10）但 retriever.py 仍用 2/3。
@@ -2610,6 +2617,16 @@ def main():
                 #   根因是 6h>=2 无差别 suppress 不区分库大小。
                 #   修复：tiny_db(<40) 6h 阈值 2→3，与 24h 阈值对齐。
                 _r6h_cnt = _recent_6h_counts.get(chunk.get("id", ""), 0)
+                # iter1074: timeline_6h_boost — 用 timeline 文件补充 6h 计数（堵 DB write-back 延迟缝隙）
+                # 根因（数据驱动，2026-05-07）：93cbc985 间隔 0.9h 注入 2x，6h thresh=1 未触发。
+                #   _recent_6h_counts 来自 DB recall_traces，write-back 延迟致第 2 次查询时 count=0。
+                #   _injection_timeline 是文件级即时写入，无延迟。用 timeline 6h 内条目数补充 max。
+                if _injection_timeline and _cutoff_6h:
+                    _tl_6h_list = _injection_timeline.get(chunk.get("id", ""), [])
+                    if _tl_6h_list:
+                        _tl_6h_cnt = sum(1 for _t in _tl_6h_list if _t > _cutoff_6h)
+                        if _tl_6h_cnt > _r6h_cnt:
+                            _r6h_cnt = _tl_6h_cnt
                 # iter1042: saturated_6h_cap — ac>=7 已内化 chunk 6h 仅允许 1 次
                 # 数据驱动（2026-05-07）：session 6ca148eb 中 5 个 ac>=7 chunk 各被注入 2x，
                 #   间隔 56min-5h。6h 阈值=2 意味着允许 2 次（count=1 < 2 不 suppress）。
