@@ -6152,8 +6152,14 @@ def main():
                             return max(2, _fb_lite_ceiling - 1)
                         return _fb_lite_ceiling
                     # iter1027: fallback_24h_align — 对齐 _lt1020_24h_thresh 动态阈值
+                    # iter1093: lite_fallback_cooldown — fallback 也必须检查 cooldown
+                    # 根因（数据驱动，2026-05-07）：9a2692fd(ac=10) 经 LITE fallback 逃逸 cooldown，
+                    #   iter1092 的 _lt1092_cooldown_ok 只在主过滤(L6112)生效，fallback 从
+                    #   _pre_suppress_top_k_lite 重新选择时绕过了 cooldown 检查。
+                    # 修复：fallback 候选池加入 _lt1092_cooldown_ok 过滤。
                     _fb_lite_cap = [(s, c) for s, c in _pre_suppress_top_k_lite
-                                    if sum(1 for t in _itl758.get(c.get("id", ""), []) if t > _cut758_7d) < _fb_lite_chunk_ceiling(c)
+                                    if _lt1092_cooldown_ok(c)
+                                    and sum(1 for t in _itl758.get(c.get("id", ""), []) if t > _cut758_7d) < _fb_lite_chunk_ceiling(c)
                                     and sum(1 for t in _itl758.get(c.get("id", ""), []) if t > _cut758_24h) < _lt1020_24h_thresh(s, c)]
                     # iter1057: lite_fallback_no_unfiltered_pool — 对齐 FULL iter916 + HD iter921
                     # 根因（数据驱动，2026-05-07）：_fb_lite_cap 全灭时回退无过滤池，

@@ -5307,15 +5307,36 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                         return max(2, _fb_ceiling_d - 1)
                     return _fb_ceiling_d
                 # iter1027: fallback_24h_align — global ac>=4 阈值=1
+                # iter1093: daemon_fallback_cooldown — fallback 也必须检查 cooldown
+                # 根因（数据驱动，2026-05-07）：9a2692fd(ac=10) 经 LITE fallback 逃逸 cooldown，
+                #   daemon fallback 同样只检 7d/24h count 不检 cooldown 时间戳 → 相同逃逸路径。
+                # 修复：定义 _fb_cooldown_ok_d 过滤函数，对齐 _score_chunk 中的 cooldown 逻辑。
+                def _fb_cooldown_ok_d(c):
+                    _fac = c[_CI_AC] or 0
+                    _fgl = (c[_CI_CP] == "global")
+                    if not (_fgl or _fac >= 4) or not _cutoff_48h or not _last_inject_ts:
+                        return True
+                    _fts = _last_inject_ts.get(c[_CI_ID])
+                    if not _fts and _fac >= 7:
+                        _fts = c[_CI_LA] or ""
+                    if not _fts:
+                        return True
+                    if _fgl:
+                        _fcut = _cutoff_14d if _fac >= 10 else _cutoff_10d
+                    else:
+                        _fcut = _cutoff_14d if _fac >= 10 else (_cutoff_10d if _fac >= 7 else _cutoff_48h)
+                    return _fts <= _fcut
                 _fb_cap = [(s, c) for s, c in _pre_suppress_top_k
-                           if _fb_7d_d.get(c[_CI_ID], 0) < _fb_ceiling_d_fn(c)
+                           if _fb_cooldown_ok_d(c)
+                           and _fb_7d_d.get(c[_CI_ID], 0) < _fb_ceiling_d_fn(c)
                            and _fb_24h_d.get(c[_CI_ID], 0) < (1 if c.get("project") == "global" and (c.get("access_count", 0) or 0) >= 4 else 3)]
                 # iter1032: fallback_relax_24h — sync retriever.py
                 # 根因（数据驱动，2026-05-07）：31% 空召回。24h>=3 排除所有 FTS 候选 → 空召回。
                 # 修复：_fb_cap 全灭时只保留 7d ceiling（去掉 24h 过滤），保持 FTS 相关性。
                 if not _fb_cap:
                     _fb_cap = [(s, c) for s, c in _pre_suppress_top_k
-                               if _fb_7d_d.get(c[_CI_ID], 0) < _fb_ceiling_d_fn(c)]
+                               if _fb_cooldown_ok_d(c)
+                               and _fb_7d_d.get(c[_CI_ID], 0) < _fb_ceiling_d_fn(c)]
                 # iter1038: fallback_ceiling_escalate — small_db 全灭时放宽 ceiling +2 兜底
                 # 根因（数据驱动，2026-05-07）：24-chunk 库 11/24 chunk 7d>=4，
                 #   ceiling=4 全灭 → _fb_pool=None → ultimate_fallback 盲选不相关知识。
@@ -5323,7 +5344,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 # iter1057: escalate_saturated_widen — ac>=5 不参与 escalate（收紧 ac<7→ac<5）
                 if not _fb_cap and _db_chunk_count < 100:
                     _fb_cap = [(s, c) for s, c in _pre_suppress_top_k
-                               if _fb_7d_d.get(c[_CI_ID], 0) < _fb_ceiling_d + 2
+                               if _fb_cooldown_ok_d(c)
+                               and _fb_7d_d.get(c[_CI_ID], 0) < _fb_ceiling_d + 2
                                and (c[_CI_AC] or 0) < 5]
                 # iter916: fallback_no_unfiltered_pool — 全灭时不回退无过滤池，走 db_ultimate_fallback
                 _fb_pool = _fb_cap if _fb_cap else None
