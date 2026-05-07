@@ -2451,7 +2451,11 @@ def main():
             #   但无 cooldown 间隔保护，高 relevance 时衰减不足以阻止注入。
             # 修复：non-global floor 7→5（对齐 saturation_widen 起点），global 保持 4。
             #   新增层级 ac=5-6→48h cooldown，与 saturation 衰减形成双重保护。
-            _cd_acc_floor = 4 if chunk.get("project") == "global" else 5
+            # iter1078: cooldown_floor_unify — non-global floor 5→4
+            # 根因（数据驱动，2026-05-07）：c9accb7b(ac=4,"飞书CLI") 48h内注入2次(gap=25h)，
+            #   95038a88(ac=4,"Kernel Patch证据") 同样48h/2x。floor=5使ac=4完全无cooldown。
+            # 修复：non-global floor 5→4 对齐 global，统一 cooldown 起点。
+            _cd_acc_floor = 4
             # iter1075: cooldown_cross_project_sync — micro_db bypass 不保护跨项目 chunk
             # 根因（数据驱动，2026-05-07）：9a2692fd(ac=10,proj=git:a0ab16e8cafc) 在
             #   abspath:7e3095aef7a6(cands=5,micro_db) 被注入，cooldown 被 micro_db bypass 跳过。

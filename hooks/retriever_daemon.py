@@ -3827,7 +3827,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                         score = 0.0
                 # iter1072: cooldown_widen — ac>=10 cooldown 72h→7d, ac>=7 48h→5d
                 # iter1073: global_cooldown_widen — global chunk ac>=4 纳入 cooldown（72h→48h）
-                _cd_floor_d = 4 if (chunk[_CI_CP] or "") == "global" else 7
+                # iter1078: cooldown_floor_unify — sync daemon floor 7→4
+                _cd_floor_d = 4
                 if score > 0 and (chunk[_CI_AC] or 0) >= _cd_floor_d and _cutoff_48h and _last_inject_ts:
                     _cd_id = chunk[_CI_ID]
                     _cd_last = _last_inject_ts.get(_cd_id)
@@ -3970,7 +3971,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                         score = 0.0
                 # iter1072: cooldown_widen — ac>=10 cooldown 72h→7d, ac>=7 48h→5d (dict path)
                 # iter1073: global_cooldown_widen — global chunk ac>=4 纳入 cooldown（72h→48h）
-                _cd_floor_d2 = 4 if chunk.get("project") == "global" else 7
+                # iter1078: cooldown_floor_unify — sync daemon dict path floor 7→4
+                _cd_floor_d2 = 4
                 if score > 0 and (chunk.get("access_count", 0) or 0) >= _cd_floor_d2 and _cutoff_48h and _last_inject_ts:
                     _cd_last_d2 = _last_inject_ts.get(_cid)
                     if _cd_last_d2:
