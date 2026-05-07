@@ -5570,6 +5570,15 @@ def main():
                 _dp895_ok = [r for r in _dp895_rows
                              if _dp895_7d.get(r[0], 0) < _dp895_lim
                              and _session_injection_counts.get(r[0], 0) < _pair_dedup_thresh]
+                # iter1086: pair_relaxed_fallback — 全被 7d 过滤时选 7d 最低的一条
+                # 根因（数据驱动，2026-05-07）：22-chunk 库 64% chunk 7d>=3 → pair 候选全灭
+                #   → 44% 单条注入。pair 是辅助上下文，不应被 suppress 完全阻断。
+                # 修复：_dp895_ok 为空时从 _dp895_rows 选 7d 最低 + session 未注入的 1 条。
+                if not _dp895_ok and _dp895_rows:
+                    _dp895_relaxed = [r for r in _dp895_rows
+                                      if _session_injection_counts.get(r[0], 0) < _pair_dedup_thresh]
+                    if _dp895_relaxed:
+                        _dp895_ok = [min(_dp895_relaxed, key=lambda r: _dp895_7d.get(r[0], 0))]
                 if _dp895_ok:
                     _dp895_pick = _dp895_ok[0]
                     _dp895_chunk = {"id": _dp895_pick[0], "summary": _dp895_pick[1],

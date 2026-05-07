@@ -5242,6 +5242,12 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 _dp895_lim = 3 if _db_chunk_count < 50 else (5 if _db_chunk_count < 100 else 5)
                 _dp895_ok = [r for r in _dp895_rows
                              if _recent_7d_counts.get(r[0], 0) < _dp895_lim]
+                # iter1086: pair_relaxed_fallback — 全被 7d 过滤时选 7d 最低的一条
+                # 根因（数据驱动，2026-05-07）：22-chunk 库 64% chunk 7d>=3 → pair 候选全灭
+                #   → 44% 单条注入。pair 是辅助上下文，不应被 suppress 完全阻断。
+                # 修复：_dp895_ok 为空时从 _dp895_rows 选 7d 最低的 1 条（relaxed pair）。
+                if not _dp895_ok and _dp895_rows:
+                    _dp895_ok = [min(_dp895_rows, key=lambda r: _recent_7d_counts.get(r[0], 0))]
                 if _dp895_ok:
                     _dp895_pick = _dp895_ok[0]
                     # tuple: (id, summary, content, importance, last_accessed, chunk_type, access_count, ...)
