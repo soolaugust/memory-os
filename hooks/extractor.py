@@ -1383,7 +1383,16 @@ def _is_quality_chunk(summary: str) -> bool:
         # iter1069: 遗漏术语补充
         'bigram', 'tokenize', 'overlap', 'traces', '碎片',
         'score ', 'top_k', 'recall', 'batch 内',
+        # iter1114: cooldown_selfref_gate — 迭代器 cooldown/selfref 概念逃逸
+        # 数据驱动（2026-05-08）：4 条 ac=0 噪声逃逸 combo_gate：
+        #   "ac=4-6 non-global cooldown 仍用 48h"（hits=1, 缺 cooldown/FULL 路径）
+        #   "方案：在 retriever 候选评分前增加运行时 selfref 检测"（hits=0）
+        'cooldown', 'selfref', 'hard_deadline', 'FULL 路径',
+        'non-global', 'retriever', 'daemon',
     ) if _t in s)
+    # iter1114: regex 补充 — iter+4位数字是迭代器自引用标识
+    if re.search(r'iter\d{4}', s):
+        _mos_terms += 2
     if _mos_terms >= 3:
         return False
     # iter1069: quantitative_forecast_gate — "量化预期"开头 = 迭代器效果预测
