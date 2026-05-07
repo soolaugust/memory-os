@@ -1273,6 +1273,10 @@ def _is_quality_chunk(summary: str) -> bool:
                 # 数据驱动：9 条 ac=1 噪声含 pair_inject/single-chunk/suppress 分母/
                 #   FTS/BM25 权重提升/闭包捕获/检索稀疏性 — 系统自引用无用户价值
                 "pair_inject", "single-chunk", "suppress 分母",
+                # iter1065: lite_suppress_tolerance_noise — 逃逸的阈值容忍度/路径描述
+                # 数据驱动（2026-05-07）：2 条 ac=0 噪声 "容忍度 +67%"/"LITE 路径 7d=3 即"
+                #   描述 suppress 参数对齐的效果量化，对用户零检索价值。
+                "容忍度", "LITE 路径", "PSI downgrade",
                 "检索稀疏性", "闭包捕获", "importance_pair",
                 "注入为单条", "组合上下文", "预期量化",
                 # iter833: iterator_metric_noise_v3 — 漏网的迭代器自评/度量快照
