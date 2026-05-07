@@ -2530,6 +2530,7 @@ def _vma_validate(summary: str) -> bool:
 
 _write_chunk_seen: set = set()  # iter963: in-process dedup — 防止同 batch 重复写入
 _write_chunk_token_sets: list = []  # iter1066: semantic_overlap_gate token 缓存
+_write_chunk_session_counts: dict = {}  # iter1126: session_write_freq_cap — per-session 写入计数
 
 
 def _write_chunk(chunk_type: str, summary: str, project: str, session_id: str,
@@ -2581,6 +2582,25 @@ def _write_chunk(chunk_type: str, summary: str, project: str, session_id: str,
     _write_chunk_token_sets.append(_tok1066)
     if len(_write_chunk_token_sets) > 500:
         _write_chunk_token_sets = _write_chunk_token_sets[-200:]
+    # iter1126: session_write_freq_cap — 单 session 写入频率递进门控
+    # 根因（数据驱动，2026-05-08）：session 6ca148eb 48h 内写入 44 条 chunk，
+    #   其中 30+ 条是 causal_chain/reasoning_chain 碎片推理步骤（"没有沿调用链验证"、
+    #   "list_empty 检测比 SCX_TASK_OFF_TASKS 更早可用"）— 同话题不同表述绕过 overlap gate。
+    #   单 session 爆写稀释检索精度：83 chunk 库中 53% 来自同一 session。
+    # 修复：per-session 写入计数递进门控：
+    #   >8 条：causal_chain/reasoning_chain 短于 80 字 → 拒绝
+    #   >15 条：causal_chain/reasoning_chain 一律拒绝（只允许 decision/design_constraint/excluded_path）
+    global _write_chunk_session_counts
+    _swfc_cnt = _write_chunk_session_counts.get(session_id, 0)
+    _write_chunk_session_counts[session_id] = _swfc_cnt + 1
+    if len(_write_chunk_session_counts) > 100:
+        _write_chunk_session_counts = {session_id: _write_chunk_session_counts[session_id]}
+    _REASONING_TYPES = {"causal_chain", "reasoning_chain"}
+    if chunk_type in _REASONING_TYPES:
+        if _swfc_cnt > 15:
+            return
+        if _swfc_cnt > 8 and len(summary) < 80:
+            return
     # iter596: ephemeral_type_gate — 拒绝写入临时/无跨会话价值的 chunk 类型
     # 根因（数据驱动）：38% chunk 零访问，其中 4 条 conversation_summary/prompt_context
     # 是迭代器自身写入的噪声（重复提示词、轮次计数），从未被用户召回。
