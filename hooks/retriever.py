@@ -3033,6 +3033,27 @@ def main():
             except Exception:
                 _ws_hits = []  # TLB probe 失败不阻塞主路径
 
+        # iter1113: retroactive_selfref_filter — 运行时拦截遗留迭代器噪声 chunk
+        # 根因（数据驱动，2026-05-07）：extractor selfref_gate 有部署时间窗，
+        #   gate 上线前写入的噪声 chunk 永久存在于 DB 中。
+        #   运行时过滤确保任何漏网 chunk 不会被注入。
+        _selfref_re = re.compile(
+            r'(?:_score_chunk|suppress|fallback|top.?k|候选全灭|空召回|recall_count|'
+            r'hard_suppressed|relevance_fallback|iter\d{3,4}|cooldown|bandwidth|'
+            r'hard_deadline|scored|cands|FTS.*miss|BM25.*noise|'
+            r'噪声率?|ac[=≥]\d+|\bac\b.{0,3}chunk|chunk.?type|selfref|gate|逃逸|垄断|注入率?|'
+            r'注入资格|\d+d\s*(?:cooldown|循环|窗口)|量化预期|suppress_final|'
+            r'token.?overlap|子串检测|LCS|dedup|去重|碎片拦截|写入门控|拦截率)'
+        )
+        _selfref_anchor_re = re.compile(
+            r'(?:kernel|sched|CPU|Android|feishu|飞书|patch|线程|进程|调度|'
+            r'binder|LKMM|scx|qos|migration|MTK|vendor|AOSP|'
+            r'Proxy.Execution|uclamp|cpufreq|thermal|cgroup|'
+            r'公众号|微信|curl|HTTP|API|gRPC)', re.I
+        )
+        def _is_selfref_noise(summary: str) -> bool:
+            return len(_selfref_re.findall(summary)) >= 2 and not _selfref_anchor_re.search(summary)
+
         if use_fts:
             candidates_count = len(fts_results)
             max_rank = max(c["fts_rank"] for c in fts_results) if fts_results else 1.0
@@ -3043,6 +3064,8 @@ def main():
             _pre_score_relevance = []  # iter1084: suppress 前 relevance 快照（兜底空召回）
             fts_ids = set()
             for chunk in fts_results:
+                if _is_selfref_noise(chunk.get("summary", "")):
+                    continue
                 relevance = chunk["fts_rank"] / max_rank
                 _pre_score_relevance.append((relevance, chunk))
                 score = _score_chunk(chunk, relevance)
@@ -3419,6 +3442,9 @@ def main():
                 final = []
                 _pre_score_relevance_hd = []  # iter1084: suppress 前 relevance 快照（兜底空召回）
                 for i, chunk in enumerate(chunks):
+                    # iter1113: retroactive_selfref_filter (hard_deadline path)
+                    if _is_selfref_noise(chunk.get("summary", "")):
+                        continue
                     relevance = relevance_scores[i]
                     # iter131: global 项目 chunk 在 BM25 fallback 路径中施加强化折扣
                     # 仅当当前 project 不是 global 时生效（global project 查询不折扣自身内容）
@@ -5049,6 +5075,9 @@ def main():
                                 final = []
                                 _swap_fts_ids = set()
                                 for chunk in fts_results:
+                                    # iter1113: retroactive_selfref_filter (swap path)
+                                    if _is_selfref_noise(chunk.get("summary", "")):
+                                        continue
                                     relevance = chunk["fts_rank"] / max_rank
                                     score = _score_chunk(chunk, relevance)
                                     final.append((score, chunk))
