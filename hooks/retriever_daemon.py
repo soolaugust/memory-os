@@ -5665,18 +5665,15 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
         #   在 kernel session 中过 0.12 floor 被注入，与当前工作完全无关。
         #   真正相关时 score>=0.5（如操作飞书时 score=0.99）。
         # 修复：global + design_constraint + ac>=5 → floor 提升到 0.25。
+        # iter1147: saturated_floor_tighten — ac 门槛收紧 (global 5→4, local 10→7)
         _GLOBAL_SAT_FLOOR = 0.25
         # iter1068: local_saturated_floor — 扩展到本地高 ac chunk
-        # 数据驱动（2026-05-07）：git:a0ab16e8cafc 有 6 个 ac=10 chunk 在 recent 30 traces
-        #   中各出现 3x，score 多为 0.15~0.22（FTS5 广义词匹配），与当前 session 无关。
-        #   iter1067 只保护 global+design_constraint，本地高频 chunk 无 floor 保护。
-        # 修复：ac>=10 的任意 chunk 也应用 0.25 floor（已内化知识，低分无新信息）。
-        _LOCAL_SAT_AC_THRESH = 10
+        _LOCAL_SAT_AC_THRESH = 7
         if len(top_k) > 0:
             top_k = [(s, c) if not (
                 (c.get("project") == "global"
                  and c.get("chunk_type") == "design_constraint"
-                 and (c.get("access_count") or 0) >= 5
+                 and (c.get("access_count") or 0) >= 4
                  and s < _GLOBAL_SAT_FLOOR)
                 or ((c.get("access_count") or 0) >= _LOCAL_SAT_AC_THRESH
                     and s < _GLOBAL_SAT_FLOOR)
