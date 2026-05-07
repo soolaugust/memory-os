@@ -2841,6 +2841,12 @@ def main():
                         _suppress_7d_thresh = 2
                     elif _l_ac >= 5:
                         _suppress_7d_thresh = max(2, _suppress_7d_thresh - 1)
+                    # iter1143: local_mid_saturated_suppress — ac>=4 本项目 chunk 7d 阈值 -1
+                    # 根因（数据驱动，2026-05-08）：Kernel Patch 格式规范(ac=4) tiny_db 7d=3
+                    #   仍注入（阈值=5）。ac=4 表明用户已见过 4 次，7d 允许 4 次过于宽松。
+                    # 修复：ac>=4 → -1（5→4），7d 内最多 3 次注入后 suppress。
+                    elif _l_ac >= 4:
+                        _suppress_7d_thresh = max(3, _suppress_7d_thresh - 1)
                 if _r7d_cnt >= _suppress_7d_thresh:
                     score = 0.0
                     _hard_suppressed = True
@@ -5622,6 +5628,9 @@ def main():
                         return 2
                     elif _l_ac >= 5:
                         return max(2, _t - 1)
+                    # iter1143: local_mid_saturated_suppress — ac>=4 阈值 -1
+                    elif _l_ac >= 4:
+                        return max(3, _t - 1)
                     return _t
                 # iter968: micro_db_final_gate_bypass — <=5 自有 chunk 库跳过 final_gate
                 # 根因（数据驱动，2026-05-06）：git:78dc99a5695f（2 自有 chunk）空注入率 86%（6/7）。

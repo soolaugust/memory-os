@@ -3832,6 +3832,15 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                             _7d_base = max(2, _7d_base - 2)
                         else:
                             _7d_base = max(2, _7d_base - 1)
+                    elif (chunk[_CI_CP] or "") != "global":
+                        # iter1143: local_mid_saturated_suppress — sync retriever.py
+                        _l_ac_d = chunk[_CI_AC] or 0
+                        if _l_ac_d >= 7:
+                            _7d_base = 2
+                        elif _l_ac_d >= 5:
+                            _7d_base = max(2, _7d_base - 1)
+                        elif _l_ac_d >= 4:
+                            _7d_base = max(3, _7d_base - 1)
                     if _recent_7d_counts.get(_cid, 0) >= _7d_base:
                         score = 0.0
                 # iter1072: cooldown_widen — ac>=10 cooldown 72h→7d, ac>=7 48h→5d
@@ -3989,6 +3998,15 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                             _7d_base_d2 = max(2, _7d_base_d2 - 2)
                         else:
                             _7d_base_d2 = max(2, _7d_base_d2 - 1)
+                    elif (chunk.get("project", "") or "") != "global":
+                        # iter1143: local_mid_saturated_suppress — sync dict path
+                        _l_ac_d2 = chunk.get("access_count", 0) or 0
+                        if _l_ac_d2 >= 7:
+                            _7d_base_d2 = 2
+                        elif _l_ac_d2 >= 5:
+                            _7d_base_d2 = max(2, _7d_base_d2 - 1)
+                        elif _l_ac_d2 >= 4:
+                            _7d_base_d2 = max(3, _7d_base_d2 - 1)
                     if _recent_7d_counts.get(_cid, 0) >= _7d_base_d2:
                         score = 0.0
                 # iter1072: cooldown_widen — ac>=10 cooldown 72h→7d, ac>=7 48h→5d (dict path)
@@ -5101,6 +5119,9 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                         return 2
                     elif _lac >= 5:
                         return max(2, _t - 1)
+                    # iter1143: local_mid_saturated_suppress — ac>=4 阈值 -1
+                    elif _lac >= 4:
+                        return max(3, _t - 1)
                     return _t
                 # iter1015: daemon_micro_db_final_gate_bypass — 对齐 retriever.py line 5052
                 # 根因（数据驱动，2026-05-07）：<=5 chunk 项目经 daemon 路径时 suppress_final_gate
@@ -5189,6 +5210,9 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     return 2
                 elif _lac >= 5:
                     return max(2, _t - 1)
+                # iter1143: local_mid_saturated_suppress — ac>=4 阈值 -1
+                elif _lac >= 4:
+                    return max(3, _t - 1)
                 return _t
             # iter1019: saturated_24h_tighten — sync suppress_final_gate
             def _d1019_24h_thresh(s, c):
