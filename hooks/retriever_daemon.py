@@ -3817,7 +3817,7 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     # iter1031: global_deep_saturated_suppress — sync daemon _score_chunk
                     if (chunk[_CI_CP] or "") == "global":
                         _g_ac_d = chunk[_CI_AC] or 0
-                        if _g_ac_d >= 7:
+                        if _g_ac_d >= 5:  # iter1088: global_saturated_widen
                             _7d_base = 2
                         elif _g_ac_d >= 4:
                             _7d_base = max(2, _7d_base - 2)
@@ -3967,7 +3967,7 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     # iter1031: global_deep_saturated_suppress — sync daemon dict path
                     if (chunk.get("project", "") or "") == "global":
                         _g_ac_d2 = chunk.get("access_count", 0) or 0
-                        if _g_ac_d2 >= 7:
+                        if _g_ac_d2 >= 5:  # iter1088: global_saturated_widen
                             _7d_base_d2 = 2
                         elif _g_ac_d2 >= 4:
                             _7d_base_d2 = max(2, _7d_base_d2 - 2)
@@ -5059,8 +5059,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     #   feishu CLI(ac=4)/memory验证(ac=6) 经 daemon 路径 7d suppress 逃逸。
                     elif _is_global:
                         _g_ac = c[_CI_AC] or 0
-                        # iter1031: global_deep_saturated_suppress — sync daemon
-                        if _g_ac >= 7:
+                        # iter1088: global_saturated_widen — ac>=7→5
+                        if _g_ac >= 5:
                             return 2
                         return max(2, _t - (2 if _g_ac >= 4 else 1))
                     # iter1017: daemon_local_saturated_suppress — sync retriever.py iter1009
@@ -5139,8 +5139,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 # iter1023: global_chunk_suppress_tighten — sync closure_fallback
                 elif _is_global:
                     _g_ac = c[_CI_AC] or 0
-                    # iter1031: global_deep_saturated_suppress — sync daemon closure
-                    if _g_ac >= 7:
+                    # iter1088: global_saturated_widen — ac>=7→5
+                    if _g_ac >= 5:
                         return 2
                     return max(2, _t - (2 if _g_ac >= 4 else 1))
                 # iter1017: daemon_local_saturated_suppress — sync retriever.py iter1009

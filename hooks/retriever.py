@@ -2748,10 +2748,8 @@ def main():
                 # 修复：ac>=4 的 global chunk 阈值 -2（与 cross 同级），ac<4 保持 -1。
                 if chunk.get("project", "") == "global":
                     _g_ac = _acc if _acc is not None else (chunk.get("access_count", 0) or 0)
-                    # iter1031: global_deep_saturated_suppress — ac>=7 深度内化强制阈值=2
-                    # 根因（数据驱动，2026-05-07）：git commit(ac=9) 7d=4 仍逃逸（阈值=3）。
-                    #   ac>=7 表明 agent 已深度内化，7d 仅允许 1 次注入后立即 suppress。
-                    if _g_ac >= 7:
+                    # iter1088: global_saturated_widen — ac>=7→5 覆盖 93cbc985(ac=6) 等逃逸
+                    if _g_ac >= 5:
                         _suppress_7d_thresh = 2
                     else:
                         _suppress_7d_thresh = max(2, _suppress_7d_thresh - (2 if _g_ac >= 4 else 1))
@@ -3626,8 +3624,8 @@ def main():
                         return max(2, _t - 2)
                     elif _is_global:
                         _g_ac = c.get("access_count", 0) or 0
-                        # iter1031: global_deep_saturated_suppress — sync hard_deadline
-                        if _g_ac >= 7:
+                        # iter1088: global_saturated_widen — ac>=7→5
+                        if _g_ac >= 5:
                             return 2
                         return max(2, _t - (2 if _g_ac >= 4 else 1))
                     # iter1009: local_saturated_suppress — sync hard_deadline
@@ -5356,8 +5354,8 @@ def main():
                         return max(2, _t - 2)
                     elif _is_global:
                         _g_ac = c.get("access_count", 0) or 0
-                        # iter1031: global_deep_saturated_suppress — ac>=7 强制阈值=2
-                        if _g_ac >= 7:
+                        # iter1088: global_saturated_widen — ac>=7→5
+                        if _g_ac >= 5:
                             return 2
                         return max(2, _t - (2 if _g_ac >= 4 else 1))
                     # iter1009: local_saturated_suppress — sync suppress_final_gate
@@ -5437,8 +5435,8 @@ def main():
                     return max(2, _t - 2)
                 elif _is_global:
                     _g_ac = c.get("access_count", 0) or 0
-                    # iter1031: global_deep_saturated_suppress — sync closure_fallback
-                    if _g_ac >= 7:
+                    # iter1088: global_saturated_widen — ac>=7→5
+                    if _g_ac >= 5:
                         return 2
                     return max(2, _t - (2 if _g_ac >= 4 else 1))
                 # iter1009: local_saturated_suppress — sync closure_fallback
@@ -6033,8 +6031,9 @@ def main():
                         # iter1060: lite_global_deep_saturated_sync — 对齐 FULL iter1031
                         # 根因（数据驱动，2026-05-07）：global ac=9 chunk 在 small_db(23) LITE 路径
                         #   阈值=max(2,6-2)=4，FULL 路径=2。差距允许 2 次逃逸。
-                        # 修复：ac>=7 直接返回 2，与 FULL suppress_final_gate 对齐。
-                        if _g_ac >= 7:
+                        # 修复：ac>=5 直接返回 2，与 FULL suppress_final_gate 对齐。
+                        # iter1088: global_saturated_widen — ac>=7→5
+                        if _g_ac >= 5:
                             return 2
                         return max(2, _t - (2 if _g_ac >= 4 else 1))
                     # iter1021: lite_local_saturated_suppress — sync FULL/hd iter1009
