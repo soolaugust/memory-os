@@ -4466,6 +4466,14 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     _now_ts = time.time()
                     for _iid807 in top_k_ids:
                         _daemon_inject_log.append((_iid807, _now_ts))
+                    # iter1081: cooldown_inmem_sync — 同步更新 _last_inject_ts 使 cooldown 即时生效
+                    # 根因：_last_inject_ts 启动时从 timeline file 一次性读取，进程内注入不更新
+                    #   → 同一 daemon 进程内连续请求的 cooldown 形同虚设（5/4 同 chunk 30min 内 3 次）。
+                    # 修复：注入成功后立即更新 _last_inject_ts，下一次 _score_chunk 即可拦截。
+                    from datetime import datetime as _dt1081, timezone as _tz1081
+                    _now_iso1081 = _dt1081.now(_tz1081.utc).isoformat()
+                    for _iid1081 in top_k_ids:
+                        _last_inject_ts[_iid1081] = _now_iso1081
                     # iter173: persistent conn — do NOT close
                     try:
                         wconn = open_db()
@@ -5838,6 +5846,11 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
         _now_ts = time.time()
         for _iid807 in accessed_ids:
             _daemon_inject_log.append((_iid807, _now_ts))
+        # iter1081: cooldown_inmem_sync — 同步更新 _last_inject_ts（normal path）
+        from datetime import datetime as _dt1081b, timezone as _tz1081b
+        _now_iso1081b = _dt1081b.now(_tz1081b.utc).isoformat()
+        for _iid1081b in accessed_ids:
+            _last_inject_ts[_iid1081b] = _now_iso1081b
         # iter219: removed sys.stdout.flush() — no-op on StringIO (captured in _handle_connection)
         # iter173: persistent conn — do NOT close here; writeback will invalidate after write
 
