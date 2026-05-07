@@ -4528,8 +4528,11 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                                 _itl_ex_hd = json.loads(_itf_hd.read())
                         from datetime import timedelta as _td648hd
                         _now_hd = datetime.now(timezone.utc)
-                        _cut_7d_hd = (_now_hd - _td648hd(days=7)).isoformat()
-                        _itl_p_hd = {k: [t for t in v if t > _cut_7d_hd] for k, v in _itl_ex_hd.items()}
+                        # iter1115: gc_writeback_21d — 对齐 retriever.py iter1110 读取 GC 窗口
+                        # 根因：write-back GC=7d 截断记录，但 cooldown 需 10-14d 时间戳。
+                        #   高 ac chunk GC 后 _cd_ts_list=None → cooldown 判断被跳过 → 周期性逃逸。
+                        _cut_21d_hd = (_now_hd - _td648hd(days=21)).isoformat()
+                        _itl_p_hd = {k: [t for t in v if t > _cut_21d_hd] for k, v in _itl_ex_hd.items()}
                         _itl_p_hd = {k: v for k, v in _itl_p_hd.items() if v}
                         _now_iso_hd = _now_hd.isoformat()
                         for _aid_hd in accessed_ids:
@@ -6043,10 +6046,11 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                         _itl_existing = json.loads(_itf.read())
                 from datetime import timedelta as _td648w
                 _now_ts = datetime.now(timezone.utc).isoformat()
-                _cutoff_7d = (datetime.now(timezone.utc) - _td648w(days=7)).isoformat()
+                # iter1115: gc_writeback_21d — 对齐 retriever.py iter1110 读取 GC 窗口
+                _cutoff_21d = (datetime.now(timezone.utc) - _td648w(days=21)).isoformat()
                 _itl_pruned = {}
                 for _k, _v in _itl_existing.items():
-                    _kept = [t for t in _v if t > _cutoff_7d]
+                    _kept = [t for t in _v if t > _cutoff_21d]
                     if _kept:
                         _itl_pruned[_k] = _kept
                 for _inj_id in _accessed_ids:
