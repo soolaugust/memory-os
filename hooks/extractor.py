@@ -2645,7 +2645,8 @@ def _write_chunk(chunk_type: str, summary: str, project: str, session_id: str,
             r'hard_suppressed|relevance_fallback|iter\d{3,4}|cooldown|bandwidth|'
             r'hard_deadline|inject|scored|cands|FTS.*miss|BM25.*noise|'
             r'噪声率?|ac[=≥]\d+|\bac\b.{0,3}chunk|chunk.?type|selfref|gate|逃逸|垄断|注入率?|单条注入|'
-            r'注入资格|\d+d\s*(?:cooldown|循环|窗口)|7d|24h|6h|量化预期|SWAPPED|timeline|suppress_final)',
+            r'注入资格|\d+d\s*(?:cooldown|循环|窗口)|7d|24h|6h|量化预期|SWAPPED|timeline|suppress_final|'
+            r'token.?overlap|子串检测|LCS|dedup|去重|碎片拦截|写入门控|拦截率)',
             summary
         ))
         if _selfref_hits >= 2:
@@ -2658,6 +2659,19 @@ def _write_chunk(chunk_type: str, summary: str, project: str, session_id: str,
             )
             if not _has_ext_anchor:
                 return
+    # iter1109: code_change_report_gate — 拦截代码改动描述和测试验证结果
+    # 数据驱动（2026-05-07）：6 个 ac=0 decision chunk 逃逸 selfref_gate（hits<2），
+    #   包括 "改动：extractor.py +21 行"、"正例：LCS=98% → 拦截 ✅"、"负例：<5% → 放行 ✅"。
+    #   共性 A：描述代码文件改动（含 .py/.js/.ts + 行数/函数名）—— 纯实现日志。
+    #   共性 B：测试验证标记（正例/负例 + ✅/拦截/放行）—— 一次性验证结果。
+    # 修复：两个独立模式，任一命中 → 拒绝。仅对 decision 类型，不影响 procedure/qe。
+    if chunk_type == "decision" and not content_override:
+        # A: 代码改动描述 — "文件名.ext +N 行" 或 "文件名.ext 函数名"
+        if re.search(r'\.(?:py|js|ts|rs|go|java|c|h)\b.*(?:\+\d+\s*行|[-+]\d+)', summary):
+            return
+        # B: 测试验证标记 — 正例/负例 + 通过标记
+        if re.search(r'(?:正例|负例|测试[：:])', summary) and re.search(r'[✅✓→]', summary):
+            return
     # iter897: iter_metric_report_gate — 拦截迭代器数值对比/统计报告
     # 数据驱动（2026-05-05）：今日写入 11 chunk 中 10 条是迭代器自身产出的指标对比
     #   如 "噪声 chunk 占比 19%→3%"、"exp_decay 除数 /3→/2"、"单条注入率 54%"。
