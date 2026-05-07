@@ -2578,7 +2578,9 @@ def main():
                 #   因 ac=6 < 7 走 thresh=2 逃逸。design_constraint 是规则类知识，
                 #   ac>=5 已充分内化，6h 重复注入零信息增量。
                 _6h_is_constraint = chunk.get("chunk_type") == "design_constraint"
-                _6h_thresh = 1 if (_6h_ac >= 7 or (_6h_is_constraint and _6h_ac >= 5)) else 2
+                # iter1048: global_6h_sync — global ac>=4 同步 iter1023(24h cap=1)
+                _6h_is_global_saturated = chunk.get("project") == "global" and _6h_ac >= 4
+                _6h_thresh = 1 if (_6h_ac >= 7 or (_6h_is_constraint and _6h_ac >= 5) or _6h_is_global_saturated) else 2
                 if _r6h_cnt >= _6h_thresh:
                     score = 0.0
                     _hard_suppressed = True
@@ -3541,7 +3543,7 @@ def main():
                 # iter1042+1047: saturated_6h_cap — hard_deadline 路径同步
                 def _hd1042_6h_thresh(c):
                     _hac = c.get("access_count", 0) or 0
-                    return 1 if (_hac >= 7 or (c.get("chunk_type") == "design_constraint" and _hac >= 5)) else 2
+                    return 1 if (_hac >= 7 or (c.get("chunk_type") == "design_constraint" and _hac >= 5) or (c.get("project") == "global" and _hac >= 4)) else 2
                 top_k = [(s, c) for s, c in top_k
                          if _recent_6h_counts.get(c["id"], 0) < _hd1042_6h_thresh(c)  # iter1042
                          and _recent_24h_counts.get(c["id"], 0) < _hd1019_24h_thresh(s, c)
@@ -4605,7 +4607,7 @@ def main():
                 # iter818: tiny_db_6h_relax — 6h 分级
                 # iter1047: constraint_saturated_6h — design_constraint ac>=5 → thresh=1
                 _cst_tiny_db = _db_chunk_count < 50  # iter848: 边界 40→50
-                _cst_6h_thresh = 1 if _ac_abs >= 5 else 2  # constraint 通道全为 design_constraint，ac>=5 即内化
+                _cst_6h_thresh = 1 if (_ac_abs >= 5 or (c.get("project") == "global" and _ac_abs >= 4)) else 2  # iter1048: +global ac>=4
                 if _recent_6h_counts.get(_cid, 0) >= _cst_6h_thresh:
                     return False
                 # iter617: 24h burst suppress 也在 constraint 通道生效
@@ -5906,7 +5908,7 @@ def main():
                     # iter1042+1047: saturated_6h_cap — LITE 路径同步
                     def _lt1042_6h_thresh(c):
                         _a6 = (c.get("access_count", 0) or 0)
-                        return 1 if (_a6 >= 7 or (c.get("chunk_type") == "design_constraint" and _a6 >= 5)) else 2
+                        return 1 if (_a6 >= 7 or (c.get("chunk_type") == "design_constraint" and _a6 >= 5) or (c.get("project") == "global" and _a6 >= 4)) else 2
                     top_k = [(s, c) for s, c in top_k
                              if sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_6h) < _lt1042_6h_thresh(c)  # iter1042
                              and sum(1 for t in _itl758.get(c["id"], []) if t > _cut758_24h) < _lt1020_24h_thresh(s, c)
