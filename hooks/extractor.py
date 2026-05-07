@@ -1878,17 +1878,31 @@ def _is_quality_decision(summary: str) -> bool:
 
     # ── 通过条件（满足任一即写入）─────────────────────────────
     # A. 决策动词
-    if re.search(r'(?:选择|决定|采用|推荐|替代|改用|放弃|因为|所以|根因|不选|不用|废弃|最终方案)', s):
+    _has_decision_verb = bool(re.search(r'(?:选择|决定|采用|推荐|替代|改用|放弃|因为|所以|根因|不选|不用|废弃|最终方案)', s))
+    if _has_decision_verb:
         return True
+    # iter1102: short_decision_standalone_gate — 短碎片仅靠数字度量不足以通过
+    # 数据驱动（2026-05-07）：9 个 ac=0 decision 中 8 个 <80 字，
+    #   全因含数字(16%/4ms/8.9%)匹配条件B通过，但无独立决策语义（表格行/预期数字/诊断快照）。
+    #   有价值的短 decision（ac>0）多为 wiki import（[topic] 前缀）或含决策动词（条件A）。
+    # 修复：<60 字 + 非 wiki import([前缀) 的 decision，仅条件 B(数字度量) 不足通过，
+    #   须同时满足 A(决策动词) 或 C(对比句式)。条件 B 的文件路径/代码标识符仍独立通过。
+    _is_short_fragment = len(s) < 60 and not re.match(r'^\[', s)
     # B. 具体技术锚点
     if re.search(r'[\w./]+\.(?:py|js|ts|json|db|sql|yaml|toml|sh|md)\b', s):  # 文件路径
         return True
     if re.search(r'\d+(?:\.\d+)?(?:%|ms|s|MB|GB|次|条|个|行|倍|x)', s):  # 数字度量
-        return True
+        if _is_short_fragment:
+            pass  # 短碎片仅靠数字度量不通过，继续检查其他条件
+        else:
+            return True
     if re.search(r'`[^`]+`', s):  # 代码标识符
         return True
     if re.search(r'(?:→|->)\s*\d', s):  # 量化变化
-        return True
+        if _is_short_fragment:
+            pass  # 短碎片仅靠量化变化不通过
+        else:
+            return True
     # C. 对比句式
     if re.search(r'(?:而非|而不是|不是.*而是|相比.*更|比.*更好)', s):
         return True
