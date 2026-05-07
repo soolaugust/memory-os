@@ -1833,7 +1833,14 @@ def main():
                     _kept = [t for t in _ts_list if t > _cutoff_14d]
                     if _kept:
                         _pruned[_cid647] = _kept
-                        _recent_7d_counts[_cid647] = len(_kept)
+                        # iter1095: timeline_7d_count_fix — 只计 7d 内条目
+                        # 根因（数据驱动，2026-05-07）：len(_kept) 是 14d 窗口计数，
+                        #   368cb071 实际 7d=4 被误算为 5 → 触发 7d suppress 误杀，
+                        #   腾出注入位给真正的垄断 chunk。3 个 chunk 受影响。
+                        # 修复：7d 计数只统计 _cutoff_7d 之后的条目。
+                        _cnt_7d = sum(1 for t in _kept if t > _cutoff_7d)
+                        if _cnt_7d > 0:
+                            _recent_7d_counts[_cid647] = _cnt_7d
                         _cnt_24h = sum(1 for t in _kept if t > _cutoff_24h)
                         if _cnt_24h > 0:
                             _recent_24h_counts[_cid647] = _cnt_24h
