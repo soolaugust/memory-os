@@ -1346,7 +1346,11 @@ def _is_quality_chunk(summary: str) -> bool:
                 # iter1012: ceiling_active_noise — 迭代器度量快照逃逸
                 # 数据驱动（2026-05-07）："FTS5 噪声密度降 12%（94→83 active chunks）"
                 #   逃逸原因："active chunks" 是 memory-os 内部度量关键词。
-                "active chunks", "pair 路径",
+                "active chunks", "pair 路径", "噪声密度",
+                # iter1098: iterator_metric_en_gate — 英文形式的迭代器度量指标逃逸
+                # 数据驱动（2026-05-07）：07e299e5 "zero_access: 20% → 0%" ac=0 逃逸，
+                #   因 "零访问率" 只匹配中文形式。补充英文变体。
+                "zero_access",
                 # iter1018: daemon_expectation_noise — 迭代器效果预测/内部逻辑缺失描述逃逸
                 # 数据驱动（2026-05-07）：2 条 ac=0 噪声：
                 #   "daemon 路径高 ac chunk 重复注入减少 ~30%" — 效果预测
@@ -2540,6 +2544,11 @@ def _write_chunk(chunk_type: str, summary: str, project: str, session_id: str,
            and re.search(r'\d', summary) \
            and not re.search(r'(?:根因|原因|所以|因此|说明|表明|意味着|证明|意味|导致)', summary):
             return
+    # iter1098: url_only_summary_gate — 纯 URL summary 拒绝写入
+    # 数据驱动（2026-05-07）：8f95425e conversation_summary 仅含 feishu URL（ac=0），
+    #   FTS5 无法语义匹配 URL 字符串，检索价值为零。
+    if re.match(r'^https?://\S+$', summary.strip()):
+        return
     # iter985: en_short_fragment_gate — 纯英文短碎片 design_constraint 拒绝
     # 数据驱动（2026-05-06）：c61eaecc "need SCX_TASK_OFF_TASKS"(4词)、
     #   c60d1009 "and the existing sched_ext_dead() handles..."(英文对话片段)。
