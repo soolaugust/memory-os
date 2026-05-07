@@ -1,8 +1,10 @@
 <div align="center">
 
-# AIOS Memory OS
+# memory-os
 
-**为 AI Agent 设计的持久化记忆 — 像操作系统内核，而非数据库。**
+**为 Claude Code 设计的内核级持久化记忆**
+
+*跨会话记住决策、约束和上下文 — 像操作系统内存子系统一样设计，而非数据库。*
 
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![SQLite](https://img.shields.io/badge/storage-SQLite%20WAL-lightgrey?logo=sqlite)](https://sqlite.org/)

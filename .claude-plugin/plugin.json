@@ -1,0 +1,20 @@
+{
+  "name": "memory-os",
+  "description": "Kernel-grade persistent memory for Claude Code. Remembers decisions, constraints, and context across sessions — designed like an OS memory subsystem, not a database.",
+  "version": "1.0.0",
+  "author": {
+    "name": "zhidao su"
+  },
+  "homepage": "https://github.com/soolaugust/memory-os",
+  "repository": "https://github.com/soolaugust/memory-os",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "persistence",
+    "context",
+    "hooks",
+    "mcp",
+    "agent",
+    "claude-code"
+  ]
+}

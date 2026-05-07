@@ -1,8 +1,10 @@
 <div align="center">
 
-# AIOS Memory OS
+# memory-os
 
-**Persistent memory for AI agents — designed like a kernel, not a database.**
+**Kernel-grade persistent memory for Claude Code**
+
+*Remembers decisions, constraints, and context across sessions — designed like an OS memory subsystem, not a database.*
 
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![SQLite](https://img.shields.io/badge/storage-SQLite%20WAL-lightgrey?logo=sqlite)](https://sqlite.org/)
