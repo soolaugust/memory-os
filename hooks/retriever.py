@@ -2669,11 +2669,14 @@ def main():
                 #   Android诊断(ac=10,7d=5) 等高 ac 本项目 chunk 7d 阈值=5 仍逃逸。
                 #   ac>=7 表明 agent 已充分内化，继续注入浪费 context window。
                 # 修复：ac>=10 → -2，ac>=7 → -1（仅非 global 本项目 chunk）。
+                # iter1051: local_deep_saturated_7d — ac>=7 直接 thresh=2（对齐 global）
+                # 根因（数据驱动，2026-05-07）：PE分析(ac=7) tiny_db 7d=6 仍逃逸。
+                #   base=5, -1=4 仍太宽松。ac>=7 已深度内化，与 global ac>=7 统一 thresh=2。
                 elif chunk.get("project", "") != "global":
                     _l_ac = _acc if _acc is not None else (chunk.get("access_count", 0) or 0)
-                    if _l_ac >= 10:
-                        _suppress_7d_thresh = max(2, _suppress_7d_thresh - 2)
-                    elif _l_ac >= 7:
+                    if _l_ac >= 7:
+                        _suppress_7d_thresh = 2
+                    elif _l_ac >= 5:
                         _suppress_7d_thresh = max(2, _suppress_7d_thresh - 1)
                 if _r7d_cnt >= _suppress_7d_thresh:
                     score = 0.0
@@ -3533,10 +3536,11 @@ def main():
                             return 2
                         return max(2, _t - (2 if _g_ac >= 4 else 1))
                     # iter1009: local_saturated_suppress — sync hard_deadline
+                    # iter1051: local_deep_saturated_7d — ac>=7 直接=2（对齐 global）
                     _l_ac = c.get("access_count", 0) or 0
-                    if _l_ac >= 10:
-                        return max(2, _t - 2)
-                    elif _l_ac >= 7:
+                    if _l_ac >= 7:
+                        return 2
+                    elif _l_ac >= 5:
                         return max(2, _t - 1)
                     return _t
                 # iter1019: saturated_24h_tighten — sync suppress_final_gate
@@ -3577,10 +3581,11 @@ def main():
                 elif _cp != project:
                     _cap = min(_cap, max(2, _hd_pair_base - 2))
                 else:
+                    # iter1051: local_deep_saturated_7d — ac>=7 直接 cap=2
                     _l_ac = c.get("access_count", 0) or 0
-                    if _l_ac >= 10:
-                        _cap = min(_cap, max(2, _hd_pair_base - 2))
-                    elif _l_ac >= 7:
+                    if _l_ac >= 7:
+                        _cap = 2
+                    elif _l_ac >= 5:
                         _cap = min(_cap, max(2, _hd_pair_base - 1))
                 return _cap
             if len(top_k) == 1 and len(final) >= 3:
@@ -5241,10 +5246,11 @@ def main():
                             return 2
                         return max(2, _t - (2 if _g_ac >= 4 else 1))
                     # iter1009: local_saturated_suppress — sync suppress_final_gate
+                    # iter1051: local_deep_saturated_7d — ac>=7 直接=2（对齐 global）
                     _l_ac = c.get("access_count", 0) or 0
-                    if _l_ac >= 10:
-                        return max(2, _t - 2)
-                    elif _l_ac >= 7:
+                    if _l_ac >= 7:
+                        return 2
+                    elif _l_ac >= 5:
                         return max(2, _t - 1)
                     return _t
                 # iter968: micro_db_final_gate_bypass — <=5 自有 chunk 库跳过 final_gate
@@ -5893,10 +5899,11 @@ def main():
                         _g_ac = c.get("access_count", 0) or 0
                         return max(2, _t - (2 if _g_ac >= 4 else 1))
                     # iter1021: lite_local_saturated_suppress — sync FULL/hd iter1009
+                    # iter1051: local_deep_saturated_7d — ac>=7 直接=2（对齐 global）
                     _l_ac = c.get("access_count", 0) or 0
-                    if _l_ac >= 10:
-                        return max(2, _t - 2)
-                    elif _l_ac >= 7:
+                    if _l_ac >= 7:
+                        return 2
+                    elif _l_ac >= 5:
                         return max(2, _t - 1)
                     return _t
                 # iter1002: lite_micro_db_bypass — LITE 路径同步 FULL 的 micro_db bypass(line 4863)
