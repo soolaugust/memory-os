@@ -1360,13 +1360,26 @@ def _is_quality_chunk(summary: str) -> bool:
     #   memory-os 运行时概念（"次注入"/"chunk"/"ac="/"suppress"/"7d"/"per-project"/"候选"）。
     #   合法用户知识至多偶尔含 1 个（如"chunk"出现在非 memory-os 语境中）。
     # 修复：检测 ≥3 个运行时术语命中 → 拒绝（无外部领域豁免）。
+    # iter1069: combo_gate_widen — 补充遗漏的 NLP/tokenizer/度量术语
+    # 数据驱动（2026-05-07）：3 条 ac=0 噪声逃逸 combo_gate：
+    #   "方案：中文 bigram + 英文 word tokenize，同 batch 内 overlap >60% 跳过"（0 hits）
+    #   "量化预期：同事件碎片从 ~10 条降至 ~5 条（-50%）"（0 hits）
+    #   根因：bigram/tokenize/overlap/碎片/traces 等 memory-os 内部 NLP 处理术语不在列表中。
+    # 修复：扩展术语列表 + 添加"量化预期"模式拦截（无用户知识以此开头）。
     _mos_terms = sum(1 for _t in (
         '次注入', '注入中', 'chunk', 'suppress', 'per-project',
         '候选池', '内化', '阈值', 'ac=', 'ac<', 'ac>',
         '7d ', '24h ', '注入位', 'global chunk', 'supplement',
         '全路径', 'FTS', 'final_gate', '空召回',
+        # iter1069: 遗漏术语补充
+        'bigram', 'tokenize', 'overlap', 'traces', '碎片',
+        'score ', 'top_k', 'recall', 'batch 内',
     ) if _t in s)
     if _mos_terms >= 3:
+        return False
+    # iter1069: quantitative_forecast_gate — "量化预期"开头 = 迭代器效果预测
+    # 数据驱动：用户真实知识从不以"量化预期"开头，这是迭代器自评模板。
+    if s.startswith('量化预期'):
         return False
     # iter944: code_expr_gate — 代码条件表达式/数组索引碎片拦截
     # 数据驱动（2026-05-06）：1 条 ac=0 噪声 "条件：positive[0][0] >= 0.15 — top1 < 0.15 时不配对"
