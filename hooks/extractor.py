@@ -1464,6 +1464,11 @@ def _is_quality_chunk(summary: str) -> bool:
         #   "方案：在 retriever 候选评分前增加运行时 selfref 检测"（hits=0）
         'cooldown', 'selfref', 'hard_deadline', 'FULL 路径',
         'non-global', 'retriever', 'daemon',
+        # iter1135: combo_gate_internal_fn — 逃逸的迭代器内部函数/变量名
+        # 数据驱动（2026-05-08）：7 条 ac=0 噪声逃逸 combo_gate，含 diversity_probe/
+        #   skipped_same_hash/7d_exclude/fallback escalate/cands= 等内部实现标识。
+        'diversity_probe', 'skipped_same_hash', '7d_exclude',
+        'fallback escalate', 'cands=', '候选枯竭', '注入率',
     ) if _t in s)
     # iter1114: regex 补充 — iter+4位数字是迭代器自引用标识
     if re.search(r'iter\d{4}', s):
