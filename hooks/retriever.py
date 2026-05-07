@@ -5905,6 +5905,12 @@ def main():
                         return max(2, _t - 2)
                     elif _is_global:
                         _g_ac = c.get("access_count", 0) or 0
+                        # iter1060: lite_global_deep_saturated_sync — 对齐 FULL iter1031
+                        # 根因（数据驱动，2026-05-07）：global ac=9 chunk 在 small_db(23) LITE 路径
+                        #   阈值=max(2,6-2)=4，FULL 路径=2。差距允许 2 次逃逸。
+                        # 修复：ac>=7 直接返回 2，与 FULL suppress_final_gate 对齐。
+                        if _g_ac >= 7:
+                            return 2
                         return max(2, _t - (2 if _g_ac >= 4 else 1))
                     # iter1021: lite_local_saturated_suppress — sync FULL/hd iter1009
                     # iter1051: local_deep_saturated_7d — ac>=7 直接=2（对齐 global）
@@ -5965,8 +5971,12 @@ def main():
                     #   HD 路径有 _fb_hd_chunk_ceiling 对 ac>=7 返回 2，LITE 遗漏。
                     def _fb_lite_chunk_ceiling(c):
                         _lac = c.get("access_count", 0) or 0
-                        if c.get("project", "") == "global" and _lac >= 4:
-                            return max(2, _fb_lite_ceiling - 2)
+                        if c.get("project", "") == "global":
+                            # iter1060: global ac>=7 直接=2（对齐 _lt905_7d_thresh）
+                            if _lac >= 7:
+                                return 2
+                            if _lac >= 4:
+                                return max(2, _fb_lite_ceiling - 2)
                         if _lac >= 7:
                             return 2
                         elif _lac >= 5:
