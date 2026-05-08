@@ -6888,7 +6888,15 @@ def main():
                     #   导致 pair 机制零生效，用户始终只看到单点知识。
                     # 修复：过滤前 >=2 条 → 过滤后 =1 条时，保留被移除中最高分的 1 条配对。
                     if _sf_pre_len >= 2 and len(_sf_above) == 1:
-                        _sf_below = [(s, c) for s, c in top_k if s < _score_floor]
+                        # iter1185: pair_preserve_cross_project_gate — 跨项目高 ac chunk 不享受 pair preserve
+                        # 根因（数据驱动，2026-05-08）：9a2692fd(ac=10,cross-project) score=0.05
+                        #   经 pair_preserve 注入到无关项目 session，信息增量=0。
+                        #   pair preserve 目的是补充本项目相关上下文，跨项目 ac>=7 已深度内化不适用。
+                        # 修复：排除跨项目/global 且 ac>=7 的 chunk。
+                        _sf_below = [(s, c) for s, c in top_k if s < _score_floor
+                                     and not (c.get("access_count", 0) >= 7
+                                              and (c.get("project", "") == "global"
+                                                   or c.get("project", "") != project))]
                         if _sf_below:
                             _sf_kept_pair = max(_sf_below, key=lambda x: x[0])
                             _sf_above.append(_sf_kept_pair)
