@@ -1196,7 +1196,8 @@ def _is_selfref_noise(summary: str, chunk_type: str) -> bool:
         # iter1218: cross_project_analysis_gate — 跨项目注入分析噪声
         # 根因（数据驱动，2026-05-09）：2 条 causal_chain 描述跨项目聚合逻辑（"不走跨项目聚合"
         #   "管道符号过滤"）hits=1 逃逸。含 project=git:/abspath: + 聚合/注入动词是迭代器分析特征。
-        r'跨项目聚合|project[=:].{0,5}(?:git|abspath)|管道符号过滤)',
+        r'跨项目聚合|project[=:].{0,5}(?:git|abspath)|管道符号过滤|'
+        r'burst.suppress|daemon.*(?:注入|进程内)|retriever_daemon)',
         summary
     ))
     if hits < 2:
