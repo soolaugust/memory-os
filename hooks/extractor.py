@@ -2790,6 +2790,19 @@ def _write_chunk(chunk_type: str, summary: str, project: str, session_id: str,
     # iter1233: iter_action_prefix_widen — 扩展前缀覆盖"量化结果/改动/预期效果/修复：/净增"
     if re.match(r'^(?:量化结果[：:]|量化[：:改]|改动[：:]|预期效果[：:]|修复[：:]|净增|iter\d{3,4}\s*[：:_])', summary):
         return
+    # iter1235: config_param_fragment_gate — 配置参数碎片拒绝
+    # 数据驱动（2026-05-09）：3 个 ac=0 chunk 为纯配置值 "micro_db(≤5): 0.08" 等，
+    #   逃逸 <15 阈值（18-19字）。特征：变量名+括号条件+冒号+数值，无解释。
+    if not content_override and len(summary) < 30 \
+       and re.match(r'^[\w_]+\s*[（(].{1,12}[）)]\s*[：:]\s*[\d.]+', summary):
+        return
+    # iter1235: internal_fix_log_gate — 内部修复/重建日志拒绝
+    # 数据驱动（2026-05-09）："- 修复 FTS5 index（因删除操作导致 orphan 清理过度→重建对齐 ACTIVE=55）"
+    #   以列表前缀开头 + 含内部子系统关键词 + 无用户领域知识 → 拒绝。
+    if re.match(r'^\s*[-•]\s*(?:修复|重建|清理|对齐)', summary) \
+       and re.search(r'(?:FTS5?|orphan|index|ACTIVE\s*=|对齐|chunk_version|writeback|daemon)', summary) \
+       and not re.search(r'(?:kernel|sched|cpu|Android|飞书|git\s|用户|产品)', summary):
+        return
     # iter1202: iterator_impl_gate — 拒绝写入迭代器/retriever/extractor 内部实现细节
     # 数据驱动（2026-05-08）：11 个 ac=0 chunk 全为迭代器自身的调参/bug/fix 记录
     #   （"suppress 率"、"空召回"、"relevance_floor"、"候选全被过滤"），用户永远不会检索这些。
