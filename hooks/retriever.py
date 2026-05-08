@@ -4114,6 +4114,19 @@ def main():
                         _ocg_filtered_hd = [(s, c) for s, c in top_k if _ocg_pass_hd(c)]
                         if _ocg_filtered_hd:
                             top_k = _ocg_filtered_hd
+                    # iter1154: saturation_diversity_gate (hard_deadline path) — 同步 FULL path iter1119
+                    # 根因（数据驱动，2026-05-08）：hard_deadline 路径缺少 saturation_diversity_gate，
+                    #   31% 注入包含 2+ 个 ac>=5 chunk（最多 6 个），已内化知识群体霸占注入位。
+                    #   FULL 路径有 iter1119 限制 50%，但 hard_deadline 是主要路径（占 85%+ trace）。
+                    # 修复：同步 FULL path 逻辑——ac>=7 chunk 最多占 ceil(len/2)，超额移除低分的。
+                    if top_k and len(top_k) > 2 and not _micro_db:
+                        _sdg_max_hd = max(1, (len(top_k) + 1) // 2)
+                        _sdg_sat_hd = [(s, c) for s, c in top_k if (c.get("access_count", 0) or 0) >= 7]
+                        if len(_sdg_sat_hd) > _sdg_max_hd:
+                            _sdg_fresh_hd = [(s, c) for s, c in top_k if (c.get("access_count", 0) or 0) < 7]
+                            _sdg_sat_hd.sort(key=lambda x: x[0], reverse=True)
+                            top_k = _sdg_fresh_hd + _sdg_sat_hd[:_sdg_max_hd]
+                            top_k.sort(key=lambda x: x[0], reverse=True)
                     _TYPE_PREFIX = {"decision": "[决策]", "excluded_path": "[排除]",
                                     "reasoning_chain": "[推理]", "conversation_summary": "[摘要]",
                                     "task_state": "", "design_constraint": "⚠️ [约束]"}
