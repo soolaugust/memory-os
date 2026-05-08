@@ -232,39 +232,25 @@ def _db_vacuum(db_path: Path):
         except Exception:
             pass
 
-        # iter635: stale_noise_gc — 清理存量迭代器噪声 chunk
-        # 根因：iter607 在 _write_chunk 加了 _is_quality_chunk 门控，但门控部署前
-        #   已写入的噪声 chunk 仍留在 store 中（实测 14 条，占零访问 chunk 的 37%）。
-        # 清理条件：access_count=0（从未被用户召回）AND 匹配迭代器自引用特征。
+        # iter635→1170: stale_noise_gc — 清理存量迭代器噪声 chunk
+        # iter1170: 升级为函数驱动 GC（替代硬编码 LIKE 列表）
+        # 根因：每次新变体噪声逃逸都需要手动添加 LIKE 模式（已累积 20+ 条）。
+        #   复用 extractor 的 _is_metric_report_noise / _is_selfref_noise / _is_quality_chunk
+        #   实现自适应 GC：未来新模式只需更新 extractor gate，GC 自动覆盖。
+        # 清理条件：access_count=0 AND (extractor gate 判定为噪声 OR chunk_type='prompt_context')
         # 安全性：只删零访问 chunk，不影响任何已被用户使用的知识。
-        # iter789: 改用 SELECT+DELETE+mmu_notifier 防止 stale refs 累积
         try:
-            _noise_ids = [r[0] for r in conn.execute("""
-                SELECT id FROM memory_chunks WHERE access_count = 0 AND (
-                    chunk_type = 'prompt_context'
-                    OR (summary LIKE '%inject%suppress%' OR summary LIKE '%suppress%inject%')
-                    OR (summary LIKE '%zero_access%' OR summary LIKE '%零访问率%')
-                    OR summary LIKE '%迭代器自评噪声%'
-                    OR summary LIKE '%Hook 触发次数%'
-                    OR summary LIKE '%bandwidth%penalty%'
-                    OR summary LIKE '%hard_cap%'
-                    OR summary LIKE '%session_density%'
-                    OR summary LIKE '%6 层内存模型%'
-                    OR summary LIKE '%注入去垄断%'
-                    OR summary LIKE '%注入精准度%'
-                    OR summary LIKE '%锁竞争%immutable%'
-                    OR summary LIKE '%compaction 信息丢失%'
-                    OR summary LIKE '%PSI 永久 FULL%'
-                    OR summary LIKE '%系统膨胀%Hook 合并%'
-                    OR summary LIKE '%extractor_pool._write_chunks%'
-                    OR summary LIKE '%ghost_gc%'
-                    OR summary LIKE '%幽灵条目%suppress%'
-                    OR summary LIKE '%幽灵%chunk%清除%'
-                    OR summary LIKE '%Timeline 条目%'
-                    OR summary LIKE '%项目孤岛化%'
-                    OR summary LIKE '%daemon injected=%'
-                )
-            """).fetchall()]
+            from extractor import _is_metric_report_noise, _is_selfref_noise, _is_quality_chunk
+            _zero_ac_rows = conn.execute(
+                "SELECT id, summary, chunk_type FROM memory_chunks WHERE access_count = 0"
+            ).fetchall()
+            _noise_ids = []
+            for _nid, _nsummary, _ntype in _zero_ac_rows:
+                if (_ntype == 'prompt_context'
+                    or _is_metric_report_noise(_nsummary, _ntype)
+                    or _is_selfref_noise(_nsummary, _ntype)
+                    or not _is_quality_chunk(_nsummary)):
+                    _noise_ids.append(_nid)
             if _noise_ids:
                 from store_vfs import delete_chunks as _delete_chunks
                 _noise_deleted = _delete_chunks(conn, _noise_ids)
