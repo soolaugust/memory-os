@@ -6766,8 +6766,14 @@ def main():
                 return True
         if len(top_k) == 1 and len(_pre_suppress_top_k_lite) >= 2:
             _ps_lite_top1_id = top_k[0][1].get("id", "")
+            # iter1197: lite_pair_min_score_gate — LITE pair 候选须通过 min_score 过滤
+            # 根因（数据驱动，2026-05-08）：9a2692fd(ac=10,跨项目 MTK chunk) 以 score=0.05
+            #   经 LITE pair 路径注入非 kernel 项目。FULL 路径 iter1192 已加 s>=_min_thresh，
+            #   LITE 路径只要求 s>0 → 跨项目低相关 chunk 逃逸。
+            # 修复：pair 候选增加 s>=0.15 硬底（对齐 iter1130 adaptive_floor 最低值）。
+            _lt_pair_floor = 0.10 if _db_chunk_count <= 5 else 0.15
             _ps_lite_cands = [(s, c) for s, c in _pre_suppress_top_k_lite
-                              if c.get("id", "") != _ps_lite_top1_id and s > 0
+                              if c.get("id", "") != _ps_lite_top1_id and s >= _lt_pair_floor
                               and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh
                               and _pair_suppress_ok_lite(c.get("id", ""), s, ac=c.get("access_count", 0) or 0)]
             if _ps_lite_cands:
@@ -6780,8 +6786,10 @@ def main():
         elif len(top_k) == 1 and len(final) >= 3:
             # iter842: post_suppress_pair_from_final (LITE path)
             _ps842_lite_top1_id = top_k[0][1].get("id", "")
-            _ps842_lite_cands = [(float(c.get("importance", 0) or 0), c) for _, c in final
+            # iter1197: lite_pair_min_score_gate — sync iter842 path
+            _ps842_lite_cands = [(float(c.get("importance", 0) or 0), c) for s, c in final
                                  if c.get("id") != _ps842_lite_top1_id
+                                 and s >= _lt_pair_floor
                                  and (c.get("access_count", 0) or 0) < 30
                                  and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh
                                  and _pair_suppress_ok_lite(c.get("id", ""), 0.0, ac=c.get("access_count", 0) or 0)]
