@@ -4075,11 +4075,19 @@ def main():
                 #   escape tier 已有 session_dedup(==0) 保护，不会垄断。
                 # 修复：<=20 chunks 阈值 0.50→0.30，允许中低 relevance 兜底。
                 _escape_rel_floor_hd = 0.30 if _db_chunk_count <= 20 else 0.50
+                # iter1177: escape_cross_project_exclude — 对齐 iter1166 dead_zone_fallback
+                # 根因（数据驱动，2026-05-08）：escape tier 不排除跨项目/global ac>=7 chunk，
+                #   9a2692fd(ac=10,cross-project) 被所有主路径 suppress 后仍可经 escape 逃逸。
+                #   iter1166 已在 dead_zone_fallback 排除，escape tier 须同步。
+                # 修复：排除 跨项目/global ac>=7 的 chunk，本项目知识保留兜底。
                 if not _pebf_cands_hd and _pre_score_relevance_hd:
                     _pebf_cands_hd = [(r, c) for r, c in _pre_score_relevance_hd
                                       if r >= _escape_rel_floor_hd
                                       and (c.get("access_count", 0) or 0) < 30
-                                      and _session_injection_counts.get(c.get("id", ""), 0) == 0]
+                                      and _session_injection_counts.get(c.get("id", ""), 0) == 0
+                                      and not ((c.get("project", "") != project and c.get("project", "") != "global"
+                                                or c.get("project", "") == "global")
+                                               and (c.get("access_count", 0) or 0) >= 7)]
                 if _pebf_cands_hd:
                     _pebf_best_hd = max(_pebf_cands_hd, key=lambda x: x[0])
                     _pebf_score_hd = _pebf_best_hd[0]
@@ -5454,11 +5462,15 @@ def main():
                 # iter1161: escape_session_dedup — session 去重（同步 hard_deadline path）
                 # iter1176: escape_floor_relax_small — 小库 relevance 阈值放宽（同步 hd path）
                 _escape_rel_floor = 0.30 if _db_chunk_count <= 20 else 0.50
+                # iter1177: escape_cross_project_exclude — 同步 hard_deadline path
                 if not _pebf_cands and _pre_score_relevance:
                     _pebf_cands = [(r, c) for r, c in _pre_score_relevance
                                    if r >= _escape_rel_floor
                                    and (c.get("access_count", 0) or 0) < 30
-                                   and _session_injection_counts.get(c.get("id", ""), 0) == 0]
+                                   and _session_injection_counts.get(c.get("id", ""), 0) == 0
+                                   and not ((c.get("project", "") != project and c.get("project", "") != "global"
+                                             or c.get("project", "") == "global")
+                                            and (c.get("access_count", 0) or 0) >= 7)]
                 if _pebf_cands:
                     _pebf_best = max(_pebf_cands, key=lambda x: x[0])
                     _pebf_score = _pebf_best[0]
