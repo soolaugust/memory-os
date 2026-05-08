@@ -2916,7 +2916,12 @@ def main():
                 # 根因（数据驱动，2026-05-07）：PE分析(ac=7) tiny_db 7d=6 仍逃逸。
                 #   base=5, -1=4 仍太宽松。ac>=7 已深度内化，与 global ac>=7 统一 thresh=2。
                 elif chunk.get("project", "") != "global":
-                    _l_ac = _acc if _acc is not None else (chunk.get("access_count", 0) or 0)
+                    # iter1219: raw_ac_7d_thresh — 7d 阈值用 raw ac（不经 time_decay）
+                    # 根因（数据驱动，2026-05-09）：ac=10 chunk cooldown 14d 到期后
+                    #   _acc time_decay 到 7 → 走 thresh=2 而非 thresh=1。
+                    #   7d_count 此时=0（GC 清零），第 1 次注入不触发 suppress。
+                    #   用 raw ac 确保高 ac chunk 阈值判断不受 cooldown 衰减影响。
+                    _l_ac = chunk.get("access_count", 0) or 0
                     # iter1214: deep_saturated_7d_thresh1 — ac>=10 阈值 2→1
                     # 根因（数据驱动，2026-05-08）：import-90139(ac=7→10) 5/4 单日 4 次注入，
                     #   因 TOCTOU 竞争（并发 session 同时读旧 timeline）绕过 thresh=2。

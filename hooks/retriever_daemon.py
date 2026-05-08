@@ -3831,7 +3831,10 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     elif (chunk[_CI_CP] or "") != "global":
                         # iter1143: local_mid_saturated_suppress — sync retriever.py
                         _l_ac_d = chunk[_CI_AC] or 0
-                        if _l_ac_d >= 7:
+                        # iter1219: raw_ac_7d_thresh — ac>=10 thresh=1 对齐 retriever.py
+                        if _l_ac_d >= 10:
+                            _7d_base = 1
+                        elif _l_ac_d >= 7:
                             _7d_base = 2
                         elif _l_ac_d >= 5:
                             _7d_base = max(2, _7d_base - 2)  # iter1152: local_mid_saturated_tighten
