@@ -3622,12 +3622,20 @@ def main():
             # 根因（数据驱动，2026-05-06）：hard_deadline pair inject 仅检查 session_dedup，
             #   7d>=4 的 chunk 被 suppress_final_gate 拦截后经 pair 路径重新注入。
             _hd_pair_7d_ceiling = 5 if _db_chunk_count < 50 else (6 if _db_chunk_count < 100 else 6)  # iter1010: pair_ceiling_widen — 4/5→5/6 恢复 pair 候选池
+            # iter1165: pair_saturated_align — hd pair 动态 cap 同步 FULL 路径 iter1122
+            def _hd_pair_7d_cap(c):
+                _l_ac = c.get("access_count", 0) or 0
+                if _l_ac >= 7:
+                    return 3  # suppress thresh=2, pair=thresh+1
+                elif _l_ac >= 5:
+                    return min(_hd_pair_7d_ceiling, 4)
+                return _hd_pair_7d_ceiling
             if len(positive) == 1 and len(final) >= 3:
                 _pair_cands_hd = [(s, c) for s, c in final
                                   if s > 0.12 and s < _min_thresh
                                   and c.get("id") != positive[0][1].get("id")
                                   and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh_hd
-                                  and _recent_7d_counts.get(c.get("id", ""), 0) < _hd_pair_7d_ceiling]
+                                  and _recent_7d_counts.get(c.get("id", ""), 0) < _hd_pair_7d_cap(c)]
                 if _pair_cands_hd:
                     _pair_best_hd = max(_pair_cands_hd, key=lambda x: x[0])
                     positive.append(_pair_best_hd)
@@ -3637,7 +3645,7 @@ def main():
                                      if c.get("id") != positive[0][1].get("id")
                                      and (c.get("access_count", 0) or 0) < 30
                                      and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh_hd
-                                     and _recent_7d_counts.get(c.get("id", ""), 0) < _hd_pair_7d_ceiling]
+                                     and _recent_7d_counts.get(c.get("id", ""), 0) < _hd_pair_7d_cap(c)]
                     if _imp_pairs_hd:
                         _imp_best_hd = max(_imp_pairs_hd, key=lambda x: x[0])
                         # iter941: imp_pair_top1_gate (hard_deadline path)
@@ -5833,13 +5841,17 @@ def main():
         #   根因（数据驱动，2026-05-05）：iter832 从 _pre_suppress_top_k 恢复候选时不检查
         #   24h/7d suppress 计数，导致刚被 suppress_final_gate 移除的垄断 chunk 被重新注入。
         #   修复：候选过滤加入 _rt663_24h/_rt663_7d 检查（与 suppress_final_gate 阈值一致）。
-        def _pair_suppress_ok(cid, score):
+        def _pair_suppress_ok(cid, score, ac=0):
             """iter851: 检查候选是否被 suppress_final_gate 过滤（复用已计算的实时计数）。
             iter884: pair_suppress_relax — 配对候选放宽 7d 阈值（+2）
               根因（数据驱动，2026-05-05）：38-chunk 库 59% 注入为单条。
               _pair_suppress_ok 用与 suppress_final_gate 相同的 7d 阈值(tiny=3)，
               但活跃 chunk 7d>=3 极普遍 → 配对候选全被过滤 → 单条逃逸。
-              配对是补充上下文非主注入，放宽 7d 阈值 +2 允许更多候选入选。"""
+              配对是补充上下文非主注入，放宽 7d 阈值 +2 允许更多候选入选。
+            iter1165: pair_saturated_align — 高 ac chunk pair 7d 阈值对齐 suppress_final_gate
+              根因（数据驱动，2026-05-08）：import-90139(ac=7) 7d=6 仍经 pair 逃逸注入。
+              suppress_final_gate 对 ac>=7 设 thresh=2，但 pair 路径 tiny_db lim=6 → gap=4。
+              修复：ac>=7 → lim=3, ac>=5 → lim=4（对齐 suppress_final_gate thresh +1）。"""
             try:
                 _p24 = _rt663_24h.get(cid, 0)
                 _p7d = _rt663_7d.get(cid, 0)
@@ -5852,6 +5864,11 @@ def main():
                 # 根因（数据驱动，2026-05-06）：7d=4 chunk 被 suppress_final_gate(4) 拦截后
                 #   经 pair 路径逃逸（pair lim=5 > final_gate=4）。对齐消除 1-gap 逃逸窗口。
                 _p7d_lim = 6 if _sf663_tiny_db else (7 if score >= 0.5 else 5) if _sf663_small_db else (6 if score >= 0.5 else 4)  # iter1000: pair_7d sync final_gate+1
+                # iter1165: pair_saturated_align — 高 ac chunk 对齐 suppress_final_gate 阈值
+                if ac >= 7:
+                    _p7d_lim = 3  # suppress_final_gate thresh=2, pair=thresh+1
+                elif ac >= 5:
+                    _p7d_lim = min(_p7d_lim, 4)  # suppress_final_gate thresh=max(2,t-2), pair=thresh+2
                 return _p24 < _p24_lim and _p7d < _p7d_lim
             except NameError:
                 return True  # suppress_final_gate 未执行（try 失败），不额外限制
@@ -5860,7 +5877,7 @@ def main():
             _ps_candidates = [(s, c) for s, c in _pre_suppress_top_k
                               if c.get("id", "") != _ps_top1_id and s > 0
                               and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh
-                              and _pair_suppress_ok(c.get("id", ""), s)]
+                              and _pair_suppress_ok(c.get("id", ""), s, ac=c.get("access_count", 0) or 0)]
             if _ps_candidates:
                 _ps_best = max(_ps_candidates, key=lambda x: x[0])
                 top_k.append(_ps_best)
@@ -5881,7 +5898,7 @@ def main():
                             if c.get("id") != _ps842_top1_id
                             and (c.get("access_count", 0) or 0) < 30
                             and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh
-                            and _pair_suppress_ok(c.get("id", ""), 0.0)]
+                            and _pair_suppress_ok(c.get("id", ""), 0.0, ac=c.get("access_count", 0) or 0)]
             if _ps842_cands:
                 _ps842_best = max(_ps842_cands, key=lambda x: x[0])
                 if _ps842_best[0] >= 0.3:
@@ -6626,10 +6643,11 @@ def main():
         # 同 FULL 路径逻辑：suppress_final_gate_lite 过滤后如果 top_k=1，
         # 从 _pre_suppress_top_k_lite 快照中选次优配对，确保多知识组合上下文。
         # iter851: suppress_aware_pair — 候选尊重 suppress_final_gate_lite 的 timeline 判定
-        def _pair_suppress_ok_lite(cid, score):
+        def _pair_suppress_ok_lite(cid, score, ac=0):
             """iter851: LITE 路径检查候选是否被 suppress_final_gate_lite 过滤。
             iter884: pair_suppress_relax — 配对候选 7d 阈值放宽 +2（同 FULL 路径）。
-            iter885: lite_7d_sync — pair 基础 7d 阈值同步收紧（tiny 5→3 base → pair 5）。"""
+            iter885: lite_7d_sync — pair 基础 7d 阈值同步收紧（tiny 5→3 base → pair 5）。
+            iter1165: pair_saturated_align — 高 ac chunk pair 7d 阈值对齐（同 FULL 路径）。"""
             try:
                 _ts_list = _itl758.get(cid, [])
                 _p6 = sum(1 for t in _ts_list if t > _cut758_6h)
@@ -6639,6 +6657,11 @@ def main():
                 _p24_lim = 3 if _sf758_tiny_db else (3 if score >= 0.5 else 2) if _sf758_small_db else (3 if score >= 0.5 else 2)
                 # iter911: pair_7d_tighten — tiny 5→4, small 6/5→5/4, large 7/5→5/5
                 _p7d_lim = 5 if _sf758_tiny_db else (5 if score >= 0.5 else 4) if _sf758_small_db else (5 if score >= 0.5 else 5)  # iter952: LITE pair 6→5
+                # iter1165: pair_saturated_align — 高 ac chunk 对齐 suppress 阈值
+                if ac >= 7:
+                    _p7d_lim = 3
+                elif ac >= 5:
+                    _p7d_lim = min(_p7d_lim, 4)
                 return _p6 < _p6_lim and _p24 < _p24_lim and _p7d < _p7d_lim
             except NameError:
                 return True
@@ -6647,7 +6670,7 @@ def main():
             _ps_lite_cands = [(s, c) for s, c in _pre_suppress_top_k_lite
                               if c.get("id", "") != _ps_lite_top1_id and s > 0
                               and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh
-                              and _pair_suppress_ok_lite(c.get("id", ""), s)]
+                              and _pair_suppress_ok_lite(c.get("id", ""), s, ac=c.get("access_count", 0) or 0)]
             if _ps_lite_cands:
                 _ps_lite_best = max(_ps_lite_cands, key=lambda x: x[0])
                 top_k.append(_ps_lite_best)
@@ -6662,7 +6685,7 @@ def main():
                                  if c.get("id") != _ps842_lite_top1_id
                                  and (c.get("access_count", 0) or 0) < 30
                                  and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh
-                                 and _pair_suppress_ok_lite(c.get("id", ""), 0.0)]
+                                 and _pair_suppress_ok_lite(c.get("id", ""), 0.0, ac=c.get("access_count", 0) or 0)]
             if _ps842_lite_cands:
                 _ps842_lite_best = max(_ps842_lite_cands, key=lambda x: x[0])
                 if _ps842_lite_best[0] >= 0.3:
