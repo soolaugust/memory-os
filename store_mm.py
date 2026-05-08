@@ -282,15 +282,22 @@ def _reclaim_cold_born(conn: sqlite3.Connection, project: str,
     修复：推理碎片类型 1 天即回收（信息密度低、检索匹配率低），其他类型保持 3 天。
     """
     from store_vfs import get_pinned_ids
-    _FAST_RECLAIM_TYPES = ("causal_chain", "reasoning_chain")
-    cold_born_days = 3
+    # iter1187: widen_fast_reclaim — conversation_summary 纳入快速回收 + 常规窗口 3→2 天
+    # 根因（数据驱动，2026-05-08）：15 条 ACTIVE ac=0 中 2 条 conversation_summary
+    #   是 iter596 禁止写入前的历史残留，占候选池 2.7%。常规 3 天窗口让各类噪声
+    #   decision（6 条迭代器量化报告）驻留过久——当前 gate 已拦截新写入，
+    #   但残留 chunk 需更短的回收窗口清除。
+    # 修复：(1) conversation_summary 纳入 1 天快速回收
+    #   (2) 常规类型 cold_born 3→2 天（有价值 chunk 2 天内必有检索命中）。
+    _FAST_RECLAIM_TYPES = ("causal_chain", "reasoning_chain", "conversation_summary")
+    cold_born_days = 2
     cold_born_days_fast = 1
     # Phase 1: fast-reclaim 类型（1 天）
     rows_fast = conn.execute(
         """SELECT id FROM memory_chunks
            WHERE project = ?
              AND COALESCE(access_count, 0) = 0
-             AND chunk_type IN ('causal_chain', 'reasoning_chain')
+             AND chunk_type IN ('causal_chain', 'reasoning_chain', 'conversation_summary')
              AND COALESCE(importance, 0.5) < 0.85
              AND COALESCE(oom_adj, 0) > -1000
              AND datetime(created_at) < datetime('now', ?)
@@ -298,13 +305,13 @@ def _reclaim_cold_born(conn: sqlite3.Connection, project: str,
            LIMIT ?""",
         (project, f"-{cold_born_days_fast} days", max_reclaim),
     ).fetchall()
-    # Phase 2: 其他类型（3 天）
+    # Phase 2: 其他类型（2 天）
     _remaining = max_reclaim - len(rows_fast)
     rows_rest = conn.execute(
         """SELECT id FROM memory_chunks
            WHERE project = ?
              AND COALESCE(access_count, 0) = 0
-             AND chunk_type NOT IN ('causal_chain', 'reasoning_chain', 'task_state')
+             AND chunk_type NOT IN ('causal_chain', 'reasoning_chain', 'conversation_summary', 'task_state')
              AND COALESCE(importance, 0.5) < 0.85
              AND COALESCE(oom_adj, 0) > -1000
              AND datetime(created_at) < datetime('now', ?)
