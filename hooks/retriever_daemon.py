@@ -3867,6 +3867,9 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                         else:
                             # iter1111: local_cooldown_5d — ac=4-6 cooldown 48h→5d
                             _cd_cut = _cutoff_14d if (chunk[_CI_AC] or 0) >= 10 else (_cutoff_10d if (chunk[_CI_AC] or 0) >= 7 else _cutoff_5d)
+                        # iter1151: staggered_cooldown_jitter_daemon — 对齐 retriever.py iter1145
+                        _cd_jh_d = (hash(chunk[_CI_ID]) % 49)
+                        _cd_cut = (_dt648.fromisoformat(_cd_cut) - _td648(hours=_cd_jh_d)).isoformat()
                         if _cd_last > _cd_cut:
                             score = 0.0
                 # iter989: saturation_widen — ac>=5 渐进衰减，ac>=12 suppress
@@ -4026,11 +4029,16 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                             _cd_last_d2 = _cd_la_d2
                     if _cd_last_d2:
                         # iter1091: cooldown_daemon_sync — 对齐 retriever.py iter1089
+                        # iter1151: dict_cooldown_align — 修复 ac>=10 用 7d 而非 14d 的错误
                         if _cd_is_global_d2:
                             _cd_cut_d2 = _cutoff_14d if (chunk.get("access_count", 0) or 0) >= 10 else _cutoff_10d
                         else:
                             # iter1111: local_cooldown_5d
-                            _cd_cut_d2 = _cutoff_7d if (chunk.get("access_count", 0) or 0) >= 10 else (_cutoff_5d if (chunk.get("access_count", 0) or 0) >= 7 else _cutoff_5d)
+                            # iter1151: ac>=10→14d, ac>=7→10d（原 7d/5d 未对齐 FTS path）
+                            _cd_cut_d2 = _cutoff_14d if (chunk.get("access_count", 0) or 0) >= 10 else (_cutoff_10d if (chunk.get("access_count", 0) or 0) >= 7 else _cutoff_5d)
+                        # iter1151: staggered_cooldown_jitter_daemon — 对齐 retriever.py iter1145
+                        _cd_jh_d2 = (hash(chunk.get("id", "")) % 49)
+                        _cd_cut_d2 = (_dt648.fromisoformat(_cd_cut_d2) - _td648(hours=_cd_jh_d2)).isoformat()
                         if _cd_last_d2 > _cd_cut_d2:
                             score = 0.0
                 # iter989: saturation_widen — ac>=5 渐进衰减，ac>=12 suppress
