@@ -2828,8 +2828,9 @@ def main():
                 _6h_is_constraint = chunk.get("chunk_type") == "design_constraint"
                 # iter1048: global_6h_sync — global ac>=4 同步 iter1023(24h cap=1)
                 _6h_is_global_saturated = chunk.get("project") == "global" and _6h_ac >= 4
-                # iter1171: constraint_local_saturated — design_constraint ac>=4 也享受 6h_thresh=1
-                _6h_thresh = 1 if (_6h_ac >= 7 or (_6h_is_constraint and _6h_ac >= 4) or _6h_is_global_saturated) else 2
+                # iter1230: 6h_floor_2 — 6h suppress 最低阈值 2（允许 6h 内注入 1 次）
+                # 根因：thresh=1 导致活跃 session 22% 空召回，7d suppress 已控垄断。
+                _6h_thresh = 2 if (_6h_ac >= 7 or (_6h_is_constraint and _6h_ac >= 4) or _6h_is_global_saturated) else 3
                 # iter1227: sparse_global_shield — local_sparse 时 global chunk 6h 阈值 +1
                 if _sparse_global_relax:
                     _6h_thresh += 1

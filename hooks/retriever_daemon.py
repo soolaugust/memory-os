@@ -3813,7 +3813,11 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 # iter1047: constraint_saturated_6h — design_constraint ac>=5 也享受 thresh=1
                 # iter1048: global_6h_sync — global ac>=4 同步 iter1023(24h cap=1)
                 # iter1225: constraint_saturated_6h_sync — design_constraint ac>=4 对齐 retriever.py iter1171
-                _6h_thresh_d = 1 if (_ac >= 7 or (chunk[_CI_CT] == "design_constraint" and _ac >= 4) or (chunk[_CI_CP] == "global" and _ac >= 4)) else 2
+                # iter1230: 6h_floor_2 — 6h suppress 最低阈值 2（允许 6h 内注入 1 次）
+                # 根因（数据驱动，2026-05-09）：thresh=1 导致活跃 session 内 22% 空召回。
+                #   24-chunk 库大部分 ac>=7，6h 注入 1 次即全灭 → 后续请求零知识。
+                #   7d suppress 仍控制长期垄断，6h 只需防 burst（>=2 次/6h 才异常）。
+                _6h_thresh_d = 2 if (_ac >= 7 or (chunk[_CI_CT] == "design_constraint" and _ac >= 4) or (chunk[_CI_CP] == "global" and _ac >= 4)) else 3
                 # iter1227: sparse_global_shield — local_sparse 时 global chunk 6h 阈值 +1
                 if _local_sparse_d and (chunk[_CI_CP] or "") == "global":
                     _6h_thresh_d += 1
@@ -3992,7 +3996,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 _6h_ac_d2 = chunk.get("access_count", 0) or 0
                 # iter1048: global_6h_sync — global ac>=4 同步 iter1023(24h cap=1)
                 # iter1225: constraint_saturated_6h_sync — ac>=5→4 对齐 retriever.py iter1171
-                _6h_thresh_d2 = 1 if (_6h_ac_d2 >= 7 or (chunk.get("chunk_type") == "design_constraint" and _6h_ac_d2 >= 4) or (chunk.get("project") == "global" and _6h_ac_d2 >= 4)) else 2
+                # iter1230: 6h_floor_2 — sync with above
+                _6h_thresh_d2 = 2 if (_6h_ac_d2 >= 7 or (chunk.get("chunk_type") == "design_constraint" and _6h_ac_d2 >= 4) or (chunk.get("project") == "global" and _6h_ac_d2 >= 4)) else 3
                 # iter1227: sparse_global_shield — dict path sync
                 if _local_sparse_d and (chunk.get("project", "") or "") == "global":
                     _6h_thresh_d2 += 1
