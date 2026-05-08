@@ -4011,6 +4011,18 @@ def main():
                                       if _recent_7d_counts.get(c.get("id", ""), 0) < _pebf_chunk_ceiling_hd(c)
                                       and r >= 0.20
                                       and (c.get("access_count", 0) or 0) < 30]
+                # iter1160: relevance_escape_ceiling — 高 relevance 突破 ceiling 消除空召回
+                # 根因（数据驱动，2026-05-08）：23-chunk 库 5/2-5/5 出现 7 次 FULL 空召回
+                #   (cands=10-34)，ac>=7 chunk ceiling=2-3 但 7d=3-6 全 BLOCKED。
+                #   relevance_fallback 同样被 ceiling 限制 → 无法兜底。
+                #   此路径是最后防线（suppress 全灭 + score 全灭 + 标准 relevance 全灭），
+                #   选最多 1 条（max），不会引发垄断。
+                # 修复：relevance>=0.5 时去除 ceiling 限制。不检查 cooldown（全灭兜底不应再拦截）。
+                #   选中后走 LITE 格式（_session_full_injected 机制），零冗余。
+                if not _pebf_cands_hd and _pre_score_relevance_hd:
+                    _pebf_cands_hd = [(r, c) for r, c in _pre_score_relevance_hd
+                                      if r >= 0.50
+                                      and (c.get("access_count", 0) or 0) < 30]
                 if _pebf_cands_hd:
                     _pebf_best_hd = max(_pebf_cands_hd, key=lambda x: x[0])
                     _pebf_score_hd = _pebf_best_hd[0]
@@ -5351,6 +5363,12 @@ def main():
                     _pebf_cands = [(r, c) for r, c in _pre_score_relevance
                                    if _recent_7d_counts.get(c.get("id", ""), 0) < _pebf_chunk_ceil(c)
                                    and r >= 0.20
+                                   and (c.get("access_count", 0) or 0) < 30]
+                # iter1160: relevance_escape_ceiling — FULL 路径同步 hard_deadline
+                # 最后防线：去除 7d ceiling，仅限 relevance>=0.5。不加 cooldown（此处已是全灭兜底）。
+                if not _pebf_cands and _pre_score_relevance:
+                    _pebf_cands = [(r, c) for r, c in _pre_score_relevance
+                                   if r >= 0.50
                                    and (c.get("access_count", 0) or 0) < 30]
                 if _pebf_cands:
                     _pebf_best = max(_pebf_cands, key=lambda x: x[0])
