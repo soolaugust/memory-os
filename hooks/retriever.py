@@ -4019,10 +4019,16 @@ def main():
                 #   选最多 1 条（max），不会引发垄断。
                 # 修复：relevance>=0.5 时去除 ceiling 限制。不检查 cooldown（全灭兜底不应再拦截）。
                 #   选中后走 LITE 格式（_session_full_injected 机制），零冗余。
+                # iter1161: escape_session_dedup — escape tier 加 session 去重防止密集 session 垄断
+                # 根因（数据驱动，2026-05-08 预防性）：escape tier 无 cooldown/session 检查，
+                #   密集 session（同 session 多次请求）中同一 chunk 可每次通过 escape 被注入。
+                #   session 内已注入过的知识边际信息=0，第 2 次起应让位于次优候选。
+                # 修复：加 session_injection_counts == 0 条件，同 session 不重复 escape 注入。
                 if not _pebf_cands_hd and _pre_score_relevance_hd:
                     _pebf_cands_hd = [(r, c) for r, c in _pre_score_relevance_hd
                                       if r >= 0.50
-                                      and (c.get("access_count", 0) or 0) < 30]
+                                      and (c.get("access_count", 0) or 0) < 30
+                                      and _session_injection_counts.get(c.get("id", ""), 0) == 0]
                 if _pebf_cands_hd:
                     _pebf_best_hd = max(_pebf_cands_hd, key=lambda x: x[0])
                     _pebf_score_hd = _pebf_best_hd[0]
@@ -5366,10 +5372,12 @@ def main():
                                    and (c.get("access_count", 0) or 0) < 30]
                 # iter1160: relevance_escape_ceiling — FULL 路径同步 hard_deadline
                 # 最后防线：去除 7d ceiling，仅限 relevance>=0.5。不加 cooldown（此处已是全灭兜底）。
+                # iter1161: escape_session_dedup — session 去重（同步 hard_deadline path）
                 if not _pebf_cands and _pre_score_relevance:
                     _pebf_cands = [(r, c) for r, c in _pre_score_relevance
                                    if r >= 0.50
-                                   and (c.get("access_count", 0) or 0) < 30]
+                                   and (c.get("access_count", 0) or 0) < 30
+                                   and _session_injection_counts.get(c.get("id", ""), 0) == 0]
                 if _pebf_cands:
                     _pebf_best = max(_pebf_cands, key=lambda x: x[0])
                     _pebf_score = _pebf_best[0]
