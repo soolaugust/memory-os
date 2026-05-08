@@ -2156,6 +2156,20 @@ def insert_chunk(conn: sqlite3.Connection, chunk_dict: dict) -> None:
         except Exception:
             pass
         return  # 静默拒绝，不抛异常（与 LSM deny 语义一致）
+    # iter1211: vfs_selfref_semantic_gate — VFS 层语义噪声终极防线
+    try:
+        from hooks.extractor import _is_selfref_noise, _is_metric_report_noise
+        _vfs_s = d.get("summary", "")
+        _vfs_ct = d.get("chunk_type", "")
+        if _is_selfref_noise(_vfs_s, _vfs_ct) or _is_metric_report_noise(_vfs_s, _vfs_ct):
+            try:
+                dmesg_log(conn, DMESG_WARN, "vfs",
+                          f"selfref_gate REJECTED: '{_vfs_s[:60]}'")
+            except Exception:
+                pass
+            return
+    except ImportError:
+        pass
     # ── iter973: content_min_density_gate — content 过短且无增量时拒绝 ──────
     # 根因（数据驱动，2026-05-06）：17 个 ac=0 碎片 chunk 逃逸所有上层 gate 写入 DB，
     #   共同特征：content<120 字且 content≈summary（无信息增量）。占 FTS 23% 搜索空间。
