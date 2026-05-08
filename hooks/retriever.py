@@ -3634,8 +3634,11 @@ def main():
                         _af_ratio = min(_af_ratio, 0.20)
                     _adaptive_floor = _top1_score * _af_ratio
                     # iter1130: relevance_floor_raise — 0.12→0.15（配合 af_ratio 提升）
-                    # 数据驱动：0.12-0.15 区间 9 个注入均为泛查询低相关配对（feishu CLI/patch 格式等）
-                    _min_thresh = min(_min_thresh, max(_adaptive_floor, 0.15))
+                    # iter1199: relevance_floor_020 — 0.15→0.20
+                    # 数据驱动（2026-05-08）：27 次 score∈[0.10,0.20) 注入中 18 次<0.15，
+                    #   全部为泛匹配配对（feishu CLI/patch 格式/memory 验证等 design_constraint）。
+                    #   0.15 仍放行 score=0.15-0.19 的 9 次噪声。提升到 0.20 消除 67% 低分注入。
+                    _min_thresh = min(_min_thresh, max(_adaptive_floor, 0.20))
             # iter579: copy_page_range — hard deadline 路径也应用 gap bridging
             if (len(final) >= 3 and _sysctl("retriever.gap_bridge_enabled")
                     and not _is_generic_knowledge_query(query)):
@@ -6781,7 +6784,8 @@ def main():
             #   经 LITE pair 路径注入非 kernel 项目。FULL 路径 iter1192 已加 s>=_min_thresh，
             #   LITE 路径只要求 s>0 → 跨项目低相关 chunk 逃逸。
             # 修复：pair 候选增加 s>=0.15 硬底（对齐 iter1130 adaptive_floor 最低值）。
-            _lt_pair_floor = 0.10 if _db_chunk_count <= 5 else 0.15
+            # iter1199: sync relevance_floor_020 — 0.15→0.20
+            _lt_pair_floor = 0.10 if _db_chunk_count <= 5 else 0.20
             _ps_lite_cands = [(s, c) for s, c in _pre_suppress_top_k_lite
                               if c.get("id", "") != _ps_lite_top1_id and s >= _lt_pair_floor
                               and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh
