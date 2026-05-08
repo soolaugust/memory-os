@@ -2967,6 +2967,12 @@ def main():
                             _suppress_7d_thresh = max(2, _suppress_7d_thresh - 2)
                         else:
                             _suppress_7d_thresh = max(3, _suppress_7d_thresh - 1)
+                    # iter1242: ac3_7d_tighten — ac>=3 本项目 chunk 7d 阈值 -1
+                    # 根因（数据驱动，2026-05-09）：import-90139(ac=3,procedure) small_db
+                    #   高分 base=6, 7d=6 才触发 suppress。用户已看 3 次仍被周注入 6 次。
+                    # 修复：ac>=3 → -1（6→5/4→3），7d 内最多 4/2 次后 suppress。
+                    elif _l_ac >= 3:
+                        _suppress_7d_thresh = max(3, _suppress_7d_thresh - 1)
                 if _r7d_cnt >= _suppress_7d_thresh:
                     score = 0.0
                     _hard_suppressed = True
@@ -5939,6 +5945,9 @@ def main():
                     elif _l_ac >= 4:
                         if c.get("chunk_type") == "design_constraint":
                             return max(2, _t - 2)
+                        return max(3, _t - 1)
+                    # iter1242: ac3_7d_tighten — ac>=3 阈值 -1 sync suppress_final_gate
+                    elif _l_ac >= 3:
                         return max(3, _t - 1)
                     return _t
                 # iter968: micro_db_final_gate_bypass — <=5 自有 chunk 库跳过 final_gate
