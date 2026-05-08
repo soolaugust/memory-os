@@ -3679,8 +3679,16 @@ def main():
                     #   接近零，按 importance 选也无法保证相关性。
                     _sef_hd_max = _sef_hd[0]  # final 中最高 _score_chunk 输出
                     _DEAD_ZONE_MIN = 0.05
+                    # iter1166: fallback_cooldown_align — 跨项目高 ac chunk 排除 fallback
+                    # 根因（数据驱动，2026-05-08）：9a2692fd(ac=10,cross-project) 被 cooldown suppress
+                    #   (score=0)后经 dead_zone_fallback 以 importance 排序重新注入。ac<30 过宽。
+                    #   跨项目/global ac>=7 已被所有主路径 suppress(thresh=2)，fallback 不应绕过。
+                    # 修复：跨项目/global ac>=7 排除出 fallback 候选；本项目知识保留兜底能力。
                     _sef_hd_imp = [(float(c.get("importance", 0) or 0), c) for _, c in final
-                                   if (c.get("access_count", 0) or 0) < 30]
+                                   if (c.get("access_count", 0) or 0) < 30
+                                   and not ((c.get("project", "") != project and c.get("project", "") != "global"
+                                             or c.get("project", "") == "global")
+                                            and (c.get("access_count", 0) or 0) >= 7)]
                     if _sef_hd_imp and _sef_hd_max >= _DEAD_ZONE_MIN:
                         _sef_hd_best = max(_sef_hd_imp, key=lambda x: x[0])
                         positive = [(_sef_hd_best[0] * 0.1, _sef_hd_best[1])]
@@ -3704,10 +3712,13 @@ def main():
             # 根因：iter826 在 fallback 之前检查 positive==1，fallback 产出的单条不被覆盖。
             if len(positive) == 1 and len(final) >= 3:
                 _fb_pair_hd_top1_id = positive[0][1].get("id", "")
+                # iter1166: fallback_cooldown_align — sync fallback_pair_inject (hd)
                 _fb_pair_hd_cands = [(float(c.get("importance", 0) or 0), c) for _, c in final
                                      if c.get("id") != _fb_pair_hd_top1_id
                                      and (c.get("access_count", 0) or 0) < 30
-                                     and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh_hd]
+                                     and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh_hd
+                                     and not ((c.get("project", "") != project or c.get("project", "") == "global")
+                                              and (c.get("access_count", 0) or 0) >= 7)]
                 if _fb_pair_hd_cands:
                     _fb_pair_hd_best = max(_fb_pair_hd_cands, key=lambda x: x[0])
                     if _fb_pair_hd_best[0] >= 0.3:
@@ -4826,8 +4837,11 @@ def main():
                 # iter775: dead_zone_min_score — 同 hard_deadline 路径
                 _sef_full_max = _sef_full[0]
                 _DEAD_ZONE_MIN_FULL = 0.05
+                # iter1166: fallback_cooldown_align — sync FULL dead_zone_fallback
                 _sef_by_imp = [(float(c.get("importance", 0) or 0), c) for _, c in final
-                               if (c.get("access_count", 0) or 0) < 30]
+                               if (c.get("access_count", 0) or 0) < 30
+                               and not ((c.get("project", "") != project or c.get("project", "") == "global")
+                                        and (c.get("access_count", 0) or 0) >= 7)]
                 if _sef_by_imp and _sef_full_max >= _DEAD_ZONE_MIN_FULL:
                     _sef_best = max(_sef_by_imp, key=lambda x: x[0])
                     positive = [(_sef_best[0] * 0.1, _sef_best[1])]
@@ -4852,13 +4866,16 @@ def main():
         _fb_pair_7d_ceiling = 5 if _db_chunk_count < 50 else (6 if _db_chunk_count < 100 else 6)  # iter1010: pair_ceiling_widen — 4/5→5/6 恢复 pair 候选池
         if len(positive) == 1 and len(final) >= 3:
             _fb_pair_top1_id = positive[0][1].get("id", "")
+            # iter1166: fallback_cooldown_align — sync FULL fallback_pair
             _fb_pair_cands = [(float(c.get("importance", 0) or 0), c) for _, c in final
                               if c.get("id") != _fb_pair_top1_id
                               and (c.get("access_count", 0) or 0) < 30
                               and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh
                               and _recent_7d_counts.get(c.get("id", ""), 0) < _fb_pair_7d_ceiling
                               # iter1027: fallback_24h_align — global ac>=4 阈值=1
-                              and _recent_24h_counts.get(c.get("id", ""), 0) < (1 if c.get("project") == "global" and (c.get("access_count", 0) or 0) >= 4 else 3)]
+                              and _recent_24h_counts.get(c.get("id", ""), 0) < (1 if c.get("project") == "global" and (c.get("access_count", 0) or 0) >= 4 else 3)
+                              and not ((c.get("project", "") != project or c.get("project", "") == "global")
+                                       and (c.get("access_count", 0) or 0) >= 7)]
             if _fb_pair_cands:
                 _fb_pair_best = max(_fb_pair_cands, key=lambda x: x[0])
                 if _fb_pair_best[0] >= 0.3:
