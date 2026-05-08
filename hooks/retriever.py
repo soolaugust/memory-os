@@ -2593,11 +2593,18 @@ def main():
             #   未与 cooldown 联动。高 ac 知识同 session 重复注入=零信息增量。
             # 修复：ac>=5 且 session 内已注入 >=1 次 → hard suppress。
             #   与 cooldown 形成双重保护：跨 session 靠 timeline，同 session 靠此处。
-            if not _hard_suppressed and (not _micro_db or _cd_is_cross_project) and _acc >= 5:
+            # iter1200: sparse_session_suppress_shield — local_sparse 本地 chunk 跳过 session hard suppress
+            # 根因（数据驱动，2026-05-08）：git:78dc99a5695f(3 local + 6 global = 9 total)
+            #   _micro_db=False(9>5)，ac=8 的唯一本地知识 session 首注入后 hard suppress，
+            #   后续 5 次连续空召回。iter1172 _local_sparse 保护了 24h/7d suppress，
+            #   但此处 session_injection suppress 未对齐，local chunk 仍被过杀。
+            # 修复：条件加入 _sparse_shield_cd（local_sparse + 本地 chunk），与 24h/7d 路径对齐。
+            _sparse_shield_cd = _local_sparse and not _cd_is_cross_project
+            if not _hard_suppressed and (not _micro_db or _cd_is_cross_project) and not _sparse_shield_cd and _acc >= 5:
                 if _session_injection_counts.get(chunk.get("id", ""), 0) >= 1:
                     score = 0.0
                     _hard_suppressed = True
-            if (not _micro_db or _cd_is_cross_project) and _acc >= 12:
+            if (not _micro_db or _cd_is_cross_project) and not _sparse_shield_cd and _acc >= 12:
                 score = 0.0
                 _hard_suppressed = True
             elif (not _micro_db or _cd_is_cross_project) and _acc >= 5:
@@ -3633,12 +3640,12 @@ def main():
                     if _db_chunk_count < 100:
                         _af_ratio = min(_af_ratio, 0.20)
                     _adaptive_floor = _top1_score * _af_ratio
-                    # iter1130: relevance_floor_raise — 0.12→0.15（配合 af_ratio 提升）
-                    # iter1199: relevance_floor_020 — 0.15→0.20
-                    # 数据驱动（2026-05-08）：27 次 score∈[0.10,0.20) 注入中 18 次<0.15，
-                    #   全部为泛匹配配对（feishu CLI/patch 格式/memory 验证等 design_constraint）。
-                    #   0.15 仍放行 score=0.15-0.19 的 9 次噪声。提升到 0.20 消除 67% 低分注入。
-                    _min_thresh = min(_min_thresh, max(_adaptive_floor, 0.20))
+                    # iter1200: adaptive_relevance_floor — 按库大小分级硬底
+                    # 根因（数据驱动，2026-05-08）：39% trace 有候选但全被 0.20 硬底过滤，
+                    #   git:78dc99a5695f(3 chunks) 70% 过滤、abspath:51963532bc1b(1 chunk) 50%。
+                    #   小库 FTS5 BM25 IDF 分量天然偏低（词汇覆盖不足），统一 0.20 过严。
+                    _rf = 0.08 if _db_chunk_count <= 5 else (0.12 if _db_chunk_count < 50 else 0.20)
+                    _min_thresh = min(_min_thresh, max(_adaptive_floor, _rf))
             # iter579: copy_page_range — hard deadline 路径也应用 gap bridging
             if (len(final) >= 3 and _sysctl("retriever.gap_bridge_enabled")
                     and not _is_generic_knowledge_query(query)):
@@ -4710,8 +4717,9 @@ def main():
                 if _db_chunk_count < 100:
                     _af_ratio = min(_af_ratio, 0.20)
                 _adaptive_floor = _top1_score * _af_ratio
-                # iter1130: relevance_floor_raise — 0.12→0.15 (FULL path sync)
-                _min_thresh = min(_min_thresh, max(_adaptive_floor, 0.15))
+                # iter1200: adaptive_relevance_floor (FULL path sync)
+                _rf = 0.08 if _db_chunk_count <= 5 else (0.12 if _db_chunk_count < 50 else 0.20)
+                _min_thresh = min(_min_thresh, max(_adaptive_floor, _rf))
         # ── iter579: copy_page_range — Score Gap Bridging ─────────────────
         # OS 类比：Linux copy_page_range() (Andrea Arcangeli, 2004, mm/memory.c)
         #   fork() 复制父进程地址空间时，大 VMA 间的 gap 不阻止复制下一个有效 VMA。
@@ -6784,8 +6792,8 @@ def main():
             #   经 LITE pair 路径注入非 kernel 项目。FULL 路径 iter1192 已加 s>=_min_thresh，
             #   LITE 路径只要求 s>0 → 跨项目低相关 chunk 逃逸。
             # 修复：pair 候选增加 s>=0.15 硬底（对齐 iter1130 adaptive_floor 最低值）。
-            # iter1199: sync relevance_floor_020 — 0.15→0.20
-            _lt_pair_floor = 0.10 if _db_chunk_count <= 5 else 0.20
+            # iter1200: adaptive_relevance_floor (LITE pair sync)
+            _lt_pair_floor = 0.08 if _db_chunk_count <= 5 else (0.12 if _db_chunk_count < 50 else 0.20)
             _ps_lite_cands = [(s, c) for s, c in _pre_suppress_top_k_lite
                               if c.get("id", "") != _ps_lite_top1_id and s >= _lt_pair_floor
                               and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh
