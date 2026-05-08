@@ -5348,8 +5348,16 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 _fb_ceiling_d = 5 if _db_chunk_count < 50 else (6 if _db_chunk_count < 100 else 5)  # iter1000: tiny 3→5 sync
                 # iter1053: fallback_ceiling_align_local_deep — per-chunk ceiling 对齐 suppress thresh
                 def _fb_ceiling_d_fn(c):
-                    if c.get("project", "") == "global" and (c.get("access_count", 0) or 0) >= 4:
-                        return max(2, _fb_ceiling_d - 2)
+                    # iter1150: global_fallback_ceiling_align — ac>=5 直接=2
+                    # 根因：suppress_final_gate 对 global ac>=5→thresh=2，但 fallback ceiling
+                    #   仅区分 ac>=4→max(2,base-2)=3，ac=5-6 chunk 经 fallback 逃逸。
+                    if c.get("project", "") == "global":
+                        _gac = c.get("access_count", 0) or 0
+                        if _gac >= 5:
+                            return 2
+                        if _gac >= 4:
+                            return max(2, _fb_ceiling_d - 2)
+                        return _fb_ceiling_d
                     _lac = c[_CI_AC] or 0
                     if _lac >= 7:
                         return 2

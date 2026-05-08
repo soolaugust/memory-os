@@ -3875,8 +3875,17 @@ def main():
                 #   被 suppress_final_gate 拦截(阈值=2)，但 fallback ceiling=5 → 逃逸。
                 # 修复：global ac>=4 chunk 用 per-chunk ceiling = max(2, base-2)，对齐 final_gate。
                 def _fb_hd_chunk_ceiling(c):
-                    if c.get("project", "") == "global" and (c.get("access_count", 0) or 0) >= 4:
-                        return max(2, _fb_hd_ceiling - 2)
+                    # iter1150: global_fallback_ceiling_align — ac>=5 直接=2
+                    # 根因：suppress_final_gate 对 global ac>=5→thresh=2，但 fallback ceiling
+                    #   仅区分 ac>=4→max(2,base-2)=3，ac=5-6 chunk 经 fallback 逃逸。
+                    # 修复：global ac>=5→2, ac=4→max(2,base-2)。
+                    if c.get("project", "") == "global":
+                        _gac = c.get("access_count", 0) or 0
+                        if _gac >= 5:
+                            return 2
+                        if _gac >= 4:
+                            return max(2, _fb_hd_ceiling - 2)
+                        return _fb_hd_ceiling
                     # iter1009: local_saturated_suppress — fallback ceiling sync
                     # iter1053: fallback_ceiling_align_local_deep — ac>=7 ceiling=2 对齐 suppress thresh
                     _lac = c.get("access_count", 0) or 0
@@ -6464,7 +6473,12 @@ def main():
                         _lac = c.get("access_count", 0) or 0
                         if c.get("project", "") == "global":
                             # iter1060: global ac>=7 直接=2（对齐 _lt905_7d_thresh）
-                            if _lac >= 7:
+                            # iter1150: global_fallback_ceiling_align — ac>=5 直接=2
+                            # 根因（数据驱动，2026-05-08）：93cbc985(memory验证,ac=6,7d=4)
+                            #   suppress_final_gate 用 ac>=5→thresh=2 拦截，但 fallback ceiling
+                            #   仅 ac>=7→2, ac>=4→3，ac=6 落入 ceiling=3 → 7d<3 时逃逸。
+                            # 修复：ac>=5 直接 ceiling=2，对齐 suppress_final_gate。
+                            if _lac >= 5:
                                 return 2
                             if _lac >= 4:
                                 return max(2, _fb_lite_ceiling - 2)
