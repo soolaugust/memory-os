@@ -3752,8 +3752,14 @@ def main():
             if len(positive) == 1 and len(final) >= 3:
                 _fb_pair_hd_top1_id = positive[0][1].get("id", "")
                 # iter1166: fallback_cooldown_align — sync fallback_pair_inject (hd)
-                _fb_pair_hd_cands = [(float(c.get("importance", 0) or 0), c) for _, c in final
+                # iter1192: pair_min_score_gate — pair 候选须通过 min_score 过滤
+                # 根因（数据驱动，2026-05-08）：9a2692fd(score=0.05) 经 pair 注入，
+                #   因 final 含低分 chunk 且 pair 只检查 importance 不检查 BM25 score。
+                #   用户感知：不相关 MTK 知识被注入到无关项目。
+                # 修复：pair 候选增加 s >= _min_thresh 门槛，确保 BM25 相关性。
+                _fb_pair_hd_cands = [(float(c.get("importance", 0) or 0), c) for s, c in final
                                      if c.get("id") != _fb_pair_hd_top1_id
+                                     and s >= _min_thresh
                                      and (c.get("access_count", 0) or 0) < 30
                                      and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh_hd
                                      and not ((c.get("project", "") != project or c.get("project", "") == "global")
@@ -4798,8 +4804,10 @@ def main():
                 #   清零(score=0.0) → pair_inject 的 s>0.05 条件无候选 → 无法组合。
                 # 修复：从 final 中按 importance 取非 top1 的最佳 chunk，给予 top1*0.3
                 #   的象征性 score，确保组合上下文。排除 access_count>=30 的过饱和 chunk。
-                _imp_pairs = [(float(c.get("importance", 0) or 0), c) for _, c in final
+                # iter1192: pair_min_score_gate — imp_pair 候选须通过 min_score
+                _imp_pairs = [(float(c.get("importance", 0) or 0), c) for s, c in final
                               if c.get("id") != positive[0][1].get("id")
+                              and s >= _min_thresh
                               and (c.get("access_count", 0) or 0) < 30
                               and _session_injection_counts.get(c.get("id", ""), 0) < _pair_dedup_thresh
                               and _recent_7d_counts.get(c.get("id", ""), 0) < _pair_7d_cap(c)
