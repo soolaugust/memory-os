@@ -2972,12 +2972,13 @@ def main():
                             _suppress_7d_thresh = max(2, _suppress_7d_thresh - 2)
                         else:
                             _suppress_7d_thresh = max(3, _suppress_7d_thresh - 1)
-                    # iter1242: ac3_7d_tighten — ac>=3 本项目 chunk 7d 阈值 -1
+                    # iter1256: ac3_7d_direct_cap3 — ac>=3 直接 cap thresh=3
                     # 根因（数据驱动，2026-05-09）：import-90139(ac=3,procedure) small_db
-                    #   高分 base=6, 7d=6 才触发 suppress。用户已看 3 次仍被周注入 6 次。
-                    # 修复：ac>=3 → -1（6→5/4→3），7d 内最多 4/2 次后 suppress。
+                    #   高分 base=6, iter1242 max(3,6-1)=5 仍过宽→7d=6 逃逸。
+                    #   ac=3 用户已看 3 次，7d 内 2 次后边际信息≈0。
+                    # 修复：直接 cap thresh=3（不依赖 base），7d 第 3 次即 suppress。
                     elif _l_ac >= 3:
-                        _suppress_7d_thresh = max(3, _suppress_7d_thresh - 1)
+                        _suppress_7d_thresh = min(_suppress_7d_thresh, 3)
                 if _r7d_cnt >= _suppress_7d_thresh:
                     score = 0.0
                     _hard_suppressed = True
