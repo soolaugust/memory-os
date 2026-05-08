@@ -4104,9 +4104,19 @@ def main():
                     # iter975: output_monopoly_filter (hard_deadline path)
                     # iter977: hard_deadline 无 _rt663_7d（无 DB 查询预算），用闭包 _recent_7d_counts
                     if len(top_k) > 1 and not _micro_db:
-                        _omf_ceil_hd = 3 if _db_chunk_count < 50 else (5 if _db_chunk_count < 100 else 5)
+                        _omf_ceil_hd_base = 3 if _db_chunk_count < 50 else (5 if _db_chunk_count < 100 else 5)
+                        # iter1173: omf_ac_aware_ceiling (hard_deadline path sync)
+                        def _omf_hd_ceil(c):
+                            _oac = c.get("access_count", 0) or 0
+                            if _oac >= 7:
+                                return 2
+                            if _oac >= 5:
+                                return 3
+                            if c.get("project", "") == "global" and _oac >= 4:
+                                return 3
+                            return _omf_ceil_hd_base
                         _omf_filt_hd = [(s, c) for s, c in top_k
-                                        if _recent_7d_counts.get(c.get("id", ""), 0) < _omf_ceil_hd]
+                                        if _recent_7d_counts.get(c.get("id", ""), 0) < _omf_hd_ceil(c)]
                         if _omf_filt_hd:
                             top_k = _omf_filt_hd
                         else:
@@ -7047,9 +7057,23 @@ def main():
         #   解决闭包快照 _recent_7d_counts 在 session 内不更新 + 无 session-dedup 的问题。
         if top_k and len(top_k) > 1 and not _micro_db:
             _omf_7d_src = _rt663_7d if '_rt663_7d' in dir() and _rt663_7d else _recent_7d_counts
-            _omf_ceiling = 5 if _db_chunk_count < 50 else (6 if _db_chunk_count < 100 else 5)  # iter1000: tiny 3→5 sync
+            _omf_ceiling_base = 5 if _db_chunk_count < 50 else (6 if _db_chunk_count < 100 else 5)  # iter1000: tiny 3→5 sync
+            # iter1173: omf_ac_aware_ceiling — per-chunk ceiling 对齐 suppress 阈值
+            # 根因（数据驱动，2026-05-08）：PE分析(ac=7,7d=6) 被 _score_chunk suppress(thresh=2)，
+            #   但经 fallback/pair 路径复活后到达 omf，flat ceiling=6 → 6<6 FALSE → 逃逸。
+            #   omf 是"所有逃逸路径的唯一汇聚点"（iter975），必须 ac-aware。
+            # 修复：ac>=7→ceiling=2, ac>=5→ceiling=3, global ac>=4→ceiling=3，其余保持 base。
+            def _omf_chunk_ceiling(c):
+                _oac = c.get("access_count", 0) or 0
+                if _oac >= 7:
+                    return 2
+                if _oac >= 5:
+                    return 3
+                if c.get("project", "") == "global" and _oac >= 4:
+                    return 3
+                return _omf_ceiling_base
             _omf_filtered = [(s, c) for s, c in top_k
-                             if _omf_7d_src.get(c.get("id", ""), 0) < _omf_ceiling]
+                             if _omf_7d_src.get(c.get("id", ""), 0) < _omf_chunk_ceiling(c)]
             if _omf_filtered:
                 if len(top_k) != len(_omf_filtered):
                     _deferred.log(DMESG_DEBUG, "retriever",
