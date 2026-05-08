@@ -2951,12 +2951,13 @@ def main():
                     if _l_ac >= 7:
                         _suppress_7d_thresh = 1
                     elif _l_ac >= 5:
-                        # iter1152: local_mid_saturated_tighten — ac>=5 从 -1 收紧到 -2
-                        # 根因（数据驱动，2026-05-08）：84-chunk 库 ac=5-6 chunk（memory验证ac=6,
-                        #   PE分析系列ac=5-6）small_db 高分阈值=5，7d_inj=4 仍逃逸。
-                        #   ac>=5 表示用户已充分内化，允许 4 次/周占 7.7% 总注入过于宽松。
-                        # 修复：-1→-2，small_db 高分 6→4，低分 4→2。每周最多 3/1 次注入。
-                        _suppress_7d_thresh = max(2, _suppress_7d_thresh - 2)
+                        # iter1254: local_ac5_7d_thresh2 — ac>=5 直接 thresh=2
+                        # 根因（数据驱动，2026-05-09）：81-chunk 库 ac=5 chunk（Android诊断ac=5,
+                        #   PE活跃问题ac=5, Patch工作流ac=5）small_db 高分 base=6, max(2,6-2)=4,
+                        #   7d 内各注入 4 次逃逸。ac>=5 用户已充分内化，max() 保底导致 thresh
+                        #   被 base 抬高无法收紧。
+                        # 修复：直接 thresh=2（不依赖 base），7d 内第 2 次即 suppress。
+                        _suppress_7d_thresh = 2
                     # iter1143: local_mid_saturated_suppress — ac>=4 本项目 chunk 7d 阈值 -1
                     # 根因（数据驱动，2026-05-08）：Kernel Patch 格式规范(ac=4) tiny_db 7d=3
                     #   仍注入（阈值=5）。ac=4 表明用户已见过 4 次，7d 允许 4 次过于宽松。
