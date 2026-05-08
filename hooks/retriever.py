@@ -3626,9 +3626,9 @@ def main():
             def _hd_pair_7d_cap(c):
                 _l_ac = c.get("access_count", 0) or 0
                 if _l_ac >= 7:
-                    return 3  # suppress thresh=2, pair=thresh+1
+                    return 2  # iter1167: pair_pre_gate_align — 对齐主路径 suppress thresh=2
                 elif _l_ac >= 5:
-                    return min(_hd_pair_7d_ceiling, 4)
+                    return min(_hd_pair_7d_ceiling, 3)  # iter1167: 4→3 对齐后期 pair
                 return _hd_pair_7d_ceiling
             if len(positive) == 1 and len(final) >= 3:
                 _pair_cands_hd = [(s, c) for s, c in final
