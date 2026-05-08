@@ -6179,7 +6179,7 @@ def main():
                 #   top15 chunk 全在 cooldown/suppress 中，剩余候选 FTS score 0.03-0.08，
                 #   _fb_floor=0.10 全灭 → _fb_pool=None → ultimate_fallback 盲选。
                 #   大库 suppress 后候选多，0.05-0.10 弱相关知识好过空召回或盲选。
-                _fb_floor = 0.01 if _db_chunk_count <= 5 else (0.05 if _db_chunk_count >= 50 else 0.10)
+                _fb_floor = 0.01 if (_db_chunk_count <= 5 or _local_sparse) else (0.05 if _db_chunk_count >= 50 else 0.10)
                 if _fb_pool and max(s for s, _ in _fb_pool) < _fb_floor:
                     _fb_pool = None  # 全部候选相关性极低，不强制注入
                 if _fb_pool:
@@ -6709,7 +6709,7 @@ def main():
                     #   数据驱动（2026-05-06）：PE chunk score=0.071 走 LITE fallback 24h 3x 逃逸。
                     # iter996: micro_db_floor_relax — sync LITE path
                     # iter1116: fallback_floor_relax_large_db — sync LITE path
-                    _fb_lite_floor = 0.01 if _db_chunk_count <= 5 else (0.05 if _db_chunk_count >= 50 else 0.10)
+                    _fb_lite_floor = 0.01 if (_db_chunk_count <= 5 or _local_sparse) else (0.05 if _db_chunk_count >= 50 else 0.10)
                     if _fb_lite_pool and max(s for s, _ in _fb_lite_pool) < _fb_lite_floor:
                         _fb_lite_pool = None
                     if _fb_lite_pool:
