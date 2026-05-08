@@ -2778,10 +2778,13 @@ def _write_chunk(chunk_type: str, summary: str, project: str, session_id: str,
         r'(?:suppress|空召回|relevance.?floor|候选.*(?:过滤|全灭)|fallback.*注入|'
         r'iter\d{3,4}|hard.?cap|session.?inj|7d.?(?:阈值|thresh)|'
         r'24h.?(?:burst|阈值)|_score_chunk|_write_chunk|extractor.*gate|'
-        r'recall_count|bw_window|anti.?monopoly|注入配额|FTS5?\s*(?:噪声|命中率))',
+        r'recall_count|bw_window|anti.?monopoly|注入配额|FTS5?\s*(?:噪声|命中率)|'
+        r'zero.?access|注入.*比例|单条注入|diversity.?pair|production_assertions|'
+        r'HEALTHY|chunk.*阈值.*触发|inject.*cap|cooldown.*escalat|'
+        r'[+\-]\d+\s*行.{0,10}[+\-]\d+\s*行)',
         re.IGNORECASE)
     _DOMAIN_KW = re.compile(
-        r'(?:kernel|sched|cpu|proxy|PE|binder|Android|飞书|feishu|git|patch|commit|'
+        r'(?:kernel|sched|cpu|proxy|PE|binder|Android|飞书|feishu|git(?![:r]oot:|:[0-9a-f])|patch|commit|'
         r'migration|thermal|uclamp|内存|进程|线程|设备|用户|产品|API|接口|函数)',
         re.IGNORECASE)
     if _ITER_IMPL_KW.search(summary) and not _DOMAIN_KW.search(summary):
