@@ -135,8 +135,20 @@ def kswapd_scan(conn: sqlite3.Connection, project: str,
     stale_evicted = _reclaim_stale_chunks(conn, project, stale_days, batch_size)
     all_evicted_ids.extend(stale_evicted)
 
+    # ── Phase 1.5: Cold-born reclaim（出生即冷 chunk 回收）──
+    # iter1179: cold_born_reclaim — 创建后 3 天 access_count 仍为 0 的 chunk 回收
+    # 根因（数据驱动，2026-05-08）：108 chunks 中 32 个(30%) ac=0，均为 extractor
+    #   过度拆分写入的对话碎片（同一 session 重复表述同一结论）。
+    #   stale_days=90 需等 3 个月才回收，持续占用检索候选池 + FTS5 索引空间。
+    # OS 类比：MGLRU 的 cold-page fast-path — 新分配但从未 fault 的页面
+    #   在 aging 一轮后直接回收（不等完整 LRU 轮转）。
+    # 修复：创建超 3 天 + ac=0 + importance<0.85 + 未 pin → swap_out。
+    #   保留 importance>=0.85（用户显式高权重）和 pinned chunk。
+    cold_born_evicted = _reclaim_cold_born(conn, project, batch_size)
+    all_evicted_ids.extend(cold_born_evicted)
+
     # 重新计算水位（stale 回收后可能已安全）
-    if stale_evicted:
+    if stale_evicted or cold_born_evicted:
         current_count = get_project_chunk_count(conn, project)
         projected = current_count + incoming_count
         watermark_pct = (projected / quota * 100) if quota > 0 else 100
@@ -248,6 +260,47 @@ def _reclaim_stale_chunks(conn: sqlite3.Connection, project: str,
         # 迭代33：swap out 替代直接删除
         swap_out(conn, evict_ids)
     return evict_ids
+
+
+def _reclaim_cold_born(conn: sqlite3.Connection, project: str,
+                       max_reclaim: int) -> list:
+    """
+    iter1179: cold_born_reclaim — 回收"出生即冷"的 chunk。
+    OS 类比：MGLRU cold-page fast-path — 新分配后从未被 page fault 引用的页面
+    在首次 aging 扫描后直接进入回收队列，不等完整 LRU 轮转。
+
+    条件：
+      - 创建超过 3 天（cold_born_days）
+      - access_count = 0（从未被检索命中）
+      - importance < 0.85（排除用户显式高权重）
+      - 未被 pin（排除手动锁定）
+      - 不回收 task_state 类型
+    """
+    from store_vfs import get_pinned_ids
+    cold_born_days = 3
+    rows = conn.execute(
+        """SELECT id FROM memory_chunks
+           WHERE project = ?
+             AND COALESCE(access_count, 0) = 0
+             AND chunk_type != 'task_state'
+             AND COALESCE(importance, 0.5) < 0.85
+             AND COALESCE(oom_adj, 0) > -1000
+             AND datetime(created_at) < datetime('now', ?)
+           ORDER BY importance ASC, created_at ASC
+           LIMIT ?""",
+        (project, f"-{cold_born_days} days", max_reclaim),
+    ).fetchall()
+
+    if not rows:
+        return []
+
+    pinned = get_pinned_ids(conn, project)
+    evict_ids = [rid for (rid,) in rows if rid not in pinned]
+
+    if evict_ids:
+        swap_out(conn, evict_ids)
+    return evict_ids
+
 
 def set_oom_adj(conn: sqlite3.Connection, chunk_id: str, oom_adj: int) -> bool:
     """
