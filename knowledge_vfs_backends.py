@@ -246,6 +246,18 @@ class SQLiteBackend(VFSBackend):
                     return
             except ImportError:
                 pass
+            # iter1195: vfs_quality_gate — VFS 写入路径补充语义质量门控
+            # 根因（数据驱动，2026-05-08）：2 条 ac=0 噪声 chunk 经 MCP/VFS 直写路径绕过
+            #   extractor._is_quality_chunk（"量化效果：7d内减少..." / "量化：zero_access..."）。
+            #   _vfs_write_protect 仅做物理完整性检查，语义噪声逃逸。
+            # 修复：VFS write 入口统一调用 _is_quality_chunk 作为最后防线。
+            try:
+                from extractor import _is_quality_chunk
+                if not _is_quality_chunk(item.summary[:120] if item.summary else ""):
+                    conn.close()
+                    return
+            except ImportError:
+                pass
             new_id = str(uuid.uuid4())
             now = datetime.now(timezone.utc).isoformat()
 
