@@ -3034,6 +3034,11 @@ def _write_chunk(chunk_type: str, summary: str, project: str, session_id: str,
         content = f"[{chunk_type}|{topic}] {summary}"
     else:
         content = f"[{chunk_type}] {summary}"
+    # iter1250: content_snippet_enrich — 无 content_override 时用 raw_snippet 扩展 FTS5 索引
+    if not content_override and raw_snippet and raw_snippet.strip():
+        _snippet_extra = raw_snippet.strip()[:200]
+        if _snippet_extra not in content:
+            content = f"{content}\n{_snippet_extra}"
 
     # 迭代100：ECC 置信度
     confidence = _calculate_confidence(chunk_type, summary)
@@ -4352,6 +4357,19 @@ def main():
         quant_chunk_ids = []    # 量化证据 chunk ids
         throttled_chunk_ids = []  # 迭代40：被 throttle 的 chunk ids
 
+        # iter1250: context_snippet_extract — 从原文定位 summary 周围上下文
+        def _context_snippet(summary: str, radius: int = 100) -> str:
+            _needle = summary[:40]
+            _pos = text.find(_needle)
+            if _pos < 0:
+                return ""
+            _start = max(0, _pos - radius)
+            _end = min(len(text), _pos + len(summary) + radius)
+            _ctx = text[_start:_end].strip()
+            if _ctx == summary.strip() or len(_ctx) < len(summary) + 20:
+                return ""
+            return _ctx[:300]
+
         def _throttled_importance(base_imp: float) -> float:
             """迭代40：throttle 区间内 importance 乘以衰减因子。"""
             if throttle_active:
@@ -4420,7 +4438,8 @@ def main():
                         continue
                     imp = _throttled_importance(0.85)
                     _write_chunk("decision", summary, project, session_id, topic, conn,
-                                 importance_override=imp, _txn_managed=True)
+                                 importance_override=imp, _txn_managed=True,
+                                 raw_snippet=_context_snippet(summary))
                     _track_throttled_chunk(summary, "decision")
         for summary in excluded:
             if _is_quality_chunk(summary):
@@ -4433,7 +4452,8 @@ def main():
                     continue
                 imp = _throttled_importance(0.70)
                 _write_chunk("excluded_path", summary, project, session_id, topic, conn,
-                             importance_override=imp, _txn_managed=True)
+                             importance_override=imp, _txn_managed=True,
+                             raw_snippet=_context_snippet(summary))
                 _track_throttled_chunk(summary, "excluded_path")
         for summary in reasoning:
             if _is_quality_chunk(summary):
@@ -4445,7 +4465,8 @@ def main():
                     continue
                 imp = _throttled_importance(0.80)
                 _write_chunk("reasoning_chain", summary, project, session_id, topic, conn,
-                             importance_override=imp, _txn_managed=True)
+                             importance_override=imp, _txn_managed=True,
+                             raw_snippet=_context_snippet(summary))
                 _track_throttled_chunk(summary, "reasoning_chain")
         # iter105: 因果链独立写入
         # ── 迭代324：causal_chain 写入前过滤，构建邻节点上下文 ─────────────────
@@ -4562,7 +4583,8 @@ def main():
         for summary in constraints:
             if _is_quality_chunk(summary):
                 _write_chunk("design_constraint", summary, project, session_id, topic, conn,
-                             importance_override=0.95, _txn_managed=True)  # 约束知识高价值
+                             importance_override=0.95, _txn_managed=True,
+                             raw_snippet=_context_snippet(summary))  # 约束知识高价值
                 row = conn.execute(
                     "SELECT id FROM memory_chunks WHERE summary=? AND chunk_type='design_constraint' ORDER BY created_at DESC LIMIT 1",
                     (summary,)
