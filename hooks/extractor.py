@@ -1481,7 +1481,11 @@ def _is_quality_chunk(summary: str) -> bool:
                 # 数据驱动（2026-05-08）：486dfa84 "跨项目/global ac>=7 chunk"(ac=0)
                 #   excluded_path 描述内部 suppress 规则，不含其他 noise_kw 而逃逸。
                 #   "ac>=N" 只出现在 memory-os 内部（用户对话不会用此格式）。
-                "ac>="]
+                "ac>=",
+                # iter1257: chunk_structure_diag_noise — chunk 数据结构诊断逃逸
+                # 数据驱动（2026-05-09）：ef7ff2e7 "54% chunk 的 content 等于 summary，FTS5 检索面窄"
+                #   combo hits=2(chunk+FTS) < 阈值3 逃逸。描述 chunk 字段关系是纯迭代器诊断。
+                "content 等于 summary", "检索面窄"]
     if any(kw in s for kw in noise_kw):
         return False
     # iter1026: iterator_combo_gate — memory-os 运行时术语组合检测
