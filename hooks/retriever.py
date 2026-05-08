@@ -2794,6 +2794,8 @@ def main():
             # iter1172: local_sparse_shield — local<=3 的本地 chunk 等同 micro_db 保护
             _is_local_chunk = chunk.get("project", "") == project
             _sparse_shield = _local_sparse and _is_local_chunk
+            # iter1227: sparse_global_shield — local_sparse 时 global chunk 放宽 suppress 阈值
+            _sparse_global_relax = _local_sparse and chunk.get("project", "") == "global"
             if not (_micro_db or _sparse_shield) or (not _is_local_chunk and chunk.get("project", "") != "global"):
                 # iter813: short_burst_suppress — 6h 内 >=N 次即 suppress
                 # 根因（数据驱动，2026-05-05）：import-90139 在 38 分钟内被 3 session 注入，
@@ -2828,6 +2830,9 @@ def main():
                 _6h_is_global_saturated = chunk.get("project") == "global" and _6h_ac >= 4
                 # iter1171: constraint_local_saturated — design_constraint ac>=4 也享受 6h_thresh=1
                 _6h_thresh = 1 if (_6h_ac >= 7 or (_6h_is_constraint and _6h_ac >= 4) or _6h_is_global_saturated) else 2
+                # iter1227: sparse_global_shield — local_sparse 时 global chunk 6h 阈值 +1
+                if _sparse_global_relax:
+                    _6h_thresh += 1
                 if _r6h_cnt >= _6h_thresh:
                     score = 0.0
                     _hard_suppressed = True
@@ -2907,6 +2912,12 @@ def main():
                     #   跨 project 分散计数使 per-project 7d<3 → suppress 不触发。
                     #   global chunk 本质是固化通用约束，7d 内看 2 次已充分。
                     _suppress_7d_thresh = 2
+                    # iter1227: sparse_global_shield — local_sparse 时 global 7d 阈值 +2
+                    # 根因（数据驱动，2026-05-09）：git:78dc99a5695f(2 local + 6 global)
+                    #   global 统一 thresh=2 导致 3/6 global chunk 被 suppress，连续 5 次空召回。
+                    #   local_sparse 项目依赖 global 作为主要知识源，不应过度 suppress。
+                    if _sparse_global_relax:
+                        _suppress_7d_thresh = 4
                 # iter1009: local_saturated_suppress — 本项目高 ac chunk 7d 阈值收紧
                 # 根因（数据驱动，2026-05-06）：25-chunk 库中 PE分析(ac=7,7d=6)、
                 #   Android诊断(ac=10,7d=5) 等高 ac 本项目 chunk 7d 阈值=5 仍逃逸。

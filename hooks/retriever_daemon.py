@@ -3142,6 +3142,15 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 ).fetchone()[0] or 0
             except Exception:
                 pass
+            # iter1227: sparse_global_shield — daemon 同步 retriever.py local_sparse 逻辑
+            _local_chunk_count_d = _db_chunk_count
+            try:
+                _local_chunk_count_d = _rc_conn.execute(
+                    "SELECT COUNT(*) FROM memory_chunks WHERE project=?", (project,)
+                ).fetchone()[0] or 0
+            except Exception:
+                pass
+            _local_sparse_d = _local_chunk_count_d <= 3
             try:
                 if _psi_cached:
                     _recall_counts = _psi_gov_rc_cached[2]
@@ -3793,7 +3802,10 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             # iter806: small_db_suppress_tighten — 24h 4/3→3/2, 7d 7/5→5/4
             # iter801: micro_db (<=5) 跳过 24h/7d/saturation suppress — 唯一知识不可 suppress
             # iter1049: micro_db_cross_project_suppress — 跨项目 chunk 不享受 micro_db 免疫
-            if not _s672_micro or (chunk.get("project", "") != project and chunk.get("project", "") != "global"):
+            # iter1227: sparse_local_shield_daemon — local_sparse 时本地 chunk 等同 micro_db 保护
+            _is_local_d = (chunk.get("project", "") == project)
+            _sparse_shield_d = _local_sparse_d and _is_local_d
+            if not (_s672_micro or _sparse_shield_d) or (chunk.get("project", "") != project and chunk.get("project", "") != "global"):
                 # iter813: short_burst_suppress — 6h 内 >=N 次即 suppress
                 # iter818: tiny_db_6h_relax — 6h 分级
                 # iter865: 6h_tighten_tiny — tiny_db 3→2（数据驱动：6h=3 逃逸导致垄断）
@@ -3802,6 +3814,9 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 # iter1048: global_6h_sync — global ac>=4 同步 iter1023(24h cap=1)
                 # iter1225: constraint_saturated_6h_sync — design_constraint ac>=4 对齐 retriever.py iter1171
                 _6h_thresh_d = 1 if (_ac >= 7 or (chunk[_CI_CT] == "design_constraint" and _ac >= 4) or (chunk[_CI_CP] == "global" and _ac >= 4)) else 2
+                # iter1227: sparse_global_shield — local_sparse 时 global chunk 6h 阈值 +1
+                if _local_sparse_d and (chunk[_CI_CP] or "") == "global":
+                    _6h_thresh_d += 1
                 if _recent_6h_counts.get(_cid, 0) >= _6h_thresh_d:
                     score = 0.0
                 # iter810: tiny_db_24h_relax — 小库统一阈值
@@ -3829,6 +3844,9 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     # iter1194: global_unified_thresh — sync daemon _score_chunk
                     if (chunk[_CI_CP] or "") == "global":
                         _7d_base = 2
+                        # iter1227: sparse_global_shield — local_sparse 时 global 7d 阈值 +2
+                        if _local_sparse_d:
+                            _7d_base = 4
                     elif (chunk[_CI_CP] or "") != "global":
                         # iter1143: local_mid_saturated_suppress — sync retriever.py
                         _l_ac_d = chunk[_CI_AC] or 0
@@ -3963,7 +3981,10 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
             # iter806: small_db_suppress_tighten — sync with retriever.py
             # iter801: micro_db (<=5) 跳过 suppress
             # iter1049: micro_db_cross_project_suppress — 跨项目 chunk 不享受 micro_db 免疫
-            if not _s672d_micro or ((chunk[_CI_CP] or "") != project and (chunk[_CI_CP] or "") != "global"):
+            # iter1227: sparse_local_shield_daemon — dict path sync
+            _is_local_d2 = ((chunk[_CI_CP] or "") == project)
+            _sparse_shield_d2 = _local_sparse_d and _is_local_d2
+            if not (_s672d_micro or _sparse_shield_d2) or ((chunk[_CI_CP] or "") != project and (chunk[_CI_CP] or "") != "global"):
                 # iter813: short_burst_suppress — 6h 内 >=N 次即 suppress
                 # iter818: tiny_db_6h_relax — 6h 分级
                 # iter865: 6h_tighten_tiny — tiny_db 3→2（统一阈值）
@@ -3972,6 +3993,9 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 # iter1048: global_6h_sync — global ac>=4 同步 iter1023(24h cap=1)
                 # iter1225: constraint_saturated_6h_sync — ac>=5→4 对齐 retriever.py iter1171
                 _6h_thresh_d2 = 1 if (_6h_ac_d2 >= 7 or (chunk.get("chunk_type") == "design_constraint" and _6h_ac_d2 >= 4) or (chunk.get("project") == "global" and _6h_ac_d2 >= 4)) else 2
+                # iter1227: sparse_global_shield — dict path sync
+                if _local_sparse_d and (chunk.get("project", "") or "") == "global":
+                    _6h_thresh_d2 += 1
                 if _recent_6h_counts.get(_cid, 0) >= _6h_thresh_d2:
                     score = 0.0
                 # iter810: tiny_db_24h_relax — sync
@@ -3997,6 +4021,9 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     # iter1194: global_unified_thresh — sync daemon dict path
                     if (chunk.get("project", "") or "") == "global":
                         _7d_base_d2 = 2
+                        # iter1227: sparse_global_shield — dict path sync
+                        if _local_sparse_d:
+                            _7d_base_d2 = 4
                     elif (chunk.get("project", "") or "") != "global":
                         # iter1143: local_mid_saturated_suppress — sync dict path
                         _l_ac_d2 = chunk.get("access_count", 0) or 0
@@ -5129,7 +5156,8 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                     #   feishu CLI(ac=4)/memory验证(ac=6) 经 daemon 路径 7d suppress 逃逸。
                     elif _is_global:
                         # iter1194: global_unified_thresh — sync daemon suppress_final_gate
-                        return 2
+                        # iter1227: sparse_global_shield — local_sparse 放宽
+                        return 4 if _local_sparse_d else 2
                     # iter1017: daemon_local_saturated_suppress — sync retriever.py iter1009
                     # iter1053: fallback_ceiling_align_local_deep — ac>=7 直接=2 对齐 suppress thresh
                     _lac = c[_CI_AC] or 0
@@ -5215,8 +5243,9 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                 if _cross:
                     return max(2, _t - 2)
                 # iter1194: global_unified_thresh — sync daemon closure_fallback
+                # iter1227: sparse_global_shield — local_sparse 放宽
                 elif _is_global:
-                    return 2
+                    return 4 if _local_sparse_d else 2
                 # iter1017: daemon_local_saturated_suppress — sync retriever.py iter1009
                 # iter1053: fallback_ceiling_align_local_deep — ac>=7 直接=2 对齐 suppress thresh
                 _lac = c[_CI_AC] or 0
