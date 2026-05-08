@@ -2784,13 +2784,18 @@ def _write_chunk(chunk_type: str, summary: str, project: str, session_id: str,
         r'HEALTHY|chunk.*阈值.*触发|inject.*cap|cooldown.*escalat|'
         r'垄断\s*chunk|低频高价值|预期效果.*(?:注入|suppress|召回)|'
         r'注入仅含|(?:\d+\s*条\s*chunk|\d+\s*chunks).*(?:阈值|项目|库)|'
-        r'[+\-]\d+\s*行.{0,10}[+\-]\d+\s*行)',
+        r'[+\-]\d+\s*行.{0,10}[+\-]\d+\s*行|'
+        r'迭代器.*(?:逃逸|自记录|gate)|_DOMAIN_KW|_ITER_IMPL|iterator_impl)',
         re.IGNORECASE)
     _DOMAIN_KW = re.compile(
         r'(?:kernel|sched|cpu|proxy|\bPE\b|binder|Android|飞书|feishu|git(?![:r]oot:|:[0-9a-f])|patch|commit|'
         r'migration|thermal|uclamp|内存|进程|线程|设备|用户|产品|API|接口|函数)',
         re.IGNORECASE)
-    if _ITER_IMPL_KW.search(summary) and not _DOMAIN_KW.search(summary):
+    _iter_match = _ITER_IMPL_KW.search(summary)
+    if _iter_match and not _DOMAIN_KW.search(summary):
+        return
+    # iter1210: iterator_meta_narrative_gate — 迭代器自身 bug/fix 元叙述即使含领域词也拦截
+    if _iter_match and re.search(r'(?:迭代器.*(?:逃逸|自记录|假阳性)|让迭代器|iterator.*gate.*逃)', summary):
         return
     # iter1208: execution_status_gate — 执行状态日志/流水账拒绝写入
     # 数据驱动（2026-05-08）：3 个 ac=0 chunk 全为执行流水账：
@@ -2799,6 +2804,10 @@ def _write_chunk(chunk_type: str, summary: str, project: str, session_id: str,
     #   特征：含执行结果描述词（完成/缓存/传给/写入/下载）+ 无因果推理词 → 拒绝。
     if re.search(r'(?:解析完成|已缓存|传给\s*LLM|写入完成|下载完成|chars\b|bytes\b|\d+\s*KB\s*内容)', summary) \
        and not re.search(r'(?:根因|原因|所以|因此|说明|表明|导致|决策|约束|必须|禁止)', summary):
+        return
+    # iter1210: code_fix_action_gate — 纯代码修复动作描述拒绝
+    if re.search(r'(?:加\s*try.?(?:except|catch)|(?:try|except|catch).*包住|异常未捕获.*加)', summary) \
+       and not re.search(r'(?:根因|设计|架构|约束|原则|陷阱|必须|禁止)', summary):
         return
     # iter1098: url_only_summary_gate — 纯 URL summary 拒绝写入
     # 数据驱动（2026-05-07）：8f95425e conversation_summary 仅含 feishu URL（ac=0），
