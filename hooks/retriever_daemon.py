@@ -4573,8 +4573,12 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
                         ensure_schema(wconn)
                         update_accessed(wconn, accessed_ids)
                         mglru_promote(wconn, accessed_ids)
-                        # iter668: top_k_data fallback (hard_deadline path)
-                        _hd_top_k = top_k_data if top_k_data else [{"id": cid} for cid in accessed_ids]
+                        # iter668+1229: top_k_data rebuild from actual top_k
+                        # iter1229: trace_topk_sync — top_k_data 在 4451 构建后，top_k 被
+                        #   output_monopoly_filter/topic_group_dedup 修改，导致 trace 记录的
+                        #   chunk list 与实际注入不一致。重建以反映真实注入内容。
+                        _hd_top_k = [{"id": c[_CI_ID], "summary": c[_CI_SUM], "score": s,
+                                      "chunk_type": c[_CI_CT] or ""} for s, c in top_k] or top_k_data or [{"id": cid} for cid in accessed_ids]
                         store_insert_trace(wconn, {
                             "id": str(uuid_mod.uuid4()),
                             "timestamp": datetime.now(timezone.utc).isoformat(),
