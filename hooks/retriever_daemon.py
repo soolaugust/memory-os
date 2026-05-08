@@ -5860,6 +5860,10 @@ def _retriever_main_impl(hook_input: dict, mods: dict,
         # 修复：单次注入中 ac>=7 最多占 50%（向上取整），超额按 score 低优先移除。
         # iter1155: sdg_threshold_widen — ac>=7→5 覆盖 ac=5-6 中饱和逃逸
         if top_k and len(top_k) > 2 and _db_chunk_count > 5:
+            # iter1156: sdg_low_score_prune — 低分 saturated chunk 无条件移除
+            _sdg_lowscore = [(s, c) for s, c in top_k if (c[_CI_AC] or 0) >= 5 and s < 0.10]
+            if _sdg_lowscore and len(top_k) > len(_sdg_lowscore):
+                top_k = [(s, c) for s, c in top_k if not ((c[_CI_AC] or 0) >= 5 and s < 0.10)]
             _sdg_max = max(1, (len(top_k) + 1) // 2)
             _sdg_saturated = [(s, c) for s, c in top_k if (c[_CI_AC] or 0) >= 5]
             if len(_sdg_saturated) > _sdg_max:

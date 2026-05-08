@@ -4122,6 +4122,14 @@ def main():
                     # iter1155: sdg_threshold_widen — ac>=7→5 覆盖 93cbc985(ac=6) 等中饱和逃逸
                     #   数据驱动：ac=5-6 chunk 7d=4 仍逃逸 diversity gate，占 7d 注入 12%。
                     if top_k and len(top_k) > 2 and not _micro_db:
+                        # iter1156: sdg_low_score_prune — 低分 saturated chunk 无条件移除
+                        # 数据驱动：45% 注入 score<0.15，全是 ac>=5 的已内化知识。
+                        #   score<0.10 说明与当前 prompt 语义相关性极低，注入浪费上下文。
+                        _sdg_lowscore_hd = [(s, c) for s, c in top_k
+                                            if (c.get("access_count", 0) or 0) >= 5 and s < 0.10]
+                        if _sdg_lowscore_hd and len(top_k) > len(_sdg_lowscore_hd):
+                            top_k = [(s, c) for s, c in top_k
+                                     if not ((c.get("access_count", 0) or 0) >= 5 and s < 0.10)]
                         _sdg_max_hd = max(1, (len(top_k) + 1) // 2)
                         _sdg_sat_hd = [(s, c) for s, c in top_k if (c.get("access_count", 0) or 0) >= 5]
                         if len(_sdg_sat_hd) > _sdg_max_hd:
@@ -7123,6 +7131,12 @@ def main():
         # 豁免：micro_db (<=5) 和 top_k<=2 时不限制（候选不足）。
         # iter1155: sdg_threshold_widen — ac>=7→5 覆盖 ac=5-6 中饱和逃逸
         if top_k and len(top_k) > 2 and not _micro_db:
+            # iter1156: sdg_low_score_prune — 低分 saturated chunk 无条件移除
+            _sdg_lowscore = [(s, c) for s, c in top_k
+                            if (c.get("access_count", 0) or 0) >= 5 and s < 0.10]
+            if _sdg_lowscore and len(top_k) > len(_sdg_lowscore):
+                top_k = [(s, c) for s, c in top_k
+                         if not ((c.get("access_count", 0) or 0) >= 5 and s < 0.10)]
             _sdg_max = max(1, (len(top_k) + 1) // 2)  # ceil(len/2)
             _sdg_saturated = [(s, c) for s, c in top_k if (c.get("access_count", 0) or 0) >= 5]
             if len(_sdg_saturated) > _sdg_max:
