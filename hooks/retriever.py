@@ -3726,6 +3726,12 @@ def main():
             #   可将 _min_thresh 降到 0.10，而 focus_bonus 等 += 操作可能将 0.0 抬到
             #   0.00009 级别，恰好通过极低 threshold。绝对零分门槛不可绕过。
             positive = [(s, c) for s, c in final if s >= _min_thresh and s > 0]
+            # iter1245: cross_project_relevance_floor — 跨项目 chunk 最低 score 门槛
+            # 根因（数据驱动，2026-05-09）：global "memory 验证路径"(score=0.148) 注入 kernel 项目，
+            #   "飞书 CLI"(0.193) 注入无关项目。低 score 跨项目 chunk 仅因本地候选不足被填充。
+            # 修复：cross-project chunk score < 0.25 → 剔除（本项目 chunk 不受影响）。
+            positive = [(s, c) for s, c in positive
+                        if c.get("project", "") in ("", project) or s >= 0.25]
             # iter826: single_result_pair_inject (hard_deadline path)
             # iter843: pair_dedup_aware — 配对时排除已达 session dedup 阈值的 chunk
             _pair_dedup_thresh_hd = _sysctl("retriever.session_dedup_threshold") or 2
@@ -4826,6 +4832,9 @@ def main():
                                       session_id=session_id, project=project)
         # iter620: zero_score_absolute_gate (FULL path) — 同 hard_deadline 路径
         positive = [(s, c) for s, c in final if s >= _min_thresh and s > 0]
+        # iter1245: cross_project_relevance_floor (FULL path sync)
+        positive = [(s, c) for s, c in positive
+                    if c.get("project", "") in ("", project) or s >= 0.25]
         # iter843: pair_dedup_aware — 配对候选预过滤 dedup threshold
         # 根因（数据驱动，2026-05-05）：55% 注入仅 1 条。iter826/827/840 配对成功后，
         #   session_dedup(iter359, threshold=2) 事后移除配对 chunk → 单条逃逸。
