@@ -1487,6 +1487,12 @@ def _is_quality_chunk(summary: str) -> bool:
         # 数据驱动（2026-05-08）：95774dc1 "ac=5-6 chunk 每周最多注入 3 次...释放 ~8 slot/周"
         #   逃逸 combo_gate（hits=2: chunk+次注入），因 "slot/周" 不在术语表。
         'slot/', '低频知识', '最多注入',
+        # iter1159: combo_suppress_jitter — 逃逸的 jitter/逃逸/概率 组合
+        # 数据驱动（2026-05-08）：3f20e465 "高 ac chunk ~30% 概率获得短 jitter → cooldown 缩短 → 逃逸 suppress"
+        #   hits=1（仅 cooldown），因 jitter/逃逸 不在 combo terms。
+        #   注意：'suppress' 已在 line 1464 存在，不重复添加。
+        # 修复：加入 jitter/逃逸/概率 作为 combo term，与 cooldown/suppress 共现即拦截。
+        'jitter', '逃逸', '概率',
     ) if _t in s)
     # iter1114: regex 补充 — iter+4位数字是迭代器自引用标识
     if re.search(r'iter\d{4}', s):
