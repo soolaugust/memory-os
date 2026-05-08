@@ -258,6 +258,11 @@ class SQLiteBackend(VFSBackend):
                     return
             except ImportError:
                 pass
+            # iter1196: vfs_type_gate — 拒绝 retriever 已排除的无检索价值类型
+            _vfs_excluded_types = {"conversation_summary", "prompt_context"}
+            if item.type and item.type.value in _vfs_excluded_types:
+                conn.close()
+                return
             new_id = str(uuid.uuid4())
             now = datetime.now(timezone.utc).isoformat()
 
