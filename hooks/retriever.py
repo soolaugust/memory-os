@@ -6285,6 +6285,19 @@ def main():
                     _fb_cap = [(s, c) for s, c in _pre_suppress_top_k
                                if _fb_7d.get(c.get("id", ""), 0) < _fb_chunk_ceiling(c) + 2
                                and (c.get("access_count", 0) or 0) < 7]
+                # iter1266: local_knowledge_last_resort — 密集 session 核心知识兜底
+                # 根因（数据驱动，2026-05-09）：memory-os 项目 5/5 下午 3 次空召回（cands=31-34）。
+                #   20 个 local chunk 大多 ac>=7，escalate(line 6287) 限 ac<7 全排除。
+                #   db_ultimate_fallback 又排 7d>=5 → 核心知识全锁死，系统在密集迭代中变哑巴。
+                # 修复：escalate 全灭后，从 _pre_suppress_top_k 中选 7d 最低的本地 chunk 1 条。
+                #   无 ac 限制（核心知识不应因多次访问而在 fallback 中被排除）。
+                #   仍受 _fb_floor 保护（score 过低不强注入）。
+                if not _fb_cap and _db_chunk_count < 100:
+                    _fb_local_last = [(s, c) for s, c in _pre_suppress_top_k
+                                      if c.get("project", "") != "global"]
+                    if _fb_local_last:
+                        _fb_local_last.sort(key=lambda x: _fb_7d.get(x[1].get("id", ""), 0))
+                        _fb_cap = [_fb_local_last[0]]
                 # iter916: fallback_no_unfiltered_pool — 全灭时不回退无过滤池，走 db_ultimate_fallback
                 _fb_pool = _fb_cap if _fb_cap else None
                 # iter939: fallback_relevance_floor — 低相关性时不强制注入噪声
