@@ -2861,6 +2861,14 @@ def _write_chunk(chunk_type: str, summary: str, project: str, session_id: str,
     _iter_match = _ITER_IMPL_KW.search(summary)
     if _iter_match and not _DOMAIN_KW.search(summary):
         return
+    # iter1269: memory_os_file_selfref_gate — 含 memory-os 源文件名的自引用强制拦截
+    # 根因（数据驱动，2026-05-09）：4 条 ac=0 噪声含 "retriever.py"/"config.py" + memory-os
+    #   内部概念（tunable/session_injected/oversample_factor），因 "用户"/"进程" 触发
+    #   DOMAIN_KW 误豁免 iter1202。memory-os 源文件名 + 内部术语共现 = 必定自引用。
+    if re.search(r'(?:retriever\.py|retriever_daemon|extractor\.py|config\.py)', summary) \
+       and re.search(r'(?:tunable|session_inject|oversample|_sessions_with|same_hash|TLB.*保护|'
+                     r'daemon.*崩溃|零知识注入|hook.*崩溃|chunk_recall|recall_trace)', summary):
+        return
     # iter1210: iterator_meta_narrative_gate — 迭代器自身 bug/fix 元叙述即使含领域词也拦截
     if _iter_match and re.search(r'(?:迭代器.*(?:逃逸|自记录|假阳性)|让迭代器|iterator.*gate.*逃)', summary):
         return
