@@ -2203,6 +2203,7 @@ def main():
             pass  # 预热失败不影响主流程
 
     # ── 迭代100：IPC 消息消费 + 过期清理（OS 类比：init 进程收割僵尸进程）──
+    _handoff_inject = ""  # iter1052: 子任务汇总，try 块外初始化防 NameError
     try:
         _ipc_conn = open_db()
         ensure_schema(_ipc_conn)
@@ -2215,6 +2216,31 @@ def main():
             dmesg_log(_ipc_conn, DMESG_INFO, "loader",
                       f"ipc: consumed={len(msgs)} expired={expired}",
                       session_id=_session_id, project=project)
+
+        # ── iter1052: task_handoff 消费 — 子 Agent 并行任务结果汇总 ──────────
+        # OS 类比：wait4() 收割子进程退出状态 + pdflush 刷入父进程地址空间
+        # 消费所有待处理的 task_handoff 消息，注入摘要到 context_text
+        _handoff_msgs = ipc_recv(_ipc_conn, "*", msg_type="task_handoff", limit=10)
+        _handoff_inject = ""
+        if _handoff_msgs:
+            _handoff_lines = ["【子任务完成汇总（并行 Agent 结果）】"]
+            for _hm in _handoff_msgs:
+                _hpayload = _hm.get("payload", {})
+                if isinstance(_hpayload, str):
+                    try:
+                        _hpayload = json.loads(_hpayload)
+                    except Exception:
+                        continue
+                _hdesc    = _hpayload.get("task_desc", "子任务")[:60]
+                _hsummary = _hpayload.get("summary",  "")[:150]
+                _handoff_lines.append(f"- {_hdesc}: {_hsummary}")
+            _handoff_inject = "\n".join(_handoff_lines)
+            if len(_handoff_inject) > 600:
+                _handoff_inject = _handoff_inject[:600] + "…"
+            dmesg_log(_ipc_conn, DMESG_INFO, "loader",
+                      f"task_handoff: {len(_handoff_msgs)} 子任务结果已收集",
+                      session_id=_session_id, project=project)
+
         _ipc_conn.commit()
         _ipc_conn.close()
     except Exception:
@@ -2272,6 +2298,11 @@ def main():
             _pt_path.write_text(json.dumps(_pt_data, ensure_ascii=False), encoding="utf-8")
         except Exception:
             pass  # page table 写入失败不影响 SessionStart
+
+    # ── iter1052: task_handoff 汇总注入 ──────────────────────────────────────
+    # 把子 Agent 完成的并行任务结果插到 context 顶部（高优先级，立即可见）
+    if _handoff_inject:
+        context_text = _handoff_inject + "\n\n" + context_text
 
     output = {
         "hookSpecificOutput": {

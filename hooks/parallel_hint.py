@@ -141,10 +141,14 @@ def main():
         task_count = _extract_task_count(prompt)
         reason_str = "、".join(reasons[:2])
 
+        # iter1052: 升级提示——明确指导子 Agent 把结果写入 memory-os
+        # 子 Agent 完成任务后调用 mcp__memory-os__memory_lookup 可读取其他子任务结果
+        # 主 session 通过 memory-os 检索汇总，无需等待所有子 Agent 完成
         notice = (
             f"[CFS] 检测到 {task_count} 个独立子任务（{reason_str}）。"
-            f"可用 Agent tool 并行执行，消除顺序等待。"
-            f"注意：只在任务间无数据依赖时并行。"
+            f"建议：用 Agent tool 并行执行各子任务；"
+            f"每个子 Agent 完成后将结论写入 memory-os（mcp__memory-os__write_memory），"
+            f"主 session 通过 memory_lookup 汇总结果。"
         )
 
         print(json.dumps({

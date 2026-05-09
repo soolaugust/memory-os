@@ -103,6 +103,17 @@
         ]
       },
       {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/task_result_collector.py\"",
+            "timeout": 10,
+            "async": true
+          }
+        ]
+      },
+      {
         "matcher": "*",
         "hooks": [
           {
