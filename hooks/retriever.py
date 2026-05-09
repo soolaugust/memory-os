@@ -3226,7 +3226,7 @@ def main():
             r'hard_suppressed|relevance_fallback|iter\d{3,4}|cooldown|bandwidth|'
             r'hard_deadline|scored|cands|FTS.*miss|BM25.*noise|'
             r'噪声率?|ac[=≥]\d+|\bac\b.{0,3}chunk|chunk.?type|selfref|gate|逃逸|垄断|注入率?|'
-            r'注入资格|\d+d\s*(?:cooldown|循环|窗口)|量化预期|suppress_final|'
+            r'注入资格|\d+d\s*(?:cooldown|循环|窗口)|量化[预：:].{0,4}|suppress_final|'
             r'token.?overlap|子串检测|LCS|dedup|去重|碎片拦截|写入门控|拦截率|'
             r'penalty|占比|阈值|(?:不)?触发|baseline|搭车|score\s*[=<>≥≤]|concentration)'
         )
